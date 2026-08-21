@@ -4,15 +4,16 @@ plugins {
 
 android {
     namespace 'io.github.xjc.jiagu'
-    compileSdk 35
+    compileSdk 36
+    ndkVersion "28.2.13676358"
 
     defaultConfig {
-        minSdk 26
-        targetSdk 35
+        minSdk 29
+        targetSdk 36
 
         externalNativeBuild {
             cmake {
-                cppFlags ""
+                cppFlags "-std=c++2a"
             }
         }
     }

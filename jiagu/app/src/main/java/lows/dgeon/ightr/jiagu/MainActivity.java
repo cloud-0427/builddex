@@ -11,7 +11,7 @@ public class MainActivity extends AppCompatActivity {
 
     // Used to load the 'jiagu' library on application startup.
     static {
-        System.loadLibrary("jiagu");
+        System.loadLibrary("testna");
     }
 
     private ActivityMainBinding binding;
