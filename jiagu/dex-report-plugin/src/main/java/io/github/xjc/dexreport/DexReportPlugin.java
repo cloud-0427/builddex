@@ -1,73 +1,86 @@
 package io.github.xjc.dexreport;
 
+import com.android.build.api.artifact.ScopedArtifact;
 import com.android.build.api.artifact.SingleArtifact;
 import com.android.build.api.variant.ApplicationAndroidComponentsExtension;
+import com.android.build.api.variant.ScopedArtifacts;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.tasks.TaskProvider;
 
 /**
- * DEX 报告插件，适配 Java 1.8。
+ * 加固插件核心逻辑：实现 Manifest 自动修改与产物拦截。
  */
 public final class DexReportPlugin implements Plugin<Project> {
 
     @Override
     public void apply(Project project) {
-        // 1. 注册扩展配置 'dexReport'
-        final DexReportExtension extension = project.getExtensions().create("dexReport", DexReportExtension.class);
-        // 设置默认挂载的任务前缀为 "assemble"
-        extension.getAttachToTask().convention("assemble");
-
-        project.getLogger().lifecycle("[DexReport] 插件已加载: {}", project.getPath());
+        project.getExtensions().create("dexReport", DexReportExtension.class);
 
         project.getPluginManager().withPlugin("com.android.application", ignored -> {
+            // 自动为宿主注入壳模块依赖
+            addJiaguRuntimeDependency(project);
+
             ApplicationAndroidComponentsExtension androidComponents =
                     project.getExtensions().getByType(ApplicationAndroidComponentsExtension.class);
 
             androidComponents.onVariants(androidComponents.selector().all(), variant -> {
                 final String variantName = variant.getName();
-                final String buildType = variant.getBuildType();
-                final String taskName = "report" + capitalize(variantName) + "Dex";
-
-                // 2. 注册 DEX 报告任务
-                TaskProvider<DexReportTask> reportTaskProvider = project.getTasks().register(taskName, DexReportTask.class, task -> {
-                    task.setGroup("dex report");
-                    task.setDescription("打印 " + variantName + " 的 DEX 临时位置和数量");
-                    task.getVariantName().set(variantName);
-                    task.getApkDirectory().set(
-                            variant.getArtifacts().get(SingleArtifact.APK.INSTANCE)
+                
+                // 1. 注册加固加密任务 (拦截 Classes)
+                String jiaguTaskName = "jiagu" + capitalize(variantName);
+                TaskProvider<JiaguTask> jiaguTaskProvider = project.getTasks().register(jiaguTaskName, JiaguTask.class, task -> {
+                    task.setGroup("jiagu");
+                    task.getAesKey().set("MY_SECURE_AES_KEY");
+                    task.getOutAssetsDir().set(
+                        project.getLayout().getBuildDirectory().dir("generated/jiagu/assets/" + variantName)
                     );
-                    task.getAppBuildDirectory().set(project.getLayout().getBuildDirectory());
                 });
 
-                // 3. 在项目评估完成后，根据用户配置决定是否自动挂载依赖
-                project.afterEvaluate(p -> {
-                    boolean shouldAutoRun = false;
-                    
-                    if (extension.getAutoRunBuildTypes().isPresent()) {
-                        if (extension.getAutoRunBuildTypes().get().contains(buildType)) {
-                            shouldAutoRun = true;
-                        }
-                    }
+                variant.getArtifacts().forScope(ScopedArtifacts.Scope.ALL)
+                        .use(jiaguTaskProvider)
+                        .toTransform(
+                            ScopedArtifact.CLASSES.INSTANCE,
+                            JiaguTask::getAllJars,
+                            JiaguTask::getAllDirectories,
+                            JiaguTask::getOutputJar
+                        );
 
-                    if (shouldAutoRun) {
-                        String prefix = extension.getAttachToTask().get();
-                        String targetTaskName = prefix + capitalize(variantName);
-                        
-                        // 寻找目标任务并挂载依赖
-                        p.getTasks().matching(t -> t.getName().equalsIgnoreCase(targetTaskName)).configureEach(t -> {
-                            t.dependsOn(reportTaskProvider);
-                        });
-                    }
-                });
+                // 2. 注入加固资产
+                variant.getSources().getAssets().addGeneratedSourceDirectory(
+                        jiaguTaskProvider,
+                        JiaguTask::getOutAssetsDir
+                );
+
+                // 3. 核心： Manifest 自动修改
+                String manifestTaskName = "modifyManifest" + capitalize(variantName);
+                TaskProvider<ManifestTransformerTask> manifestTaskProvider = 
+                    project.getTasks().register(manifestTaskName, ManifestTransformerTask.class);
+
+                // 拦截并修改合并后的 Manifest
+                variant.getArtifacts().use(manifestTaskProvider)
+                        .wiredWithFiles(
+                            ManifestTransformerTask::getMergedManifest,
+                            ManifestTransformerTask::getUpdatedManifest
+                        )
+                        .toTransform(SingleArtifact.MERGED_MANIFEST.INSTANCE);
             });
         });
     }
 
+    private void addJiaguRuntimeDependency(Project project) {
+        try {
+            Project runtimeProject = project.getRootProject().findProject(":jiagu-runtime");
+            if (runtimeProject != null) {
+                project.getDependencies().add("implementation", runtimeProject);
+            } else {
+                project.getDependencies().add("implementation", "io.github.xjc:jiagu-runtime:0.1.0");
+            }
+        } catch (Exception ignored) {}
+    }
+
     private static String capitalize(String value) {
-        if (value == null || value.isEmpty()) {
-            return value;
-        }
+        if (value == null || value.isEmpty()) return value;
         return Character.toUpperCase(value.charAt(0)) + value.substring(1);
     }
 }

@@ -26,4 +26,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Jiagu"
 include ':app'
+include ':jiagu-runtime'
 includeBuild 'dex-report-plugin'

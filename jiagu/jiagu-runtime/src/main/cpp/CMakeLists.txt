@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.10.2)
+project("jiagu-core")
+add_library(jiagu-core SHARED jiagu-core.cpp)
+find_library(log-lib log)
+find_library(android-lib android)
+target_link_libraries(jiagu-core ${log-lib} ${android-lib})

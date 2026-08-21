@@ -19,6 +19,7 @@ repositories {
 
 dependencies {
     compileOnly 'com.android.tools.build:gradle-api:9.3.1'
+    implementation 'com.android.tools:r8:8.3.37' // Use a version compatible with AGP 9.3.1 if possible, but 8.3.x is common
 }
 
 java {
