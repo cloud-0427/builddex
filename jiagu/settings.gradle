@@ -1,5 +1,7 @@
 pluginManagement {
     repositories {
+        // 本地开发时，从 publishToMavenLocal 的产物解析 Dex Report 插件。
+        mavenLocal()
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -15,7 +17,7 @@ plugins {
     id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
 }
 dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
     repositories {
         google()
         mavenCentral()
@@ -24,3 +26,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Jiagu"
 include ':app'
+includeBuild 'dex-report-plugin'

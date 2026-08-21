@@ -1,0 +1,50 @@
+plugins {
+    id 'java-gradle-plugin'
+    id 'maven-publish'
+}
+
+def jitPackGroup = System.getenv('GROUP')
+def jitPackArtifact = System.getenv('ARTIFACT')
+
+// 本地开发使用固定坐标；JitPack 构建时使用其注入的 GitHub 坐标和 Tag。
+group = jitPackGroup && jitPackArtifact
+        ? "${jitPackGroup}.${jitPackArtifact}"
+        : 'io.github.xjc'
+version = System.getenv('VERSION') ?: '0.1.0'
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    compileOnly 'com.android.tools.build:gradle-api:9.3.1'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+    withSourcesJar()
+}
+
+// 强制 Gradle 允许在 Java 8 项目中使用更高版本的 AGP 依赖进行编译
+configurations.compileClasspath {
+    attributes {
+        attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 17)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+gradlePlugin {
+    plugins {
+        dexReport {
+            id = 'io.github.xjc.dex-report'
+            implementationClass = 'io.github.xjc.dexreport.DexReportPlugin'
+            displayName = 'Android DEX Report Plugin'
+            description = 'Reports intermediate and packaged DEX files for Android variants.'
+        }
+    }
+}

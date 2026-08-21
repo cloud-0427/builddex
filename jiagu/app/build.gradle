@@ -1,5 +1,16 @@
 plugins {
     alias(libs.plugins.android.application)
+    id 'io.github.xjc.dex-report' version '0.1.0'
+}
+
+// app/build.gradle
+dexReport {
+    // 指定在哪些构建类型下自动运行。支持 "debug", "release" 等。
+    autoRunBuildTypes = ["debug","release"]
+
+    // 指定挂载的任务前缀。
+    // 支持 "assemble" (默认), "bundle" (生成AAB), "install" (安装) 等。
+    attachToTask = "assemble"
 }
 
 android {
