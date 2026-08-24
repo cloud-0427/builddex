@@ -33,3 +33,4 @@ google-services.json
 # Android Profiling
 *.hprof
 jiagu/.artifacts/
+jiagu/jiagu_keys.json

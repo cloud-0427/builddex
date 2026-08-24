@@ -27,7 +27,17 @@ import java.io.File;
 public abstract class ManifestTransformerTask extends DefaultTask {
 
     @Input
-    public abstract Property<String> getAesKey();
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getPrivateKey();
+
+    @Input
+    public abstract Property<String> getKeyUrl();
+
+    @Input
+    public abstract Property<String> getJsonKey();
+
+    @Input
+    public abstract Property<Integer> getExpiryDays();
 
     @InputFile
     public abstract RegularFileProperty getMergedManifest();
@@ -74,13 +84,23 @@ public abstract class ManifestTransformerTask extends DefaultTask {
             metaData.setAttribute("android:value", originalAppName);
             applicationTag.appendChild(metaData);
 
-            // 5. 注入 AES_KEY
-            Element aesMetaData = doc.createElement("meta-data");
-            aesMetaData.setAttribute("android:name", "AES_KEY");
-            aesMetaData.setAttribute("android:value", getAesKey().get());
-            applicationTag.appendChild(aesMetaData);
+            // 5. 注入密钥获取配置 (路径和 JSON 节点)
+            Element urlMetaData = doc.createElement("meta-data");
+            urlMetaData.setAttribute("android:name", "KEY_URL");
+            urlMetaData.setAttribute("android:value", getKeyUrl().get());
+            applicationTag.appendChild(urlMetaData);
+
+            Element keyMetaData = doc.createElement("meta-data");
+            keyMetaData.setAttribute("android:name", "JSON_KEY");
+            keyMetaData.setAttribute("android:value", getJsonKey().get());
+            applicationTag.appendChild(keyMetaData);
+
+            Element expiryMetaData = doc.createElement("meta-data");
+            expiryMetaData.setAttribute("android:name", "KEY_EXPIRY");
+            expiryMetaData.setAttribute("android:value", String.valueOf(getExpiryDays().get()));
+            applicationTag.appendChild(expiryMetaData);
             
-            getLogger().lifecycle("[Jiagu] Manifest 已修改: 入口 -> ProxyApplication, 记录原类名 -> {}, AES_KEY 已注入", originalAppName);
+            getLogger().lifecycle("[Jiagu] Manifest 已修改: 入口 -> ProxyApplication, 密钥注入已移除 (改用动态拉取模式)");
         }
 
         // 保存文件

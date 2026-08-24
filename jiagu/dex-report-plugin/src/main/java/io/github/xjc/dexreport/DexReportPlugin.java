@@ -15,7 +15,12 @@ public final class DexReportPlugin implements Plugin<Project> {
 
     @Override
     public void apply(Project project) {
-        project.getExtensions().create("dexReport", DexReportExtension.class);
+        DexReportExtension extension = project.getExtensions().create("dexReport", DexReportExtension.class);
+        
+        // 设置默认值 (Conventions)
+        extension.getEnableMultiVersion().convention(true);
+        extension.getPublicKeyJsonKey().convention("akmKeys");
+        extension.getKeyExpiryDays().convention(2);
 
         project.getPluginManager().withPlugin("com.android.application", ignored -> {
             // 自动为宿主注入壳模块依赖
@@ -31,7 +36,17 @@ public final class DexReportPlugin implements Plugin<Project> {
                 String jiaguTaskName = "jiagu" + capitalize(variantName);
                 TaskProvider<JiaguTask> jiaguTaskProvider = project.getTasks().register(jiaguTaskName, JiaguTask.class, task -> {
                     task.setGroup("jiagu");
-                    task.getAesKey().set(project.getExtensions().getByType(DexReportExtension.class).getAesKey());
+                    DexReportExtension ext = project.getExtensions().getByType(DexReportExtension.class);
+                    task.getPublicKeyPath().set(ext.getPublicKeyPath());
+                    task.getPublicKeyJsonKey().set(ext.getPublicKeyJsonKey());
+                    task.getEnableMultiVersion().set(ext.getEnableMultiVersion());
+                    
+                    // 自动获取当前变体的 versionCode
+                    task.getVersionCode().set(variant.getOutputs().get(0).getVersionCode());
+                    task.getKeyExpiryDays().set(ext.getKeyExpiryDays());
+                    
+                    task.getKeysFile().set(project.getRootProject().getLayout().getProjectDirectory().file("jiagu_keys.json"));
+
                     task.getOutAssetsDir().set(
                         project.getLayout().getBuildDirectory().dir("generated/jiagu/assets/" + variantName)
                     );
@@ -56,7 +71,11 @@ public final class DexReportPlugin implements Plugin<Project> {
                 String manifestTaskName = "modifyManifest" + capitalize(variantName);
                 TaskProvider<ManifestTransformerTask> manifestTaskProvider = 
                     project.getTasks().register(manifestTaskName, ManifestTransformerTask.class, task -> {
-                        task.getAesKey().set(project.getExtensions().getByType(DexReportExtension.class).getAesKey());
+                        task.getPrivateKey().set(jiaguTaskProvider.flatMap(JiaguTask::getPrivateKeyForManifest));
+                        DexReportExtension ext = project.getExtensions().getByType(DexReportExtension.class);
+                        task.getKeyUrl().set(ext.getPublicKeyPath());
+                        task.getJsonKey().set(ext.getPublicKeyJsonKey());
+                        task.getExpiryDays().set(ext.getKeyExpiryDays());
                     });
 
                 // 拦截并修改合并后的 Manifest

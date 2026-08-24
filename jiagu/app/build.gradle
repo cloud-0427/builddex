@@ -11,9 +11,9 @@ dexReport {
     // 指定挂载的任务前缀。
     // 支持 "assemble" (默认), "bundle" (生成AAB), "install" (安装) 等。
     attachToTask = "assemble"
-    
-    // 设置加固加密使用的 AES 密钥
-    aesKey = "MY_SECURE_AES_KEY"
+
+    publicKeyPath = "https://game-cdn-a.acmemob.com/bc_androidgoogle.json"
+    publicKeyJsonKey = "apKeys"
 }
 
 android {
@@ -25,8 +25,8 @@ android {
         applicationId "lows.dgeon.ightr.jiagu"
         minSdk 29
         targetSdk 36
-        versionCode 1
-        versionName "1.0"
+        versionCode 3
+        versionName "1.0.3"
 
         multiDexEnabled false
 

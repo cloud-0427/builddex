@@ -38,7 +38,23 @@ public abstract class DexReportExtension {
     public abstract Property<String> getAttachToTask();
 
     /**
-     * 加固使用的 AES 密钥。
+     * 公钥获取路径（支持 http://, https:// 或本地文件路径）。
      */
-    public abstract Property<String> getAesKey();
+    public abstract Property<String> getPublicKeyPath();
+
+    /**
+     * 公钥所在的 JSON 根对象 Key 名。
+     */
+    public abstract Property<String> getPublicKeyJsonKey();
+
+    /**
+     * 是否启用多版本支持。如果为 true，将根据 versionCode 从 JSON 中查找对应公钥。
+     */
+    public abstract Property<Boolean> getEnableMultiVersion();
+
+    /**
+     * 密钥有效期（天），默认 2 天。
+     */
+    public abstract Property<Integer> getKeyExpiryDays();
+
 }
