@@ -34,7 +34,6 @@ import com.android.tools.r8.OutputMode;
 
 import org.gradle.api.tasks.Internal;
 import java.security.*;
-import java.util.Base64;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
@@ -69,9 +68,6 @@ public abstract class JiaguTask extends DefaultTask {
     @Input
     public abstract Property<Integer> getKeyExpiryDays();
 
-    @Internal
-    public abstract Property<String> getPrivateKeyForManifest();
-
     @InputFiles
     public abstract ListProperty<RegularFile> getAllJars();
 
@@ -81,22 +77,23 @@ public abstract class JiaguTask extends DefaultTask {
     @Internal
     public abstract RegularFileProperty getKeysFile();
 
+    @Internal
+    public abstract DirectoryProperty getNdkDirectory();
+
     @OutputFile
     public abstract RegularFileProperty getOutputJar();
 
     @OutputDirectory
-    public abstract DirectoryProperty getOutAssetsDir();
+    public abstract DirectoryProperty getOutJniLibsDir();
 
     @TaskAction
     public void execute() throws IOException {
         int versionCode = getVersionCode().get();
-        // 1. 获取或生成 Session Key
+        // 生成或复用 Session Key，仅用于构建期加密，不写入 Manifest。
         byte[] sessionKey = handleKeyManagement(versionCode);
-        
+
         File outputJarFile = getOutputJar().get().getAsFile();
-        File assetsDir = getOutAssetsDir().get().getAsFile();
-        if (!assetsDir.exists()) assetsDir.mkdirs();
-        File payloadFile = new File(assetsDir, "jiagu_data.bin");
+        File jniLibsDir = getOutJniLibsDir().get().getAsFile();
 
         // ... 省略部分中间 JAR 处理逻辑 (与之前相同) ...
 
@@ -158,22 +155,53 @@ public abstract class JiaguTask extends DefaultTask {
                 // 按照文件名排序，确保 classes.dex, classes2.dex 等顺序一致
                 Arrays.sort(dexFiles, Comparator.comparing(File::getName));
                 
-                try (FileOutputStream fos = new FileOutputStream(payloadFile)) {
-                    // 写入 DEX 文件数量 (4 bytes)
-                    fos.write(intToBytes(dexFiles.length));
+                // 先生成与 ABI 无关的加密载荷，再为每个 ABI 链接成真实 ELF。
+                File tempPayload = File.createTempFile("jiagu_payload", ".bin");
+                try (FileOutputStream fos = new FileOutputStream(tempPayload)) {
+                    // 1. 写入魔数
+                    fos.write("JAG\0".getBytes(StandardCharsets.UTF_8));
                     
+                    // 2. 写入混淆元数据与主体 (逻辑保持之前实现的元数据加密+随机填充不变)
+                    java.util.List<byte[]> metaEntries = new java.util.ArrayList<>();
+                    long currentOffset = 0;
+                    java.io.ByteArrayOutputStream bodyStream = new java.io.ByteArrayOutputStream();
+                    SecureRandom random = new SecureRandom();
+
                     for (File dexFile : dexFiles) {
+                        byte[] padding = new byte[8192 + random.nextInt(8192)]; // 适度填充
+                        random.nextBytes(padding);
+                        bodyStream.write(padding);
+                        currentOffset += padding.length;
+
                         byte[] dexData = Files.readAllBytes(dexFile.toPath());
                         byte[] encryptedDex = encrypt(dexData, sessionKey);
                         
-                        // 写入当前加密 DEX 的长度 (4 bytes)
-                        fos.write(intToBytes(encryptedDex.length));
-                        // 写入加密 DEX 数据
-                        fos.write(encryptedDex);
-                        
-                        getLogger().lifecycle("[Jiagu] 已使用 AES-GCM 加密并打包: {} ({} bytes)", dexFile.getName(), encryptedDex.length);
+                        java.nio.ByteBuffer entry = java.nio.ByteBuffer.allocate(8);
+                        entry.putInt((int)currentOffset);
+                        entry.putInt(encryptedDex.length);
+                        metaEntries.add(entry.array());
+
+                        bodyStream.write(encryptedDex);
+                        currentOffset += encryptedDex.length;
                     }
+
+                    java.nio.ByteBuffer metaBlock = java.nio.ByteBuffer.allocate(4 + metaEntries.size() * 8);
+                    metaBlock.putInt(dexFiles.length);
+                    for (byte[] e : metaEntries) metaBlock.put(e);
+
+                    byte[] encryptedMeta = encrypt(metaBlock.array(), sessionKey);
+                    fos.write(intToBytes(encryptedMeta.length));
+                    fos.write(encryptedMeta);
+                    fos.write(bodyStream.toByteArray());
                 }
+
+                try {
+                    buildPayloadLibraries(tempPayload, jniLibsDir);
+                } finally {
+                    Files.deleteIfExists(tempPayload.toPath());
+                }
+
+                getLogger().lifecycle("[Jiagu] 加密载荷 ELF 构建成功: liblog_ext.so 已生成至四个 ABI 目录");
             } else {
                 throw new IOException("D8 failed to produce any DEX files");
             }
@@ -186,8 +214,8 @@ public abstract class JiaguTask extends DefaultTask {
             tempBusinessJar.delete();
         }
         
-        getLogger().lifecycle("[Jiagu] 任务完成。输出: {}, 加密包: {}", 
-                outputJarFile.getName(), payloadFile.getName());
+        getLogger().lifecycle("[Jiagu] 任务完成。输出: {}, 加密包目录: {}",
+                outputJarFile.getName(), jniLibsDir.getName());
     }
 
     private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos, String name, byte[] data, Set<String> processedNames) throws IOException {
@@ -224,6 +252,144 @@ public abstract class JiaguTask extends DefaultTask {
             }
         }
         directory.delete();
+    }
+
+    private void buildPayloadLibraries(File payloadFile, File jniLibsDir) throws IOException {
+        File toolchainBin = findToolchainBin(getNdkDirectory().get().getAsFile());
+        boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        File clang = new File(toolchainBin, windows ? "clang.exe" : "clang");
+        if (!clang.isFile()) {
+            throw new IOException("NDK Clang not found: " + clang.getAbsolutePath());
+        }
+
+        String[][] abiTargets = {
+                {"armeabi-v7a", "armv7a-linux-androideabi29", "%progbits"},
+                {"arm64-v8a", "aarch64-linux-android29", "%progbits"},
+                {"x86", "i686-linux-android29", "@progbits"},
+                {"x86_64", "x86_64-linux-android29", "@progbits"}
+        };
+
+        File workRoot = new File(getTemporaryDir(), "payload-elf");
+        deleteDirectory(workRoot);
+        if (!workRoot.mkdirs() && !workRoot.isDirectory()) {
+            throw new IOException("Failed to create ELF work directory: " + workRoot);
+        }
+
+        try {
+            for (String[] abiTarget : abiTargets) {
+                String abi = abiTarget[0];
+                File abiWorkDir = new File(workRoot, abi);
+                if (!abiWorkDir.mkdirs() && !abiWorkDir.isDirectory()) {
+                    throw new IOException("Failed to create ABI work directory: " + abiWorkDir);
+                }
+
+                File wrapperSource = new File(abiWorkDir, "payload_wrapper.c");
+                try (InputStream wrapper = JiaguTask.class.getResourceAsStream("/elf-wrapper/payload_wrapper.c")) {
+                    if (wrapper == null) {
+                        throw new IOException("Missing plugin resource: elf-wrapper/payload_wrapper.c");
+                    }
+                    Files.copy(wrapper, wrapperSource.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+
+                File assemblySource = new File(abiWorkDir, "payload.S");
+                String payloadPath = payloadFile.getAbsolutePath()
+                        .replace("\\", "/")
+                        .replace("\"", "\\\"");
+                String assembly =
+                        ".section .jg_payload,\"a\"," + abiTarget[2] + "\n" +
+                        ".balign 16\n" +
+                        ".global jiagu_payload_start\n" +
+                        ".hidden jiagu_payload_start\n" +
+                        "jiagu_payload_start:\n" +
+                        ".incbin \"" + payloadPath + "\"\n" +
+                        ".global jiagu_payload_end\n" +
+                        ".hidden jiagu_payload_end\n" +
+                        "jiagu_payload_end:\n";
+                Files.write(assemblySource.toPath(), assembly.getBytes(StandardCharsets.UTF_8));
+
+                File abiDir = new File(jniLibsDir, abi);
+                if (!abiDir.mkdirs() && !abiDir.isDirectory()) {
+                    throw new IOException("Failed to create JNI output directory: " + abiDir);
+                }
+                File outputSo = new File(abiDir, "liblog_ext.so");
+
+                java.util.List<String> command = new java.util.ArrayList<>();
+                command.add(clang.getAbsolutePath());
+                command.add("--target=" + abiTarget[1]);
+                command.add("-fPIC");
+                command.add("-fvisibility=hidden");
+                command.add("-shared");
+                command.add("-nostdlib");
+                command.add(wrapperSource.getAbsolutePath());
+                command.add(assemblySource.getAbsolutePath());
+                command.add("-Wl,-soname,liblog_ext.so");
+                command.add("-Wl,--build-id=none");
+                command.add("-Wl,--no-gc-sections");
+                command.add("-Wl,-z,max-page-size=16384");
+                command.add("-o");
+                command.add(outputSo.getAbsolutePath());
+
+                runCommand(command, abiWorkDir, "build payload ELF for " + abi);
+                verifyElfHeader(outputSo);
+                getLogger().lifecycle("[Jiagu] 已生成真实 ELF: {} ({} bytes)", abi, outputSo.length());
+            }
+        } finally {
+            deleteDirectory(workRoot);
+        }
+    }
+
+    private File findToolchainBin(File ndkDirectory) throws IOException {
+        File prebuiltRoot = new File(ndkDirectory, "toolchains/llvm/prebuilt");
+        File[] candidates = prebuiltRoot.listFiles(File::isDirectory);
+        if (candidates == null || candidates.length == 0) {
+            throw new IOException("NDK LLVM toolchain not found under: " + prebuiltRoot);
+        }
+
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        String preferredPrefix = osName.contains("win") ? "windows-" :
+                (osName.contains("mac") ? "darwin-" : "linux-");
+        for (File candidate : candidates) {
+            if (candidate.getName().startsWith(preferredPrefix)) {
+                return new File(candidate, "bin");
+            }
+        }
+        return new File(candidates[0], "bin");
+    }
+
+    private void runCommand(java.util.List<String> command, File workingDirectory, String description) throws IOException {
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.directory(workingDirectory);
+        processBuilder.redirectErrorStream(true);
+        Process process = processBuilder.start();
+        String output;
+        try (InputStream input = process.getInputStream()) {
+            output = new String(readStream(input), StandardCharsets.UTF_8);
+        }
+
+        try {
+            int exitCode = process.waitFor();
+            if (exitCode != 0) {
+                throw new IOException("Failed to " + description + " (exit " + exitCode + "):\n" + output);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while trying to " + description, e);
+        }
+
+        if (!output.trim().isEmpty()) {
+            getLogger().info("[Jiagu] {} output:\n{}", description, output.trim());
+        }
+    }
+
+    private void verifyElfHeader(File elfFile) throws IOException {
+        byte[] header = new byte[4];
+        try (InputStream input = Files.newInputStream(elfFile.toPath())) {
+            int read = input.read(header);
+            if (read != header.length ||
+                    header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F') {
+                throw new IOException("Generated payload library is not a valid ELF: " + elfFile);
+            }
+        }
     }
 
     private byte[] handleKeyManagement(int versionCode) {
@@ -267,7 +433,6 @@ public abstract class JiaguTask extends DefaultTask {
                         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(masterKey, "AES"), new GCMParameterSpec(128, nonce));
                         byte[] sessionKey = cipher.doFinal(bksBlob);
 
-                        getPrivateKeyForManifest().set(Base64.getEncoder().encodeToString(sessionKey));
                         getLogger().lifecycle("[Jiagu] 成功复用版本 {} 的现有密钥。", versionCode);
                         
                         getLogger().lifecycle("**************************************************");
@@ -328,8 +493,6 @@ public abstract class JiaguTask extends DefaultTask {
             getLogger().lifecycle("[Jiagu] 请将以下 JSON 结构部署到您的密钥分发服务器 ({} 节点):", jsonKey);
             getLogger().lifecycle(newEntry);
             getLogger().lifecycle("**************************************************");
-            
-            getPrivateKeyForManifest().set(Base64.getEncoder().encodeToString(sessionKey));
             
             return sessionKey;
         } catch (Exception e) {

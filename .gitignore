@@ -34,3 +34,4 @@ google-services.json
 *.hprof
 jiagu/.artifacts/
 jiagu/jiagu_keys.json
+jiagu/dex-report-plugin/bin/main/

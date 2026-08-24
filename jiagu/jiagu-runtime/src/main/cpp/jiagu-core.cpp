@@ -2,9 +2,9 @@
 #include <string>
 #include <vector>
 #include <android/log.h>
-#include <android/asset_manager.h>
-#include <android/asset_manager_jni.h>
 #include <cstring>
+#include <cstdint>
+#include <dlfcn.h>
 
 #define TAG "Jiagu_Native"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -13,8 +13,8 @@
 static jobject gRealApp = nullptr;
 
 // 辅助函数：使用 JNI 调用 Java 的 AES-GCM 解密
-void decrypt_aes_gcm(JNIEnv *env, unsigned char* data, size_t size, const std::string& key_base64) {
-    if (key_base64.empty() || size <= 12) return;
+bool decrypt_aes_gcm(JNIEnv *env, unsigned char* data, size_t size, const std::string& key_base64) {
+    if (key_base64.empty() || size < 28) return false;
 
     // 1. 获取 IV (前 12 字节)
     jbyteArray iv_array = env->NewByteArray(12);
@@ -59,7 +59,7 @@ void decrypt_aes_gcm(JNIEnv *env, unsigned char* data, size_t size, const std::s
         LOGE("Jiagu_Native: AES-GCM decryption failed (likely bad key/tag)");
         env->ExceptionDescribe();
         env->ExceptionClear();
-        return;
+        return false;
     }
 
     // 5. 将结果拷回原内存
@@ -67,6 +67,7 @@ void decrypt_aes_gcm(JNIEnv *env, unsigned char* data, size_t size, const std::s
     jsize db_len = env->GetArrayLength(decrypted_bytes);
     std::memcpy(data, db, db_len);
     env->ReleaseByteArrayElements(decrypted_bytes, db, 0);
+    return true;
 }
 
 // 辅助函数：十六进制字符串转字节数组
@@ -261,44 +262,136 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         return;
     }
 
-    // 3. 解密 DEX 加载与注入
-    jmethodID get_assets_method = env->GetMethodID(context_class, "getAssets", "()Landroid/content/res/AssetManager;");
-    jobject asset_manager_obj = env->CallObjectMethod(context, get_assets_method);
-    AAssetManager *mgr = AAssetManager_fromJava(env, asset_manager_obj);
-    AAsset *asset = AAssetManager_open(mgr, "jiagu_data.bin", AASSET_MODE_BUFFER);
+    // 3. 由 Android linker 加载真实 ELF，并从其只读自定义段取得加密载荷。
+    using payload_address_fn = const uint8_t* (*)();
+    using payload_size_fn = size_t (*)();
 
-    if (asset) {
-        size_t total_size = AAsset_getLength(asset);
-        std::vector<char> full_buffer(total_size);
-        AAsset_read(asset, full_buffer.data(), total_size);
-        AAsset_close(asset);
+    void* payload_handle = dlopen("liblog_ext.so", RTLD_NOW | RTLD_LOCAL);
+    if (!payload_handle) {
+        LOGE("Jiagu_Native: Failed to load payload ELF: %s", dlerror());
+        return;
+    }
 
-        size_t offset = 0;
-        int dex_count = read_int_be(full_buffer.data(), offset);
-        jclass byte_buffer_class = env->FindClass("java/nio/ByteBuffer");
-        jmethodID allocate_direct = env->GetStaticMethodID(byte_buffer_class, "allocateDirect", "(I)Ljava/nio/ByteBuffer;");
-        jobjectArray bb_array = env->NewObjectArray(dex_count, byte_buffer_class, nullptr);
+    auto payload_address = reinterpret_cast<payload_address_fn>(
+            dlsym(payload_handle, "jg_payload_address"));
+    auto payload_size = reinterpret_cast<payload_size_fn>(
+            dlsym(payload_handle, "jg_payload_size"));
+    if (!payload_address || !payload_size) {
+        LOGE("Jiagu_Native: Payload ELF exports are missing: %s", dlerror());
+        dlclose(payload_handle);
+        return;
+    }
 
-        for (int i = 0; i < dex_count; ++i) {
-            int dex_size = read_int_be(full_buffer.data(), offset);
-            unsigned char* dex_ptr = reinterpret_cast<unsigned char*>(full_buffer.data() + offset);
-            decrypt_aes_gcm(env, dex_ptr, dex_size, private_key);
-            int plain_size = dex_size - 12 - 16;
-            jobject bb = env->CallStaticObjectMethod(byte_buffer_class, allocate_direct, (jint)plain_size);
-            std::memcpy(env->GetDirectBufferAddress(bb), dex_ptr, plain_size);
-            env->SetObjectArrayElement(bb_array, i, bb);
-            offset += dex_size;
+    const uint8_t* payload_source = payload_address();
+    size_t payload_length = payload_size();
+    if (!payload_source || payload_length < 8) {
+        LOGE("Jiagu_Native: Payload ELF returned invalid data");
+        dlclose(payload_handle);
+        return;
+    }
+
+    // ELF 段是只读映射；复制后才能在缓冲区内执行解密。
+    std::vector<char> full_buffer(
+            reinterpret_cast<const char*>(payload_source),
+            reinterpret_cast<const char*>(payload_source) + payload_length);
+    dlclose(payload_handle);
+
+    if (std::memcmp(full_buffer.data(), "JAG\0", 4) != 0) {
+        LOGE("Jiagu_Native: Invalid payload magic");
+        return;
+    }
+
+    size_t offset = 4;
+    int meta_size = read_int_be(full_buffer.data(), offset);
+    if (meta_size < 28 || static_cast<size_t>(meta_size) > full_buffer.size() - offset) {
+        LOGE("Jiagu_Native: Invalid metadata size: %d", meta_size);
+        return;
+    }
+
+    unsigned char* meta_ptr = reinterpret_cast<unsigned char*>(full_buffer.data() + offset);
+    if (!decrypt_aes_gcm(env, meta_ptr, static_cast<size_t>(meta_size), private_key)) {
+        LOGE("Jiagu_Native: Failed to decrypt payload metadata");
+        return;
+    }
+
+    size_t meta_plain_size = static_cast<size_t>(meta_size) - 12 - 16;
+    if (meta_plain_size < 4) {
+        LOGE("Jiagu_Native: Decrypted metadata is too small");
+        return;
+    }
+
+    unsigned char* meta_data_ptr = meta_ptr;
+    size_t meta_offset = 0;
+    int dex_count = (meta_data_ptr[0] << 24) | (meta_data_ptr[1] << 16) |
+                    (meta_data_ptr[2] << 8) | meta_data_ptr[3];
+    meta_offset += 4;
+    if (dex_count <= 0 || dex_count > 128 ||
+            meta_plain_size < 4 + static_cast<size_t>(dex_count) * 8) {
+        LOGE("Jiagu_Native: Invalid DEX count: %d", dex_count);
+        return;
+    }
+
+    offset += static_cast<size_t>(meta_size);
+    size_t body_start = offset;
+    size_t body_size = full_buffer.size() - body_start;
+
+    jclass byte_buffer_class = env->FindClass("java/nio/ByteBuffer");
+    jmethodID allocate_direct = env->GetStaticMethodID(
+            byte_buffer_class, "allocateDirect", "(I)Ljava/nio/ByteBuffer;");
+    jobjectArray bb_array = env->NewObjectArray(dex_count, byte_buffer_class, nullptr);
+
+    for (int i = 0; i < dex_count; ++i) {
+        int dex_offset = (meta_data_ptr[meta_offset] << 24) |
+                         (meta_data_ptr[meta_offset + 1] << 16) |
+                         (meta_data_ptr[meta_offset + 2] << 8) |
+                         meta_data_ptr[meta_offset + 3];
+        meta_offset += 4;
+        int dex_size = (meta_data_ptr[meta_offset] << 24) |
+                       (meta_data_ptr[meta_offset + 1] << 16) |
+                       (meta_data_ptr[meta_offset + 2] << 8) |
+                       meta_data_ptr[meta_offset + 3];
+        meta_offset += 4;
+
+        if (dex_offset < 0 || dex_size < 28 ||
+                static_cast<size_t>(dex_offset) > body_size ||
+                static_cast<size_t>(dex_size) > body_size - static_cast<size_t>(dex_offset)) {
+            LOGE("Jiagu_Native: Invalid DEX entry %d (offset=%d, size=%d)",
+                 i, dex_offset, dex_size);
+            return;
         }
 
-        jclass mem_loader_class = env->FindClass("dalvik/system/InMemoryDexClassLoader");
-        jmethodID loader_init = env->GetMethodID(mem_loader_class, "<init>", "([Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
-        jclass app_class = env->GetObjectClass(thiz);
-        jmethodID get_cl = env->GetMethodID(app_class, "getClassLoader", "()Ljava/lang/ClassLoader;");
-        jobject sys_cl = env->CallObjectMethod(thiz, get_cl);
-        jobject mem_cl = env->NewObject(mem_loader_class, loader_init, bb_array, sys_cl);
-        inject_dex_elements(env, sys_cl, mem_cl);
-        LOGD("DEX Injection from JNI successful");
+        unsigned char* dex_ptr = reinterpret_cast<unsigned char*>(
+                full_buffer.data() + body_start + static_cast<size_t>(dex_offset));
+        if (!decrypt_aes_gcm(env, dex_ptr, static_cast<size_t>(dex_size), private_key)) {
+            LOGE("Jiagu_Native: Failed to decrypt DEX entry %d", i);
+            return;
+        }
+
+        int plain_size = dex_size - 12 - 16;
+        jobject bb = env->CallStaticObjectMethod(
+                byte_buffer_class, allocate_direct, static_cast<jint>(plain_size));
+        if (!bb) {
+            LOGE("Jiagu_Native: Failed to allocate DEX buffer %d", i);
+            return;
+        }
+        void* direct_buffer = env->GetDirectBufferAddress(bb);
+        if (!direct_buffer) {
+            LOGE("Jiagu_Native: Failed to access DEX buffer %d", i);
+            return;
+        }
+        std::memcpy(direct_buffer, dex_ptr, static_cast<size_t>(plain_size));
+        env->SetObjectArrayElement(bb_array, i, bb);
     }
+
+    jclass mem_loader_class = env->FindClass("dalvik/system/InMemoryDexClassLoader");
+    jmethodID loader_init = env->GetMethodID(
+            mem_loader_class, "<init>", "([Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
+    jclass app_class = env->GetObjectClass(thiz);
+    jmethodID get_cl = env->GetMethodID(app_class, "getClassLoader", "()Ljava/lang/ClassLoader;");
+    jobject sys_cl = env->CallObjectMethod(thiz, get_cl);
+    jobject mem_cl = env->NewObject(mem_loader_class, loader_init, bb_array, sys_cl);
+    inject_dex_elements(env, sys_cl, mem_cl);
+    LOGD("DEX Injection from payload ELF successful");
 
     // 4. 实例化 Real Application 并替换
     std::string real_app_path = real_app_name;

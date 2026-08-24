@@ -27,10 +27,6 @@ import java.io.File;
 public abstract class ManifestTransformerTask extends DefaultTask {
 
     @Input
-    @org.gradle.api.tasks.Optional
-    public abstract Property<String> getPrivateKey();
-
-    @Input
     public abstract Property<String> getKeyUrl();
 
     @Input
