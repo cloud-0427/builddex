@@ -63,7 +63,12 @@ public abstract class ManifestTransformerTask extends DefaultTask {
                 getLogger().lifecycle("[Jiagu] 已移除 android:appComponentFactory");
             }
 
-            // 4. 注入 REAL_APPLICATION 记录
+            // 4. 强力清理：移除所有 androidx.startup 和 profileinstaller 的组件
+            // 这些组件会在启动时尝试读取 classes.dex，导致在加固环境下报警
+            cleanUpComponent(applicationTag, "provider", "androidx.startup.InitializationProvider");
+            cleanUpComponent(applicationTag, "receiver", "androidx.profileinstaller.ProfileInstallReceiver");
+
+            // 5. 注入 REAL_APPLICATION 记录
             Element metaData = doc.createElement("meta-data");
             metaData.setAttribute("android:name", "REAL_APPLICATION");
             metaData.setAttribute("android:value", originalAppName);
@@ -84,5 +89,18 @@ public abstract class ManifestTransformerTask extends DefaultTask {
         DOMSource source = new DOMSource(doc);
         StreamResult result = new StreamResult(getUpdatedManifest().get().getAsFile());
         transformer.transform(source, result);
+    }
+
+    private void cleanUpComponent(Element applicationTag, String tagName, String className) {
+        NodeList nodes = applicationTag.getElementsByTagName(tagName);
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Element element = (Element) nodes.item(i);
+            if (className.equals(element.getAttribute("android:name"))) {
+                applicationTag.removeChild(element);
+                getLogger().lifecycle("[Jiagu] 已从 Manifest 移除组件: " + className);
+                cleanUpComponent(applicationTag, tagName, className);
+                return;
+            }
+        }
     }
 }

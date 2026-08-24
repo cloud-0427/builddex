@@ -14,12 +14,10 @@ import org.gradle.api.tasks.OutputDirectory;
 import org.gradle.api.tasks.TaskAction;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Set;
@@ -29,12 +27,10 @@ import java.util.jar.JarOutputStream;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.List;
 
 import com.android.tools.r8.D8;
 import com.android.tools.r8.D8Command;
 import com.android.tools.r8.OutputMode;
-import com.android.tools.r8.origin.Origin;
 
 /**
  * 核心加固打包任务：
@@ -160,18 +156,10 @@ public abstract class JiaguTask extends DefaultTask {
             return;
         }
 
-        // 必须保留在主 DEX (壳) 中的包名白名单
-        // 1. 壳程序自身代码
-        // 2. Androidx Startup (组件初始化框架)
-        // 3. Androidx Core (包含 ComponentFactory 等系统底层回调)
-        // 4. Androidx Lifecycle (某些初始化器依赖于此)
-        // 5. Androidx Multidex (如果使用了的话)
-        boolean shouldKeepInShell = name.startsWith("io/github/xjc/jiagu/") ||
-                                   name.contains("/R$") || name.endsWith("/R.class") ||
-                                   name.startsWith("androidx/startup/") ||
-                                   name.startsWith("androidx/core/") ||
-                                   name.startsWith("androidx/lifecycle/") ||
-                                   name.startsWith("androidx/multidex/");
+        // 适度回调：保留 R 类在壳中。
+        // 完全移除 R 类可能导致某些系统资源（如图标、主题）在壳 Application 阶段解析失败。
+        boolean shouldKeepInShell = name.startsWith("io/github/xjc/jiagu/") || 
+                                   name.contains("/R$") || name.endsWith("/R.class");
 
         if (shouldKeepInShell || !name.endsWith(".class")) {
             // 壳程序代码、白名单代码 或 非代码资源：透传到输出 JAR (壳 JAR)
