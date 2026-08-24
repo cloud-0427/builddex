@@ -40,13 +40,15 @@ public class NetworkHelper {
      * 核心逻辑：获取私钥（带缓存加密与过期检查）
      */
     public static String getSecureKey(android.content.Context context, String urlString, String jsonKey, int versionCode) {
-        File cacheFile = new File(context.getFilesDir(), ".jiagu_v" + versionCode + ".enc");
+        // 缓存文件名现在同时依赖于版本号和 JSON 节点名，确保配置变更时缓存自动失效
+        String cacheName = String.format(".jiagu_v%d_%d.enc", versionCode, jsonKey.hashCode());
+        File cacheFile = new File(context.getFilesDir(), cacheName);
         
         // 1. 尝试从缓存读取
         if (cacheFile.exists()) {
             String cachedKey = readAndDecryptCache(cacheFile);
             if (cachedKey != null) {
-                Log.d(TAG, "Secure cache hit for version " + versionCode);
+                Log.d(TAG, "Secure cache hit for version " + versionCode + " with key " + jsonKey);
                 return cachedKey;
             }
             Log.w(TAG, "Cache invalid or expired. Re-fetching...");
@@ -170,23 +172,33 @@ public class NetworkHelper {
                 byte[] buf = new byte[8192];
                 int len;
                 while ((len = is.read(buf)) != -1) bos.write(buf, 0, len);
-                String json = new String(bos.toByteArray(), StandardCharsets.UTF_8);
+                String jsonStr = new String(bos.toByteArray(), StandardCharsets.UTF_8);
 
-                // 解析工业级 KMS 结构
-                String versionPattern = "\"" + versionCode + "\":\\s*\\{([^}]+)\\}";
-                java.util.regex.Matcher m = java.util.regex.Pattern.compile(versionPattern, java.util.regex.Pattern.DOTALL).matcher(json);
-                if (m.find()) {
-                    String body = m.group(1);
-                    String salt = extractField(body, "salt");
-                    String nonce = extractField(body, "nonce");
-                    String bksBlob = extractField(body, "bksBlob");
-                    
-                    if (salt != null && nonce != null && bksBlob != null) {
-                        // 返回复合格式: salt|nonce|bksBlob
-                        return salt + "|" + nonce + "|" + bksBlob;
-                    }
-                } else {
-                    Log.w(TAG, "Version " + versionCode + " not found in JSON response");
+                org.json.JSONObject root = new org.json.JSONObject(jsonStr);
+
+                // 1. 获取指定的业务组节点
+                if (!root.has(jsonKey)) {
+                    Log.e(TAG, "CRITICAL: Root key '" + jsonKey + "' not found in JSON response.");
+                    return null;
+                }
+                org.json.JSONObject group = root.getJSONObject(jsonKey);
+
+                // 2. 获取版本节点
+                String vStr = String.valueOf(versionCode);
+                if (!group.has(vStr)) {
+                    Log.e(TAG, "CRITICAL: Version '" + vStr + "' not found under key '" + jsonKey + "'.");
+                    return null;
+                }
+                org.json.JSONObject versionBlock = group.getJSONObject(vStr);
+
+                // 3. 提取字段并返回
+                String salt = versionBlock.getString("salt");
+                String nonce = versionBlock.getString("nonce");
+                String bksBlob = versionBlock.getString("bksBlob");
+                
+                if (salt != null && nonce != null && bksBlob != null) {
+                    Log.d(TAG, "Successfully fetched key for version " + versionCode);
+                    return salt + "|" + nonce + "|" + bksBlob;
                 }
             } else {
                 Log.e(TAG, "Server returned error code: " + responseCode);
@@ -197,11 +209,5 @@ public class NetworkHelper {
             StrictMode.setThreadPolicy(oldPolicy);
         }
         return null;
-    }
-
-    private static String extractField(String json, String fieldName) {
-        String pattern = "\"" + fieldName + "\":\\s*\"([^\"]+)\"";
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(json);
-        return m.find() ? m.group(1) : null;
     }
 }
