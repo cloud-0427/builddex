@@ -26,11 +26,9 @@ void decrypt_aes_gcm(JNIEnv *env, unsigned char* data, size_t size, const std::s
     env->SetByteArrayRegion(cipher_array, 0, cipher_len, reinterpret_cast<jbyte*>(data + 12));
 
     // 3. 准备密钥
-    jclass base64_class = env->FindClass("java/util/Base64");
-    jmethodID get_decoder = env->GetStaticMethodID(base64_class, "getDecoder", "()Ljava/util/Base64$Decoder;");
-    jobject decoder = env->CallStaticObjectMethod(base64_class, get_decoder);
-    jmethodID decode_mid = env->GetMethodID(env->FindClass("java/util/Base64$Decoder"), "decode", "(Ljava/lang/String;)[B");
-    jbyteArray key_bytes = (jbyteArray)env->CallObjectMethod(decoder, decode_mid, env->NewStringUTF(key_base64.c_str()));
+    jclass base64_class = env->FindClass("android/util/Base64");
+    jmethodID decode_mid = env->GetStaticMethodID(base64_class, "decode", "(Ljava/lang/String;I)[B");
+    jbyteArray key_bytes = (jbyteArray)env->CallStaticObjectMethod(base64_class, decode_mid, env->NewStringUTF(key_base64.c_str()), 0); // 0 = DEFAULT
 
     // 提取私钥中的原始字节并截取 32 字节 (AES-256)
     jbyte* kb = env->GetByteArrayElements(key_bytes, nullptr);
@@ -83,7 +81,7 @@ std::vector<unsigned char> hex_to_bytes(const std::string& hex) {
 }
 
 // 核心逻辑：从包裹块中解密出真正的 Session Key
-std::string decrypt_kms_key(JNIEnv *env, const std::string& kms_blob_str) {
+std::string decrypt_kms_key(JNIEnv *env, const std::string& kms_blob_str, const std::string& pkg_name, const std::string& version_name) {
     // kms_blob_str 格式: salt|nonce|bksBlob
     size_t first_pipe = kms_blob_str.find('|');
     size_t second_pipe = kms_blob_str.find('|', first_pipe + 1);
@@ -96,10 +94,26 @@ std::string decrypt_kms_key(JNIEnv *env, const std::string& kms_blob_str) {
     auto nonce_bytes = hex_to_bytes(nonce_hex);
     auto bks_blob_bytes = hex_to_bytes(bks_blob_hex);
 
-    // 硬编码的 Master Key (与 JiaguTask 一致)
-    std::string master_key = "PRO_JIAGU_MASTER_KEY_2026_SECRET";
-    jbyteArray master_key_array = env->NewByteArray(master_key.length());
-    env->SetByteArrayRegion(master_key_array, 0, master_key.length(), reinterpret_cast<const jbyte*>(master_key.c_str()));
+    // 动态派生 Master Key: SHA-256(pkg:version:salt)
+    // 使用 JNI 调用 Java MessageDigest 确保算法实现对齐且代码精简
+    jclass digest_class = env->FindClass("java/security/MessageDigest");
+    jmethodID get_instance = env->GetStaticMethodID(digest_class, "getInstance", "(Ljava/lang/String;)Ljava/security/MessageDigest;");
+    jobject digest_obj = env->CallStaticObjectMethod(digest_class, get_instance, env->NewStringUTF("SHA-256"));
+
+    // 构造混淆盐值 (JIAGU_SALT_2026)
+    std::string salt_str;
+    salt_str += (char)('J' ^ 0); salt_str += (char)('I' ^ 0); salt_str += (char)('A' ^ 0);
+    salt_str += (char)('G' ^ 0); salt_str += (char)('U' ^ 0); salt_str += (char)('_' ^ 0);
+    salt_str += (char)('S' ^ 0); salt_str += (char)('A' ^ 0); salt_str += (char)('L' ^ 0);
+    salt_str += (char)('T' ^ 0); salt_str += (char)('_' ^ 0); salt_str += (char)('2' ^ 0);
+    salt_str += (char)('0' ^ 0); salt_str += (char)('2' ^ 0); salt_str += (char)('6' ^ 0);
+
+    std::string input_str = pkg_name + ":" + version_name + ":" + salt_str;
+    jbyteArray input_bytes = env->NewByteArray(input_str.length());
+    env->SetByteArrayRegion(input_bytes, 0, input_str.length(), reinterpret_cast<const jbyte*>(input_str.c_str()));
+
+    jmethodID digest_mid = env->GetMethodID(digest_class, "digest", "([B)[B");
+    jbyteArray master_key_array = (jbyteArray)env->CallObjectMethod(digest_obj, digest_mid, input_bytes);
 
     jbyteArray nonce_array = env->NewByteArray(nonce_bytes.size());
     env->SetByteArrayRegion(nonce_array, 0, nonce_bytes.size(), reinterpret_cast<const jbyte*>(nonce_bytes.data()));
@@ -109,8 +123,8 @@ std::string decrypt_kms_key(JNIEnv *env, const std::string& kms_blob_str) {
 
     // 调用 Java AES-GCM 解密出 Session Key
     jclass cipher_class = env->FindClass("javax/crypto/Cipher");
-    jmethodID get_instance = env->GetStaticMethodID(cipher_class, "getInstance", "(Ljava/lang/String;)Ljavax/crypto/Cipher;");
-    jobject cipher = env->CallStaticObjectMethod(cipher_class, get_instance, env->NewStringUTF("AES/GCM/NoPadding"));
+    jmethodID get_cipher_instance = env->GetStaticMethodID(cipher_class, "getInstance", "(Ljava/lang/String;)Ljavax/crypto/Cipher;");
+    jobject cipher = env->CallStaticObjectMethod(cipher_class, get_cipher_instance, env->NewStringUTF("AES/GCM/NoPadding"));
 
     jclass key_spec_class = env->FindClass("javax/crypto/spec/SecretKeySpec");
     jmethodID key_spec_init = env->GetMethodID(key_spec_class, "<init>", "([BLjava/lang/String;)V");
@@ -133,11 +147,9 @@ std::string decrypt_kms_key(JNIEnv *env, const std::string& kms_blob_str) {
         return "";
     }
 
-    jclass base64_class = env->FindClass("java/util/Base64");
-    jmethodID get_encoder = env->GetStaticMethodID(base64_class, "getEncoder", "()Ljava/util/Base64$Encoder;");
-    jobject encoder = env->CallStaticObjectMethod(base64_class, get_encoder);
-    jmethodID encode_mid = env->GetMethodID(env->FindClass("java/util/Base64$Encoder"), "encodeToString", "([B)Ljava/lang/String;");
-    jstring session_key_base64_j = (jstring)env->CallObjectMethod(encoder, encode_mid, session_key_bytes);
+    jclass base64_class = env->FindClass("android/util/Base64");
+    jmethodID encode_mid = env->GetStaticMethodID(base64_class, "encodeToString", "([BI)Ljava/lang/String;");
+    jstring session_key_base64_j = (jstring)env->CallStaticObjectMethod(base64_class, encode_mid, session_key_bytes, 2); // 2 = NO_WRAP
 
     const char* sk_base64 = env->GetStringUTFChars(session_key_base64_j, nullptr);
     std::string result(sk_base64);
@@ -209,6 +221,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     const char *key_url = env->GetStringUTFChars(key_url_j, nullptr);
     const char *json_key = env->GetStringUTFChars(json_key_j, nullptr);
     const char *real_app_name = env->GetStringUTFChars(real_app_name_j, nullptr);
+    const char *pkg_name_str = env->GetStringUTFChars(pkg_name, nullptr);
 
     // 2. 安全获取私钥 (KeyStore 硬件绑定 + 有效期校验)
     std::string private_key;
@@ -216,27 +229,35 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (network_helper) {
          jmethodID get_secure_mid = env->GetStaticMethodID(network_helper, "getSecureKey", "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;");
 
-         // 获取 vcode 逻辑
+         // 获取 vcode 和 vname 逻辑
          jclass pkg_info_class = env->FindClass("android/content/pm/PackageInfo");
          jmethodID get_pkg_info = env->GetMethodID(pm_class, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
          jobject pkg_info = env->CallObjectMethod(pm, get_pkg_info, pkg_name, 0);
          jfieldID vcode_fid = env->GetFieldID(env->GetObjectClass(pkg_info), "versionCode", "I");
          jint vcode = env->GetIntField(pkg_info, vcode_fid);
 
+         jfieldID vname_fid = env->GetFieldID(env->GetObjectClass(pkg_info), "versionName", "Ljava/lang/String;");
+         jstring vname_j = (jstring)env->GetObjectField(pkg_info, vname_fid);
+         const char* vname_str = env->GetStringUTFChars(vname_j, nullptr);
+
          jstring fetched_key_j = (jstring)env->CallStaticObjectMethod(network_helper, get_secure_mid, context, key_url_j, json_key_j, vcode);
          if (fetched_key_j) {
              const char* fetched_key_raw = env->GetStringUTFChars(fetched_key_j, nullptr);
              std::string fetched_key_str(fetched_key_raw);
 
-             // 执行 KMS 密钥解封，还原 Session Key
-             private_key = decrypt_kms_key(env, fetched_key_str);
+             // 执行 KMS 密钥解封，还原 Session Key (传入包名和版本名进行动态 Master Key 派生)
+             private_key = decrypt_kms_key(env, fetched_key_str, pkg_name_str, vname_str);
 
              env->ReleaseStringUTFChars(fetched_key_j, fetched_key_raw);
          }
+         env->ReleaseStringUTFChars(vname_j, vname_str);
     }
 
     if (private_key.empty()) {
         LOGE("Jiagu_Native: CRITICAL - Failed to acquire decryption key.");
+        env->ReleaseStringUTFChars(key_url_j, key_url);
+        env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
+        env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
         return;
     }
 
@@ -323,6 +344,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
 
     env->ReleaseStringUTFChars(key_url_j, key_url);
     env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
+    env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
 }
 
 static void native_on_create(JNIEnv *env, jobject thiz) {

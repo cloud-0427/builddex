@@ -41,7 +41,9 @@ public final class DexReportPlugin implements Plugin<Project> {
                     task.getPublicKeyJsonKey().set(ext.getPublicKeyJsonKey());
                     task.getEnableMultiVersion().set(ext.getEnableMultiVersion());
                     
-                    // 自动获取当前变体的 versionCode
+                    // 自动获取当前变体的包名与版本信息
+                    task.getPackageName().set(variant.getApplicationId());
+                    task.getVersionName().set(variant.getOutputs().get(0).getVersionName());
                     task.getVersionCode().set(variant.getOutputs().get(0).getVersionCode());
                     task.getKeyExpiryDays().set(ext.getKeyExpiryDays());
                     

@@ -47,6 +47,12 @@ import java.nio.charset.StandardCharsets;
 public abstract class JiaguTask extends DefaultTask {
 
     @Input
+    public abstract Property<String> getPackageName();
+
+    @Input
+    public abstract Property<String> getVersionName();
+
+    @Input
     public abstract Property<Integer> getVersionCode();
 
     @Input
@@ -223,7 +229,18 @@ public abstract class JiaguTask extends DefaultTask {
     private byte[] handleKeyManagement(int versionCode) {
         File keyFile = getKeysFile().get().getAsFile();
         String jsonKey = getPublicKeyJsonKey().getOrElse("akmKeys");
-        byte[] masterKey = "PRO_JIAGU_MASTER_KEY_2026_SECRET".getBytes(StandardCharsets.UTF_8);
+        String pkgName = getPackageName().get();
+        String versionName = getVersionName().get();
+
+        // 动态派生 Master Key: SHA-256(pkg:version:salt)
+        byte[] masterKey;
+        try {
+            String input = pkgName + ":" + versionName + ":JIAGU_SALT_2026";
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            masterKey = digest.digest(input.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 not available", e);
+        }
 
         try {
             // 1. 本地密钥存储读取
