@@ -11,6 +11,9 @@ dexReport {
     // 指定挂载的任务前缀。
     // 支持 "assemble" (默认), "bundle" (生成AAB), "install" (安装) 等。
     attachToTask = "assemble"
+    
+    // 设置加固加密使用的 AES 密钥
+    aesKey = "MY_SECURE_AES_KEY"
 }
 
 android {
@@ -36,9 +39,9 @@ android {
 
     buildTypes {
         release {
-            optimization {
-                enable false
-            }
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'src/main/keepRules/rules.keep'
             signingConfig signingConfigs.debug
         }
     }
@@ -58,6 +61,7 @@ android {
 }
 
 dependencies {
+    implementation project(':jiagu-runtime')
     implementation libs.appcompat
     implementation libs.constraintlayout
     implementation libs.material

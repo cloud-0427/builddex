@@ -31,7 +31,7 @@ public final class DexReportPlugin implements Plugin<Project> {
                 String jiaguTaskName = "jiagu" + capitalize(variantName);
                 TaskProvider<JiaguTask> jiaguTaskProvider = project.getTasks().register(jiaguTaskName, JiaguTask.class, task -> {
                     task.setGroup("jiagu");
-                    task.getAesKey().set("MY_SECURE_AES_KEY");
+                    task.getAesKey().set(project.getExtensions().getByType(DexReportExtension.class).getAesKey());
                     task.getOutAssetsDir().set(
                         project.getLayout().getBuildDirectory().dir("generated/jiagu/assets/" + variantName)
                     );
@@ -55,7 +55,9 @@ public final class DexReportPlugin implements Plugin<Project> {
                 // 3. 核心： Manifest 自动修改
                 String manifestTaskName = "modifyManifest" + capitalize(variantName);
                 TaskProvider<ManifestTransformerTask> manifestTaskProvider = 
-                    project.getTasks().register(manifestTaskName, ManifestTransformerTask.class);
+                    project.getTasks().register(manifestTaskName, ManifestTransformerTask.class, task -> {
+                        task.getAesKey().set(project.getExtensions().getByType(DexReportExtension.class).getAesKey());
+                    });
 
                 // 拦截并修改合并后的 Manifest
                 variant.getArtifacts().use(manifestTaskProvider)
@@ -72,7 +74,8 @@ public final class DexReportPlugin implements Plugin<Project> {
         try {
             Project runtimeProject = project.getRootProject().findProject(":jiagu-runtime");
             if (runtimeProject != null) {
-                project.getDependencies().add("implementation", runtimeProject);
+                // 使用更标准的项目依赖添加方式
+                project.getDependencies().add("implementation", project.project(":jiagu-runtime"));
             } else {
                 project.getDependencies().add("implementation", "io.github.xjc:jiagu-runtime:0.1.0");
             }

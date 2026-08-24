@@ -27,6 +27,8 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.nio.file.Files;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 
 import com.android.tools.r8.D8;
@@ -118,6 +120,9 @@ public abstract class JiaguTask extends DefaultTask {
 
             File[] dexFiles = tempDexDir.toFile().listFiles((dir, name) -> name.endsWith(".dex"));
             if (dexFiles != null && dexFiles.length > 0) {
+                // 按照文件名排序，确保 classes.dex, classes2.dex 等顺序一致
+                Arrays.sort(dexFiles, Comparator.comparing(File::getName));
+                
                 try (FileOutputStream fos = new FileOutputStream(payloadFile)) {
                     // 写入 DEX 文件数量 (4 bytes)
                     fos.write(intToBytes(dexFiles.length));
@@ -151,14 +156,25 @@ public abstract class JiaguTask extends DefaultTask {
     }
 
     private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos, String name, byte[] data, Set<String> processedNames) throws IOException {
-        String shellPackage = "io/github/xjc/jiagu/";
-        
         if (processedNames.contains(name)) {
             return;
         }
 
-        if (name.startsWith(shellPackage) || !name.endsWith(".class")) {
-            // 壳程序代码 或 非代码资源：透传到输出 JAR (壳 JAR)
+        // 必须保留在主 DEX (壳) 中的包名白名单
+        // 1. 壳程序自身代码
+        // 2. Androidx Startup (组件初始化框架)
+        // 3. Androidx Core (包含 ComponentFactory 等系统底层回调)
+        // 4. Androidx Lifecycle (某些初始化器依赖于此)
+        // 5. Androidx Multidex (如果使用了的话)
+        boolean shouldKeepInShell = name.startsWith("io/github/xjc/jiagu/") ||
+                                   name.contains("/R$") || name.endsWith("/R.class") ||
+                                   name.startsWith("androidx/startup/") ||
+                                   name.startsWith("androidx/core/") ||
+                                   name.startsWith("androidx/lifecycle/") ||
+                                   name.startsWith("androidx/multidex/");
+
+        if (shouldKeepInShell || !name.endsWith(".class")) {
+            // 壳程序代码、白名单代码 或 非代码资源：透传到输出 JAR (壳 JAR)
             JarEntry outEntry = new JarEntry(name);
             shellJos.putNextEntry(outEntry);
             shellJos.write(data);

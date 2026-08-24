@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@layout/*,@drawable/*,@string/*,@color/*,@style/*,@dimen/*,@mipmap/*,@integer/*,@bool/*,@id/*,@menu/*,@xml/*,@raw/*"
+    tools:shrinkMode="safe" />

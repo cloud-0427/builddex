@@ -36,4 +36,9 @@ public abstract class DexReportExtension {
      * 示例：attachToTask = "bundle"
      */
     public abstract Property<String> getAttachToTask();
+
+    /**
+     * 加固使用的 AES 密钥。
+     */
+    public abstract Property<String> getAesKey();
 }

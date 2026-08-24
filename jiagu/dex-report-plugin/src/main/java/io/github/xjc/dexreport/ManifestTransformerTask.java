@@ -2,6 +2,8 @@ package io.github.xjc.dexreport;
 
 import org.gradle.api.DefaultTask;
 import org.gradle.api.file.RegularFileProperty;
+import org.gradle.api.provider.Property;
+import org.gradle.api.tasks.Input;
 import org.gradle.api.tasks.InputFile;
 import org.gradle.api.tasks.OutputFile;
 import org.gradle.api.tasks.TaskAction;
@@ -23,6 +25,9 @@ import java.io.File;
  * 2. 注入原始 Application 类名到 meta-data。
  */
 public abstract class ManifestTransformerTask extends DefaultTask {
+
+    @Input
+    public abstract Property<String> getAesKey();
 
     @InputFile
     public abstract RegularFileProperty getMergedManifest();
@@ -63,8 +68,14 @@ public abstract class ManifestTransformerTask extends DefaultTask {
             metaData.setAttribute("android:name", "REAL_APPLICATION");
             metaData.setAttribute("android:value", originalAppName);
             applicationTag.appendChild(metaData);
+
+            // 5. 注入 AES_KEY
+            Element aesMetaData = doc.createElement("meta-data");
+            aesMetaData.setAttribute("android:name", "AES_KEY");
+            aesMetaData.setAttribute("android:value", getAesKey().get());
+            applicationTag.appendChild(aesMetaData);
             
-            getLogger().lifecycle("[Jiagu] Manifest 已修改: 入口 -> ProxyApplication, 记录原类名 -> {}", originalAppName);
+            getLogger().lifecycle("[Jiagu] Manifest 已修改: 入口 -> ProxyApplication, 记录原类名 -> {}, AES_KEY 已注入", originalAppName);
         }
 
         // 保存文件

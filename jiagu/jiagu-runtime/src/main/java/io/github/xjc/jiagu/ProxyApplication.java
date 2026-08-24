@@ -2,6 +2,9 @@ package io.github.xjc.jiagu;
 
 import android.app.Application;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.os.Bundle;
 import android.util.Log;
 
 /**
@@ -23,8 +26,19 @@ public class ProxyApplication extends Application {
         super.attachBaseContext(base);
         Log.d(TAG, "ProxyApplication attachBaseContext -> 开始加固自解密");
         
-        // 实际开发中，此密钥应通过网络动态获取，此处为占位。
-        String aesKey = "MY_SECURE_AES_KEY"; 
+        String aesKey = "DEFAULT_KEY";
+        try {
+            ApplicationInfo ai = base.getPackageManager().getApplicationInfo(
+                    base.getPackageName(), PackageManager.GET_META_DATA);
+            Bundle bundle = ai.metaData;
+            if (bundle != null && bundle.containsKey("AES_KEY")) {
+                aesKey = bundle.getString("AES_KEY");
+                Log.d(TAG, "从 Manifest 读取 AES_KEY 成功");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to load meta-data, NameNotFound: " + e.getMessage());
+        }
+
         nativeInit(base, aesKey);
     }
 }

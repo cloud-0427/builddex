@@ -1,12 +1,12 @@
 # Add project specific R8 rules here.
 # AGP will combine all keep rule files in src/main/keepRules to pass to R8
-#
-# For more details, see
-#   https://d.android.com/r/tools/r8/keep-rules
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep native methods in MainActivity for static JNI mapping
+-keepclassmembers class lows.dgeon.ightr.jiagu.MainActivity {
+    public native <methods>;
+}
+
+# Keep the original application just in case R8 needs it for something before it's moved
+-keep class lows.dgeon.ightr.jiagu.Application { *; }
+
+# Note: R class keep rules are now provided by :jiagu-runtime consumer rules.
