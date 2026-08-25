@@ -1,6 +1,15 @@
 plugins {
     id 'com.android.library'
+    id 'maven-publish'
 }
+
+def jitPackGroup = System.getenv('GROUP')
+def jitPackArtifact = System.getenv('ARTIFACT')
+
+group = jitPackGroup && jitPackArtifact
+        ? "${jitPackGroup}.${jitPackArtifact}"
+        : 'io.github.xjc'
+version = System.getenv('VERSION') ?: '0.1.0'
 
 android {
     namespace 'io.github.xjc.jiagu'
@@ -36,6 +45,23 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+        }
+    }
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                from components.release
+                artifactId = 'jiagu-runtime'
+            }
+        }
     }
 }
 

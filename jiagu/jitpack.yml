@@ -1,5 +1,0 @@
-jdk:
-  - openjdk17
-
-install:
-  - ./gradlew -p dex-report-plugin clean publishToMavenLocal

@@ -1,0 +1,41 @@
+name: Verify publishable artifacts
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GROUP: com.github.cloud-0427
+      ARTIFACT: builddex
+      VERSION: 0.0.0-ci
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x jiagu/gradlew
+
+      - name: Verify runtime publication
+        working-directory: jiagu
+        run: ./gradlew :jiagu-runtime:clean :jiagu-runtime:publishToMavenLocal -x test
+
+      - name: Verify plugin publication
+        working-directory: jiagu
+        run: ./gradlew -p dex-report-plugin clean publishToMavenLocal -x test

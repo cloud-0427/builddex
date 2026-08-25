@@ -8,6 +8,10 @@ import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.tasks.TaskProvider;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Properties;
+
 /**
  * Plugin entry point for bytecode protection, manifest transformation, JNI injection,
  * and Android resource obfuscation.
@@ -137,11 +141,25 @@ public final class DexReportPlugin implements Plugin<Project> {
             if (runtimeProject != null) {
                 project.getDependencies().add("implementation", project.project(":jiagu-runtime"));
             } else {
-                project.getDependencies().add("implementation", "io.github.xjc:jiagu-runtime:0.1.0");
+                project.getDependencies().add("implementation", runtimeCoordinates());
             }
         } catch (Exception ignored) {
             // Dependency may already be supplied by the consumer.
         }
+    }
+
+    private String runtimeCoordinates() throws IOException {
+        Properties publication = new Properties();
+        try (InputStream input = DexReportPlugin.class.getResourceAsStream(
+                "/jiagu-publication.properties")) {
+            if (input == null) {
+                throw new IOException("Missing jiagu-publication.properties");
+            }
+            publication.load(input);
+        }
+        return publication.getProperty("runtime.group") + ":"
+                + publication.getProperty("runtime.artifact") + ":"
+                + publication.getProperty("runtime.version");
     }
 
     private static String capitalize(String value) {

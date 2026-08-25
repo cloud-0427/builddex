@@ -1,0 +1,9 @@
+jdk:
+  - openjdk17
+
+before_install:
+  - chmod +x jiagu/gradlew
+
+install:
+  - ./jiagu/gradlew -p jiagu :jiagu-runtime:clean :jiagu-runtime:publishToMavenLocal -x test
+  - ./jiagu/gradlew -p jiagu/dex-report-plugin clean publishToMavenLocal -x test
