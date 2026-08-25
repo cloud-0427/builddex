@@ -16,6 +16,9 @@ dexReport {
     publicKeyJsonKey = "apKeys"
     // debug 检测，测试关闭，线上可以打开，默认是打开的
     antiDebugEnabled = false
+    
+    // 只保留 中文 和 英文
+    resConfigs = ["zh", "en"]
 }
 
 android {

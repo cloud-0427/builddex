@@ -72,4 +72,14 @@ public abstract class DexReportExtension {
      */
     public abstract Property<String> getExpectedSignature();
 
+    /**
+     * 是否启用资源混淆（res 路径重命名），默认 true。
+     */
+    public abstract Property<Boolean> getResObfuscationEnabled();
+
+    /**
+     * 资源语言过滤，示例：["zh", "en"]。如果不设置则不裁剪。
+     */
+    public abstract org.gradle.api.provider.ListProperty<String> getResConfigs();
+
 }
