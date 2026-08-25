@@ -17,9 +17,12 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
 import java.util.Enumeration;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -27,6 +30,14 @@ import java.util.jar.JarOutputStream;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.zip.Deflater;
+import java.util.zip.DeflaterOutputStream;
 
 import com.android.tools.r8.D8;
 import com.android.tools.r8.D8Command;
@@ -88,9 +99,15 @@ public abstract class JiaguTask extends DefaultTask {
 
     @TaskAction
     public void execute() throws IOException {
+        long taskStartedAt = System.nanoTime();
+        Map<String, Long> stageTimes = new LinkedHashMap<>();
+        getLogger().lifecycle("[Jiagu][计时] 加固任务开始: {}", getPath());
+
+        long stageStartedAt = System.nanoTime();
         int versionCode = getVersionCode().get();
         // 生成或复用 Session Key，仅用于构建期加密，不写入 Manifest。
         byte[] sessionKey = handleKeyManagement(versionCode);
+        finishStage("密钥准备", stageStartedAt, stageTimes);
 
         File outputJarFile = getOutputJar().get().getAsFile();
         File jniLibsDir = getOutJniLibsDir().get().getAsFile();
@@ -102,11 +119,17 @@ public abstract class JiaguTask extends DefaultTask {
         tempBusinessJar.deleteOnExit();
 
         getLogger().lifecycle("[Jiagu] 正在执行全量代码扫描与分离...");
+        stageStartedAt = System.nanoTime();
 
         try (JarOutputStream shellJos = new JarOutputStream(new FileOutputStream(outputJarFile));
              JarOutputStream businessJos = new JarOutputStream(new FileOutputStream(tempBusinessJar))) {
+            // 中间业务 JAR 只供紧随其后的 D8 使用，无需耗时做 ZIP 压缩。
+            // 壳 JAR 使用快速压缩，在不明显增大最终产物的前提下降低扫描阶段 CPU 开销。
+            shellJos.setLevel(Deflater.BEST_SPEED);
+            businessJos.setLevel(Deflater.NO_COMPRESSION);
 
             // 1. 处理所有输入的 JAR 文件（包括依赖库）
+            long inputStartedAt = System.nanoTime();
             for (RegularFile jarFile : getAllJars().get()) {
                 try (JarFile inputJar = new JarFile(jarFile.getAsFile())) {
                     Enumeration<JarEntry> entries = inputJar.entries();
@@ -121,34 +144,42 @@ public abstract class JiaguTask extends DefaultTask {
                     }
                 }
             }
+            finishStage("依赖 JAR 扫描与分离", inputStartedAt, stageTimes);
 
             // 2. 处理所有目录（当前项目的编译产物）
+            inputStartedAt = System.nanoTime();
             for (Directory dir : getAllDirectories().get()) {
                 File dirFile = dir.getAsFile();
-                Files.walk(dirFile.toPath())
-                        .filter(Files::isRegularFile)
-                        .forEach(path -> {
-                            String relativePath = dirFile.toPath().relativize(path).toString().replace('\\', '/');
-                            try {
-                                byte[] data = Files.readAllBytes(path);
-                                processEntry(shellJos, businessJos, relativePath, data, processedNames);
-                            } catch (IOException e) {
-                                throw new RuntimeException(e);
-                            }
-                        });
+                try (java.util.stream.Stream<Path> paths = Files.walk(dirFile.toPath())) {
+                    paths.filter(Files::isRegularFile)
+                            .forEach(path -> {
+                                String relativePath = dirFile.toPath().relativize(path).toString().replace('\\', '/');
+                                try {
+                                    byte[] data = Files.readAllBytes(path);
+                                    processEntry(shellJos, businessJos, relativePath, data, processedNames);
+                                } catch (IOException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            });
+                }
             }
+            finishStage("目录扫描与分离", inputStartedAt, stageTimes);
         }
+        getLogger().lifecycle("[Jiagu][计时] 代码扫描与分离总耗时 {}",
+                formatDuration(elapsedMillis(stageStartedAt)));
 
         // 3. 将业务代码 JAR 转换为 DEX
         getLogger().lifecycle("[Jiagu] 正在将业务代码转换为 DEX...");
         Path tempDexDir = Files.createTempDirectory("jiagu_dex");
         try {
+            stageStartedAt = System.nanoTime();
             D8Command command = D8Command.builder()
                     .addProgramFiles(tempBusinessJar.toPath())
                     .setOutput(tempDexDir, OutputMode.DexIndexed)
                     .setMinApiLevel(29)
                     .build();
             D8.run(command);
+            finishStage("D8 转换", stageStartedAt, stageTimes);
 
             File[] dexFiles = tempDexDir.toFile().listFiles((dir, name) -> name.endsWith(".dex"));
             if (dexFiles != null && dexFiles.length > 0) {
@@ -157,35 +188,37 @@ public abstract class JiaguTask extends DefaultTask {
                 
                 // 先生成与 ABI 无关的加密载荷，再为每个 ABI 链接成真实 ELF。
                 File tempPayload = File.createTempFile("jiagu_payload", ".bin");
+                long rawDexBytes = 0;
+                long compressedDexBytes = 0;
+                long uncompressedPayloadBytes;
+                stageStartedAt = System.nanoTime();
                 try (FileOutputStream fos = new FileOutputStream(tempPayload)) {
-                    // 1. 写入魔数
-                    fos.write("JAG\0".getBytes(StandardCharsets.UTF_8));
+                    // JG2 表示 DEX 在加密前经过 zlib 压缩；运行时据此选择解压路径。
+                    fos.write("JG2\0".getBytes(StandardCharsets.UTF_8));
                     
-                    // 2. 写入混淆元数据与主体 (逻辑保持之前实现的元数据加密+随机填充不变)
+                    // 2. 写入加密元数据与压缩主体。压缩必须发生在加密前，否则密文几乎不可压缩。
                     java.util.List<byte[]> metaEntries = new java.util.ArrayList<>();
                     long currentOffset = 0;
                     java.io.ByteArrayOutputStream bodyStream = new java.io.ByteArrayOutputStream();
-                    SecureRandom random = new SecureRandom();
 
                     for (File dexFile : dexFiles) {
-                        byte[] padding = new byte[8192 + random.nextInt(8192)]; // 适度填充
-                        random.nextBytes(padding);
-                        bodyStream.write(padding);
-                        currentOffset += padding.length;
-
                         byte[] dexData = Files.readAllBytes(dexFile.toPath());
-                        byte[] encryptedDex = encrypt(dexData, sessionKey);
+                        byte[] compressedDex = compress(dexData);
+                        byte[] encryptedDex = encrypt(compressedDex, sessionKey);
+                        rawDexBytes += dexData.length;
+                        compressedDexBytes += compressedDex.length;
                         
-                        java.nio.ByteBuffer entry = java.nio.ByteBuffer.allocate(8);
+                        java.nio.ByteBuffer entry = java.nio.ByteBuffer.allocate(12);
                         entry.putInt((int)currentOffset);
                         entry.putInt(encryptedDex.length);
+                        entry.putInt(dexData.length);
                         metaEntries.add(entry.array());
 
                         bodyStream.write(encryptedDex);
                         currentOffset += encryptedDex.length;
                     }
 
-                    java.nio.ByteBuffer metaBlock = java.nio.ByteBuffer.allocate(4 + metaEntries.size() * 8);
+                    java.nio.ByteBuffer metaBlock = java.nio.ByteBuffer.allocate(4 + metaEntries.size() * 12);
                     metaBlock.putInt(dexFiles.length);
                     for (byte[] e : metaEntries) metaBlock.put(e);
 
@@ -193,10 +226,19 @@ public abstract class JiaguTask extends DefaultTask {
                     fos.write(intToBytes(encryptedMeta.length));
                     fos.write(encryptedMeta);
                     fos.write(bodyStream.toByteArray());
+
+                    // 加密只增加固定的 IV + Tag；用于展示采用压缩前格式时的载荷大小。
+                    uncompressedPayloadBytes = 4L + 4L + encryptedMeta.length
+                            + rawDexBytes + (long) dexFiles.length * 28L;
                 }
+                finishStage("DEX 压缩与加密", stageStartedAt, stageTimes);
+                logCompression("DEX 数据", rawDexBytes, compressedDexBytes);
+                logCompression("加密载荷", uncompressedPayloadBytes, tempPayload.length());
 
                 try {
-                    buildPayloadLibraries(tempPayload, jniLibsDir);
+                    stageStartedAt = System.nanoTime();
+                    buildPayloadLibraries(tempPayload, jniLibsDir, uncompressedPayloadBytes);
+                    finishStage("四 ABI ELF 并行链接", stageStartedAt, stageTimes);
                 } finally {
                     Files.deleteIfExists(tempPayload.toPath());
                 }
@@ -205,9 +247,13 @@ public abstract class JiaguTask extends DefaultTask {
             } else {
                 throw new IOException("D8 failed to produce any DEX files");
             }
+        } catch (NdkConfigurationException e) {
+            getLogger().error(e.getMessage(), e);
+            throw e;
         } catch (Exception e) {
-            getLogger().error("[Jiagu] DEX 转换失败", e);
-            throw new IOException(e);
+            String message = "[Jiagu] DEX 转换或加密载荷 ELF 构建失败";
+            getLogger().error(message, e);
+            throw new IOException(message, e);
         } finally {
             // 清理临时文件
             deleteDirectory(tempDexDir.toFile());
@@ -216,6 +262,12 @@ public abstract class JiaguTask extends DefaultTask {
         
         getLogger().lifecycle("[Jiagu] 任务完成。输出: {}, 加密包目录: {}",
                 outputJarFile.getName(), jniLibsDir.getName());
+        long totalMs = elapsedMillis(taskStartedAt);
+        getLogger().lifecycle("[Jiagu][计时] ===== 加固阶段耗时汇总 =====");
+        for (Map.Entry<String, Long> entry : stageTimes.entrySet()) {
+            getLogger().lifecycle("[Jiagu][计时] {}: {}", entry.getKey(), formatDuration(entry.getValue()));
+        }
+        getLogger().lifecycle("[Jiagu][计时] 总耗时: {}", formatDuration(totalMs));
     }
 
     private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos, String name, byte[] data, Set<String> processedNames) throws IOException {
@@ -254,12 +306,14 @@ public abstract class JiaguTask extends DefaultTask {
         directory.delete();
     }
 
-    private void buildPayloadLibraries(File payloadFile, File jniLibsDir) throws IOException {
-        File toolchainBin = findToolchainBin(getNdkDirectory().get().getAsFile());
+    private void buildPayloadLibraries(File payloadFile, File jniLibsDir,
+                                       long uncompressedPayloadBytes) throws IOException {
+        File toolchainBin = findToolchainBin(resolveNdkDirectory());
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
         File clang = new File(toolchainBin, windows ? "clang.exe" : "clang");
         if (!clang.isFile()) {
-            throw new IOException("NDK Clang not found: " + clang.getAbsolutePath());
+            throw ndkConfigurationException(
+                    "在已选择的 NDK 中找不到 Clang: " + clang.getAbsolutePath(), null);
         }
 
         String[][] abiTargets = {
@@ -275,8 +329,46 @@ public abstract class JiaguTask extends DefaultTask {
             throw new IOException("Failed to create ELF work directory: " + workRoot);
         }
 
+        int workerCount = Math.min(abiTargets.length,
+                Math.max(1, Runtime.getRuntime().availableProcessors()));
+        ExecutorService executor = Executors.newFixedThreadPool(workerCount);
+        List<Future<?>> futures = new ArrayList<>();
+        getLogger().lifecycle("[Jiagu] 使用 {} 个并行进程链接 {} 个 ABI", workerCount, abiTargets.length);
         try {
             for (String[] abiTarget : abiTargets) {
+                futures.add(executor.submit(() -> {
+                    try {
+                        buildPayloadLibrary(payloadFile, jniLibsDir, workRoot, clang,
+                                abiTarget, uncompressedPayloadBytes);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }));
+            }
+            for (Future<?> future : futures) {
+                try {
+                    future.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while building payload ELF files", e);
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof RuntimeException && cause.getCause() instanceof IOException) {
+                        throw (IOException) cause.getCause();
+                    }
+                    throw new IOException("Failed to build payload ELF files", cause);
+                }
+            }
+        } finally {
+            executor.shutdownNow();
+            deleteDirectory(workRoot);
+        }
+    }
+
+    private void buildPayloadLibrary(File payloadFile, File jniLibsDir, File workRoot,
+                                     File clang, String[] abiTarget,
+                                     long uncompressedPayloadBytes) throws IOException {
+                long startedAt = System.nanoTime();
                 String abi = abiTarget[0];
                 File abiWorkDir = new File(workRoot, abi);
                 if (!abiWorkDir.mkdirs() && !abiWorkDir.isDirectory()) {
@@ -331,18 +423,67 @@ public abstract class JiaguTask extends DefaultTask {
 
                 runCommand(command, abiWorkDir, "build payload ELF for " + abi);
                 verifyElfHeader(outputSo);
-                getLogger().lifecycle("[Jiagu] 已生成真实 ELF: {} ({} bytes)", abi, outputSo.length());
-            }
+                long elfOverhead = outputSo.length() - payloadFile.length();
+                long estimatedBefore = uncompressedPayloadBytes + Math.max(0L, elfOverhead);
+                getLogger().lifecycle(
+                        "[Jiagu][压缩] liblog_ext.so {}: 压缩前约 {} -> 压缩后 {}，减少 {} ({})；链接耗时 {}",
+                        abi, formatBytes(estimatedBefore), formatBytes(outputSo.length()),
+                        formatBytes(Math.max(0L, estimatedBefore - outputSo.length())),
+                        formatPercent(estimatedBefore, outputSo.length()),
+                        formatDuration(elapsedMillis(startedAt)));
+    }
+
+    private byte[] compress(byte[] input) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream(Math.max(32, input.length / 2));
+        Deflater deflater = new Deflater(Deflater.BEST_COMPRESSION);
+        try (DeflaterOutputStream compressed = new DeflaterOutputStream(output, deflater, 64 * 1024)) {
+            compressed.write(input);
         } finally {
-            deleteDirectory(workRoot);
+            deflater.end();
         }
+        return output.toByteArray();
+    }
+
+    private void finishStage(String name, long startedAt, Map<String, Long> stageTimes) {
+        long elapsedMs = elapsedMillis(startedAt);
+        stageTimes.put(name, elapsedMs);
+        getLogger().lifecycle("[Jiagu][计时] {} 完成，耗时 {}", name, formatDuration(elapsedMs));
+    }
+
+    private void logCompression(String name, long before, long after) {
+        getLogger().lifecycle("[Jiagu][压缩] {}: {} -> {}，减少 {} ({})",
+                name, formatBytes(before), formatBytes(after),
+                formatBytes(Math.max(0L, before - after)), formatPercent(before, after));
+    }
+
+    private static long elapsedMillis(long startedAt) {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+    }
+
+    private static String formatDuration(long millis) {
+        return String.format(java.util.Locale.ROOT, "%.3f s", millis / 1000.0d);
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024L) return bytes + " B";
+        if (bytes < 1024L * 1024L) {
+            return String.format(java.util.Locale.ROOT, "%.2f KiB", bytes / 1024.0d);
+        }
+        return String.format(java.util.Locale.ROOT, "%.2f MiB", bytes / (1024.0d * 1024.0d));
+    }
+
+    private static String formatPercent(long before, long after) {
+        if (before <= 0L) return "0.0%";
+        double saved = Math.max(0.0d, (before - after) * 100.0d / before);
+        return String.format(java.util.Locale.ROOT, "%.1f%%", saved);
     }
 
     private File findToolchainBin(File ndkDirectory) throws IOException {
         File prebuiltRoot = new File(ndkDirectory, "toolchains/llvm/prebuilt");
         File[] candidates = prebuiltRoot.listFiles(File::isDirectory);
         if (candidates == null || candidates.length == 0) {
-            throw new IOException("NDK LLVM toolchain not found under: " + prebuiltRoot);
+            throw ndkConfigurationException(
+                    "在已选择的 NDK 中找不到 LLVM toolchain: " + prebuiltRoot, null);
         }
 
         String osName = System.getProperty("os.name", "").toLowerCase();
@@ -354,6 +495,52 @@ public abstract class JiaguTask extends DefaultTask {
             }
         }
         return new File(candidates[0], "bin");
+    }
+
+    private File resolveNdkDirectory() throws NdkConfigurationException {
+        final File ndkDirectory;
+        try {
+            ndkDirectory = getNdkDirectory().get().getAsFile();
+        } catch (Exception e) {
+            throw ndkConfigurationException(deepestCauseMessage(e), e);
+        }
+
+        if (!ndkDirectory.isDirectory()) {
+            throw ndkConfigurationException(
+                    "AGP 选择的 NDK 目录不存在: " + ndkDirectory.getAbsolutePath(), null);
+        }
+        return ndkDirectory;
+    }
+
+    private NdkConfigurationException ndkConfigurationException(String detail, Throwable cause) {
+        StringBuilder message = new StringBuilder()
+                .append("[Jiagu] Android NDK 配置不可用，无法生成加密载荷 ELF。\n")
+                .append("即使消费工程没有本地 C/C++ 代码，Jiagu 也需要 NDK 来生成应用专属的 liblog_ext.so。\n")
+                .append("请在 Android SDK Manager 中安装 NDK (Side by side)，并在应用模块固定一个已安装版本：\n")
+                .append("  Groovy: android { ndkVersion '已安装的版本号' }\n")
+                .append("  Kotlin: android { ndkVersion = \"已安装的版本号\" }\n")
+                .append("如果已经安装，请确认 local.properties 中的 sdk.dir 指向安装该 NDK 的 Android SDK。");
+        if (detail != null && !detail.trim().isEmpty()) {
+            message.append("\n底层原因: ").append(detail.trim());
+        }
+        return new NdkConfigurationException(message.toString(), cause);
+    }
+
+    private String deepestCauseMessage(Throwable throwable) {
+        Throwable cause = throwable;
+        while (cause.getCause() != null && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+        String message = cause.getMessage();
+        return message == null || message.trim().isEmpty()
+                ? cause.getClass().getSimpleName()
+                : message;
+    }
+
+    private static final class NdkConfigurationException extends IOException {
+        private NdkConfigurationException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     private void runCommand(java.util.List<String> command, File workingDirectory, String description) throws IOException {

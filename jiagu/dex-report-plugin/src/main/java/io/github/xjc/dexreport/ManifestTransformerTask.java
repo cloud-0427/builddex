@@ -55,6 +55,7 @@ public abstract class ManifestTransformerTask extends DefaultTask {
 
     @TaskAction
     public void taskAction() throws Exception {
+        long startedAt = System.nanoTime();
         File manifestFile = getMergedManifest().get().getAsFile();
         
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -135,6 +136,10 @@ public abstract class ManifestTransformerTask extends DefaultTask {
         DOMSource source = new DOMSource(doc);
         StreamResult result = new StreamResult(getUpdatedManifest().get().getAsFile());
         transformer.transform(source, result);
+        long millis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - startedAt);
+        getLogger().lifecycle("[Jiagu][计时] Manifest 修改: {}",
+                String.format(java.util.Locale.ROOT, "%.3f s", millis / 1000.0d));
     }
 
     private void cleanUpComponent(Element applicationTag, String tagName, String className) {

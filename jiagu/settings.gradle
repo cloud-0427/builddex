@@ -1,7 +1,16 @@
 pluginManagement {
+    def jiaguSource = providers.gradleProperty('jiagu.source')
+            .getOrElse('local')
+            .trim()
+            .toLowerCase(Locale.ROOT)
+    def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.1')
+
+    if (!(jiaguSource in ['local', 'jitpack'])) {
+        throw new GradleException(
+                "jiagu.source 只支持 local 或 jitpack，当前值: ${jiaguSource}")
+    }
+
     repositories {
-        // 本地开发时，从 publishToMavenLocal 的产物解析 Dex Report 插件。
-        mavenLocal()
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -11,17 +20,60 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
+        if (jiaguSource == 'jitpack') {
+            maven {
+                url = uri('https://jitpack.io')
+                content { includeGroup('com.github.cloud-0427.builddex') }
+            }
+        }
+    }
+
+    if (jiaguSource == 'local') {
+        // 本地插件直接参与 composite build，不经过 Maven Local 或远程仓库。
+        includeBuild 'dex-report-plugin'
+    } else {
+        resolutionStrategy {
+            eachPlugin {
+                if (requested.id.id == 'io.github.xjc.dex-report') {
+                    useModule(
+                            "com.github.cloud-0427.builddex:dex-report-plugin:${jiaguVersion}")
+                }
+            }
+        }
+    }
+
+    plugins {
+        id 'io.github.xjc.dex-report' version jiaguVersion
     }
 }
+
+def jiaguSource = providers.gradleProperty('jiagu.source')
+        .getOrElse('local')
+        .trim()
+        .toLowerCase(Locale.ROOT)
+def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.1')
+
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
     repositories {
         google()
         mavenCentral()
+        if (jiaguSource == 'jitpack') {
+            maven {
+                url = uri('https://jitpack.io')
+                content { includeGroup('com.github.cloud-0427.builddex') }
+            }
+        }
     }
 }
 
 rootProject.name = "Jiagu"
 include ':app'
-include ':jiagu-runtime'
-includeBuild 'dex-report-plugin'
+if (jiaguSource == 'local') {
+    // 远程模式下完全不注册本地 runtime，避免 project dependency 替换远程 AAR。
+    include ':jiagu-runtime'
+}
+
+logger.lifecycle(
+        "[Jiagu] dependency source: ${jiaguSource.toUpperCase(Locale.ROOT)}, "
+                + "version: ${jiaguVersion}")

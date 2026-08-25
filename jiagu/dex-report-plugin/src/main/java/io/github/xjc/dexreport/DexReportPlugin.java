@@ -104,9 +104,8 @@ public final class DexReportPlugin implements Plugin<Project> {
         String producerTaskName = shrinkResources
                 ? "convertShrunkResourcesToBinary" + variantCap
                 : "process" + variantCap + "Resources";
-        String consumerTaskName = shrinkResources
-                ? "optimize" + variantCap + "Resources"
-                : "package" + variantCap;
+        String optimizeTaskName = "optimize" + variantCap + "Resources";
+        String packageTaskName = "package" + variantCap;
         String resourcePackagePath = shrinkResources
                 ? "intermediates/shrunk_resources_binary_format/" + variantName
                         + "/" + producerTaskName
@@ -131,8 +130,14 @@ public final class DexReportPlugin implements Plugin<Project> {
             obfuscator.configure(task -> task.dependsOn(producer));
             producer.finalizedBy(obfuscator);
         });
-        project.getTasks().matching(task -> task.getName().equals(consumerTaskName)).all(consumer ->
-                consumer.dependsOn(obfuscator));
+        // optimize<Variant>Resources can also be present when shrinkResources is false and
+        // consumes the linked resource package directly. Do not infer the consumer from the
+        // shrinkResources flag: both possible downstream tasks must observe the in-place
+        // mutation performed by ResObfuscatorTask.
+        project.getTasks().matching(task ->
+                task.getName().equals(optimizeTaskName)
+                        || task.getName().equals(packageTaskName)
+        ).all(consumer -> consumer.dependsOn(obfuscator));
     }
 
     private void addJiaguRuntimeDependency(Project project) {

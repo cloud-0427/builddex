@@ -19,4 +19,5 @@ target_link_options(jiagu-core PRIVATE
 
 find_library(log-lib log)
 find_library(android-lib android)
-target_link_libraries(jiagu-core ${log-lib} ${android-lib})
+find_library(z-lib z)
+target_link_libraries(jiagu-core ${log-lib} ${android-lib} ${z-lib})

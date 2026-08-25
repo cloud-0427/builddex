@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <algorithm>
+#include <zlib.h>
 #include "syscall_arch.h"
 #include "obfuscate_str.h"
 
@@ -489,7 +490,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
             reinterpret_cast<const char*>(payload_source) + payload_length);
     dlclose(payload_handle);
 
-    if (std::memcmp(full_buffer.data(), "JAG\0", 4) != 0) {
+    if (std::memcmp(full_buffer.data(), "JG2\0", 4) != 0) {
         LOGE("Jiagu_Native: Invalid payload magic");
         return;
     }
@@ -519,7 +520,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
                     (meta_data_ptr[2] << 8) | meta_data_ptr[3];
     meta_offset += 4;
     if (dex_count <= 0 || dex_count > 128 ||
-            meta_plain_size < 4 + static_cast<size_t>(dex_count) * 8) {
+            meta_plain_size < 4 + static_cast<size_t>(dex_count) * 12) {
         LOGE("Jiagu_Native: Invalid DEX count: %d", dex_count);
         return;
     }
@@ -547,14 +548,20 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
                        (static_cast<unsigned char>(meta_data_ptr[meta_offset + 2]) << 8) |
                        static_cast<unsigned char>(meta_data_ptr[meta_offset + 3]);
         meta_offset += 4;
+        int dex_plain_size = (static_cast<unsigned char>(meta_data_ptr[meta_offset]) << 24) |
+                             (static_cast<unsigned char>(meta_data_ptr[meta_offset + 1]) << 16) |
+                             (static_cast<unsigned char>(meta_data_ptr[meta_offset + 2]) << 8) |
+                             static_cast<unsigned char>(meta_data_ptr[meta_offset + 3]);
+        meta_offset += 4;
 
         // Each encrypted DEX is IV (12 bytes) + ciphertext + GCM tag (16 bytes).
         // Validate all metadata before deriving a pointer into the payload buffer.
-        if (dex_offset < 0 || dex_size < 28 ||
+        if (dex_offset < 0 || dex_size < 28 || dex_plain_size <= 0 ||
+                dex_plain_size > 256 * 1024 * 1024 ||
                 static_cast<size_t>(dex_offset) > body_size ||
                 static_cast<size_t>(dex_size) > body_size - static_cast<size_t>(dex_offset)) {
-            LOGE("Jiagu_Native: Invalid DEX entry %d (offset=%d, size=%d)",
-                 i, dex_offset, dex_size);
+            LOGE("Jiagu_Native: Invalid DEX entry %d (offset=%d, size=%d, plain=%d)",
+                 i, dex_offset, dex_size, dex_plain_size);
             return;
         }
 
@@ -565,13 +572,22 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
             return;
         }
 
-        int plain_size = dex_size - 12 - 16;
+        int compressed_size = dex_size - 12 - 16;
         jobject bb = env->CallStaticObjectMethod(
-                byte_buffer_class, allocate_direct, static_cast<jint>(plain_size));
+                byte_buffer_class, allocate_direct, static_cast<jint>(dex_plain_size));
         JNI_CHECK_NULL(bb, "DEX buffer allocation failed", );
         void* direct_buffer = env->GetDirectBufferAddress(bb);
         JNI_CHECK_NULL(direct_buffer, "DirectBufferAddress access failed", );
-        std::memcpy(direct_buffer, dex_ptr, static_cast<size_t>(plain_size));
+        uLongf inflated_size = static_cast<uLongf>(dex_plain_size);
+        int inflate_result = uncompress(
+                reinterpret_cast<Bytef*>(direct_buffer), &inflated_size,
+                reinterpret_cast<const Bytef*>(dex_ptr),
+                static_cast<uLong>(compressed_size));
+        if (inflate_result != Z_OK || inflated_size != static_cast<uLongf>(dex_plain_size)) {
+            LOGE("Jiagu_Native: Failed to decompress DEX entry %d (zlib=%d, actual=%lu, expected=%d)",
+                 i, inflate_result, static_cast<unsigned long>(inflated_size), dex_plain_size);
+            return;
+        }
         env->SetObjectArrayElement(bb_array, i, bb);
     }
 

@@ -35,7 +35,8 @@ public abstract class ResObfuscatorTask extends DefaultTask {
 
     @TaskAction
     public void run() throws IOException {
-        System.out.println("[Jiagu] ResObfuscatorTask started execution.");
+        long taskStartedAt = System.nanoTime();
+        getLogger().lifecycle("[Jiagu][计时] 资源混淆开始");
         File inputFile = getInputResourcePackage().get().getAsFile();
         File outputFile = getOutputResourcePackage().get().getAsFile();
         
@@ -47,31 +48,42 @@ public abstract class ResObfuscatorTask extends DefaultTask {
         Path tempDir = Files.createTempDirectory("res_obfuscator");
         try {
             // 1. Decompress the resource package
+            long stageStartedAt = System.nanoTime();
             unzip(inputFile, tempDir.toFile());
+            logTiming("资源包解压", stageStartedAt);
 
             // 2. Prune resources by language
+            stageStartedAt = System.nanoTime();
             if (getResConfigs().isPresent() && !getResConfigs().get().isEmpty()) {
                 pruneResources(tempDir.toFile(), getResConfigs().get());
             }
+            logTiming("语言资源裁剪", stageStartedAt);
 
             // 3. Scan and Rename resource files
+            stageStartedAt = System.nanoTime();
             Map<String, String> pathMap = new HashMap<>();
             obfuscateResources(tempDir.toFile(), pathMap);
             System.out.println("[Jiagu] Obfuscated " + pathMap.size() + " resource file paths.");
+            logTiming("资源路径混淆", stageStartedAt);
 
             // 4. Patch resources.arsc (Global String Pool + Key String Pools)
+            stageStartedAt = System.nanoTime();
             File arscFile = new File(tempDir.toFile(), "resources.arsc");
             if (arscFile.exists()) {
                 patchArsc(arscFile, pathMap);
             } else {
                 System.out.println("[Jiagu] WARNING: resources.arsc not found in package!");
             }
+            logTiming("resources.arsc 混淆", stageStartedAt);
 
             // 5. Re-compress back to .ap_
+            stageStartedAt = System.nanoTime();
             zip(tempDir.toFile(), outputFile);
+            logTiming("资源包重打包", stageStartedAt);
             System.out.println("[Jiagu] Re-packaged obfuscated resources successfully to: " + outputFile.getAbsolutePath());
         } finally {
             deleteDirectory(tempDir.toFile());
+            logTiming("资源混淆总计", taskStartedAt);
         }
     }
 
@@ -100,11 +112,12 @@ public abstract class ResObfuscatorTask extends DefaultTask {
     private void zip(File sourceDir, File zipFile) throws IOException {
         try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
             Path sourcePath = sourceDir.toPath();
-            Files.walk(sourcePath).forEach(path -> {
-                if (Files.isDirectory(path)) return;
-                String name = sourcePath.relativize(path).toString().replace('\\', '/');
-                try {
-                    ZipEntry entry = new ZipEntry(name);
+            try (java.util.stream.Stream<Path> paths = Files.walk(sourcePath)) {
+                paths.forEach(path -> {
+                    if (Files.isDirectory(path)) return;
+                    String name = sourcePath.relativize(path).toString().replace('\\', '/');
+                    try {
+                        ZipEntry entry = new ZipEntry(name);
                     
                     // resources.arsc must be STORED and uncompressed for Android 11+
                     if (name.equals("resources.arsc")) {
@@ -117,14 +130,22 @@ public abstract class ResObfuscatorTask extends DefaultTask {
                         entry.setCrc(crc.getValue());
                     }
                     
-                    zos.putNextEntry(entry);
-                    Files.copy(path, zos);
-                    zos.closeEntry();
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
+                        zos.putNextEntry(entry);
+                        Files.copy(path, zos);
+                        zos.closeEntry();
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
         }
+    }
+
+    private void logTiming(String stage, long startedAt) {
+        long millis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - startedAt);
+        getLogger().lifecycle("[Jiagu][计时] {}: {}",
+                stage, String.format(Locale.ROOT, "%.3f s", millis / 1000.0d));
     }
 
     private void obfuscateResources(File workDir, Map<String, String> pathMap) throws IOException {

@@ -1,7 +1,16 @@
 plugins {
     alias(libs.plugins.android.application)
-    id 'io.github.xjc.dex-report' version '0.1.0'
+    // 插件来源和版本统一由 settings.gradle 中的 jiagu.source/jiagu.version 控制。
+    id 'io.github.xjc.dex-report'
 }
+
+def jiaguDependencySource = providers.gradleProperty('jiagu.source')
+        .getOrElse('local')
+        .trim()
+        .toLowerCase(Locale.ROOT)
+
+// 两种来源使用独立的构建输出，防止切换后复用另一模式的 DEX/APK/加固中间文件。
+layout.buildDirectory = layout.projectDirectory.dir("build/${jiaguDependencySource}")
 
 // app/build.gradle
 dexReport {
@@ -83,7 +92,8 @@ android {
 }
 
 dependencies {
-    implementation project(':jiagu-runtime')
+    // jiagu-runtime 由加固插件自动注入：local 模式使用本地 project，
+    // jitpack 模式使用与插件相同版本的远程 AAR。不要在这里重复声明。
     implementation libs.appcompat
     implementation libs.constraintlayout
     implementation libs.material

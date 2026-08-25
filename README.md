@@ -42,7 +42,7 @@ dependencyResolutionManagement {
 ```groovy
 plugins {
     id 'com.android.application'
-    id 'io.github.xjc.dex-report' version '0.1.0'
+    id 'io.github.xjc.dex-report' version '0.1.1'
 }
 
 dexReport {
@@ -73,13 +73,38 @@ cd jiagu
 
 示例 App 通过 composite build 使用插件源码，并直接依赖 `:jiagu-runtime`。
 
+### 示例 App 切换本地/JitPack
+
+`jiagu/gradle.properties` 提供统一开关：
+
+```properties
+# 本地联调：插件源码和 runtime 源码都来自当前仓库
+jiagu.source=local
+
+# JitPack 验证：插件 JAR 和 runtime AAR 都来自 JitPack
+jiagu.source=jitpack
+jiagu.version=0.1.1
+```
+
+也可以不修改文件，直接在命令行临时覆盖：
+
+```powershell
+# 彻底使用本地模块
+.\gradlew.bat :app:dependencies --configuration debugRuntimeClasspath "-Pjiagu.source=local"
+
+# 彻底使用 JitPack，并强制重新检查远程依赖
+.\gradlew.bat :app:dependencies --configuration debugRuntimeClasspath "-Pjiagu.source=jitpack" --refresh-dependencies
+```
+
+远程模式不会注册本地 composite plugin build 或 `:jiagu-runtime` project，也不会查询 Maven Local。两种模式的 App 输出也分别写入 `app/build/local` 和 `app/build/jitpack`，避免依赖与构建中间产物交叉污染。
+
 ## 发布新版本
 
 版本号以 Git Tag 为唯一来源。提交通过本地验证后创建并推送 SemVer Tag：
 
 ```powershell
-git tag -a 0.1.0 -m "Release 0.1.0"
-git push origin 0.1.0
+git tag -a 0.1.1 -m "Release 0.1.1"
+git push origin 0.1.1
 ```
 
 Tag 推送后，GitHub Actions 会重新验证两个发布物、触发 JitPack 构建，并在成功后创建同名 GitHub Release。发布检查详见 `jiagu/RELEASING.md`。
