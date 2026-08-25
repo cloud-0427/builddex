@@ -5,12 +5,117 @@
 #include <cstring>
 #include <cstdint>
 #include <dlfcn.h>
+#include <sys/ptrace.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <algorithm>
 
 #define TAG "Jiagu_Native"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 static jobject gRealApp = nullptr;
+
+// --- 动态防护模块 ---
+
+static void die_if_debugged() {
+    // 1. Ptrace 占坑
+    if (ptrace(PTRACE_TRACEME, 0, 1, 0) < 0) {
+        LOGE("Jiagu_Native: PTRACE_TRACEME failed, debugger detected.");
+        _exit(0);
+    }
+    ptrace(PTRACE_DETACH, 0, 1, 0);
+
+    // 2. TracerPid 检测
+    char buf[512];
+    int fd = open("/proc/self/status", O_RDONLY);
+    if (fd != -1) {
+        ssize_t len = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (len > 0) {
+            buf[len] = 0;
+            char* tracer_pid_ptr = strstr(buf, "TracerPid:");
+            if (tracer_pid_ptr) {
+                int tracer_pid = atoi(tracer_pid_ptr + 10);
+                if (tracer_pid != 0) {
+                    LOGE("Jiagu_Native: TracerPid detected: %d", tracer_pid);
+                    _exit(0);
+                }
+            }
+        }
+    }
+}
+
+static void die_if_hooked() {
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return;
+
+    char line[512];
+    const char* suspicious[] = {
+        "frida", "xposed", "libdobby", "substitute", "substrate", "com.saurik.substrate"
+    };
+
+    while (fgets(line, sizeof(line), fp)) {
+        for (const char* s : suspicious) {
+            if (strstr(line, s)) {
+                LOGE("Jiagu_Native: Hook framework detected in maps: %s", s);
+                fclose(fp);
+                _exit(0);
+            }
+        }
+    }
+    fclose(fp);
+}
+
+static bool verify_signature(JNIEnv* env, jobject context, const std::string& expected_hash) {
+    if (expected_hash.empty()) return true; // 未配置则跳过
+
+    jclass context_class = env->GetObjectClass(context);
+    jmethodID get_pm = env->GetMethodID(context_class, "getPackageManager", "()Landroid/content/pm/PackageManager;");
+    jobject pm = env->CallObjectMethod(context, get_pm);
+    jmethodID get_pkg_name = env->GetMethodID(context_class, "getPackageName", "()Ljava/lang/String;");
+    jstring pkg_name = (jstring)env->CallObjectMethod(context, get_pkg_name);
+
+    jclass pm_class = env->GetObjectClass(pm);
+    // 使用 GET_SIGNATURES (64)
+    jmethodID get_pkg_info = env->GetMethodID(pm_class, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
+    jobject pkg_info = env->CallObjectMethod(pm, get_pkg_info, pkg_name, 64);
+
+    jclass pkg_info_class = env->GetObjectClass(pkg_info);
+    jfieldID sigs_fid = env->GetFieldID(pkg_info_class, "signatures", "[Landroid/content/pm/Signature;");
+    jobjectArray sigs = (jobjectArray)env->GetObjectField(pkg_info, sigs_fid);
+
+    if (!sigs || env->GetArrayLength(sigs) == 0) return false;
+
+    jobject sig = env->GetObjectArrayElement(sigs, 0);
+    jclass sig_class = env->GetObjectClass(sig);
+    jmethodID to_byte_array = env->GetMethodID(sig_class, "toByteArray", "()[B");
+    jbyteArray sig_bytes = (jbyteArray)env->CallObjectMethod(sig, to_byte_array);
+
+    // 计算 SHA-256
+    jclass digest_class = env->FindClass("java/security/MessageDigest");
+    jmethodID get_instance = env->GetStaticMethodID(digest_class, "getInstance", "(Ljava/lang/String;)Ljava/security/MessageDigest;");
+    jobject digest_obj = env->CallStaticObjectMethod(digest_class, get_instance, env->NewStringUTF("SHA-256"));
+    jmethodID digest_mid = env->GetMethodID(digest_class, "digest", "([B)[B");
+    jbyteArray hash_bytes = (jbyteArray)env->CallObjectMethod(digest_obj, digest_mid, sig_bytes);
+
+    // 转为 Hex 字符串比较
+    jsize len = env->GetArrayLength(hash_bytes);
+    jbyte* hb = env->GetByteArrayElements(hash_bytes, nullptr);
+    char hex[len * 2 + 1];
+    for (int i = 0; i < len; i++) {
+        sprintf(hex + i * 2, "%02x", (unsigned char)hb[i]);
+    }
+    env->ReleaseByteArrayElements(hash_bytes, hb, 0);
+
+    std::string actual_hash(hex);
+    if (actual_hash != expected_hash) {
+        LOGE("Jiagu_Native: Signature mismatch! Actual: %s, Expected: %s", hex, expected_hash.c_str());
+        return false;
+    }
+    return true;
+}
 
 // 辅助函数：使用 JNI 调用 Java 的 AES-GCM 解密
 bool decrypt_aes_gcm(JNIEnv *env, unsigned char* data, size_t size, const std::string& key_base64) {
@@ -218,6 +323,25 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     jstring key_url_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF("KEY_URL"));
     jstring json_key_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF("JSON_KEY"));
     jstring real_app_name_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF("REAL_APPLICATION"));
+
+    // 读取防护配置
+    jmethodID get_bool = env->GetMethodID(bundle_class, "getBoolean", "(Ljava/lang/String;Z)Z");
+    bool anti_debug = env->CallBooleanMethod(meta_data, get_bool, env->NewStringUTF("ENABLE_ANTI_DEBUG"), true);
+    bool sig_check = env->CallBooleanMethod(meta_data, get_bool, env->NewStringUTF("ENABLE_SIGNATURE_CHECK"), true);
+    jstring expected_sig_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF("EXPECTED_SIGNATURE"));
+
+    if (anti_debug) {
+        die_if_debugged();
+        die_if_hooked();
+    }
+
+    if (sig_check && expected_sig_j) {
+        const char* expected_sig = env->GetStringUTFChars(expected_sig_j, nullptr);
+        if (!verify_signature(env, context, expected_sig)) {
+            _exit(0);
+        }
+        env->ReleaseStringUTFChars(expected_sig_j, expected_sig);
+    }
 
     const char *key_url = env->GetStringUTFChars(key_url_j, nullptr);
     const char *json_key = env->GetStringUTFChars(json_key_j, nullptr);

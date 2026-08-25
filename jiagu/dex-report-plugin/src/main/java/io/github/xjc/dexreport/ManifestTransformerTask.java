@@ -35,6 +35,18 @@ public abstract class ManifestTransformerTask extends DefaultTask {
     @Input
     public abstract Property<Integer> getExpiryDays();
 
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<Boolean> getAntiDebugEnabled();
+
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<Boolean> getSignatureCheckEnabled();
+
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getExpectedSignature();
+
     @InputFile
     public abstract RegularFileProperty getMergedManifest();
 
@@ -95,8 +107,26 @@ public abstract class ManifestTransformerTask extends DefaultTask {
             expiryMetaData.setAttribute("android:name", "KEY_EXPIRY");
             expiryMetaData.setAttribute("android:value", String.valueOf(getExpiryDays().get()));
             applicationTag.appendChild(expiryMetaData);
+
+            // 6. 注入防护开关
+            Element antiDebugMetaData = doc.createElement("meta-data");
+            antiDebugMetaData.setAttribute("android:name", "ENABLE_ANTI_DEBUG");
+            antiDebugMetaData.setAttribute("android:value", String.valueOf(getAntiDebugEnabled().get()));
+            applicationTag.appendChild(antiDebugMetaData);
+
+            Element sigCheckMetaData = doc.createElement("meta-data");
+            sigCheckMetaData.setAttribute("android:name", "ENABLE_SIGNATURE_CHECK");
+            sigCheckMetaData.setAttribute("android:value", String.valueOf(getSignatureCheckEnabled().get()));
+            applicationTag.appendChild(sigCheckMetaData);
+
+            if (getExpectedSignature().isPresent() && !getExpectedSignature().get().isEmpty()) {
+                Element expectedSigMetaData = doc.createElement("meta-data");
+                expectedSigMetaData.setAttribute("android:name", "EXPECTED_SIGNATURE");
+                expectedSigMetaData.setAttribute("android:value", getExpectedSignature().get());
+                applicationTag.appendChild(expectedSigMetaData);
+            }
             
-            getLogger().lifecycle("[Jiagu] Manifest 已修改: 入口 -> ProxyApplication, 密钥注入已移除 (改用动态拉取模式)");
+            getLogger().lifecycle("[Jiagu] Manifest 已修改: 入口 -> ProxyApplication, 已启用动态防护功能");
         }
 
         // 保存文件

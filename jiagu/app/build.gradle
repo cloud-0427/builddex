@@ -14,6 +14,8 @@ dexReport {
 
     publicKeyPath = "https://game-cdn-a.acmemob.com/bc_androidgoogle.json"
     publicKeyJsonKey = "apKeys"
+    // debug 检测，测试关闭，线上可以打开，默认是打开的
+    antiDebugEnabled = false
 }
 
 android {

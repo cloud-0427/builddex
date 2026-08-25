@@ -21,6 +21,8 @@ public final class DexReportPlugin implements Plugin<Project> {
         extension.getEnableMultiVersion().convention(true);
         extension.getPublicKeyJsonKey().convention("akmKeys");
         extension.getKeyExpiryDays().convention(2);
+        extension.getAntiDebugEnabled().convention(true);
+        extension.getSignatureCheckEnabled().convention(true);
 
         project.getPluginManager().withPlugin("com.android.application", ignored -> {
             // 自动为宿主注入壳模块依赖
@@ -78,6 +80,9 @@ public final class DexReportPlugin implements Plugin<Project> {
                         task.getKeyUrl().set(ext.getPublicKeyPath());
                         task.getJsonKey().set(ext.getPublicKeyJsonKey());
                         task.getExpiryDays().set(ext.getKeyExpiryDays());
+                        task.getAntiDebugEnabled().set(ext.getAntiDebugEnabled());
+                        task.getSignatureCheckEnabled().set(ext.getSignatureCheckEnabled());
+                        task.getExpectedSignature().set(ext.getExpectedSignature());
                     });
 
                 // 拦截并修改合并后的 Manifest

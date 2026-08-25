@@ -57,4 +57,19 @@ public abstract class DexReportExtension {
      */
     public abstract Property<Integer> getKeyExpiryDays();
 
+    /**
+     * 是否启用反调试和 Hook 检测，默认 true。
+     */
+    public abstract Property<Boolean> getAntiDebugEnabled();
+
+    /**
+     * 是否启用签名校验，默认 true。
+     */
+    public abstract Property<Boolean> getSignatureCheckEnabled();
+
+    /**
+     * 预期的签名 SHA-256 哈希值（小写 hex）。
+     */
+    public abstract Property<String> getExpectedSignature();
+
 }
