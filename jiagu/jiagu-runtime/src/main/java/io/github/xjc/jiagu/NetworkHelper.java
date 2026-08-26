@@ -134,18 +134,20 @@ public final class NetworkHelper {
                 .put("integrityToken", integrityToken)
                 .put("deviceSignature", sign(signing.getPrivate(), bytes(message)));
         JSONObject response = postJson(config.basePath() + "/unpack/authorize", request);
+        Log.i(TAG, "Authorize response: " + response.toString());
         String grant = response.getString("grant");
         String wrapped = response.getString("wrappedPayloadKey");
         JSONObject claims = verifyJws(config, grant);
         verifyGrant(config, claims, deviceId, wrapped);
-        if (!"RSA-OAEP-SHA256".equals(response.getString("wrapAlgorithm")) ||
-                !claims.getString("wrapLabel").equals(response.getString("wrapLabel"))) {
-            throw new SecurityException("wrap algorithm or label mismatch");
+        if (!"RSA-OAEP".equals(response.getString("wrapAlgorithm"))) {
+            throw new SecurityException("wrap algorithm mismatch");
         }
         Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
-        OAEPParameterSpec oaep = new OAEPParameterSpec("SHA-256", "MGF1",
-                MGF1ParameterSpec.SHA256,
-                new PSource.PSpecified(bytes(claims.getString("wrapLabel"))));
+        // Android KeyStore RSA-OAEP implementation defaults MGF1 to SHA-1.
+        // For maximum compatibility on API 29-34, we use SHA-1 for both main and MGF1 digests.
+        OAEPParameterSpec oaep = new OAEPParameterSpec("SHA-1", "MGF1",
+                MGF1ParameterSpec.SHA1,
+                PSource.PSpecified.DEFAULT);
         cipher.init(Cipher.DECRYPT_MODE, wrapPrivate, oaep);
         byte[] key = cipher.doFinal(b64decode(wrapped));
         if (key.length != 32) {
@@ -335,7 +337,7 @@ public final class NetworkHelper {
                     KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE);
             generator.initialize(new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_DECRYPT)
                     .setKeySize(3072)
-                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setDigests(KeyProperties.DIGEST_SHA1)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
                     .build());
             generator.generateKeyPair();
@@ -352,7 +354,7 @@ public final class NetworkHelper {
     }
 
     private static String alias(String type, Config config) {
-        return "jiagu." + type + ".v1." + sha256Unchecked(
+        return "jiagu." + type + ".v2." + sha256Unchecked(
                 bytes(config.companyId + "|" + config.packageName)).substring(0, 22);
     }
 

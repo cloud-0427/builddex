@@ -355,9 +355,12 @@ func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string)
 	var err error
 	switch status {
 	case "PUBLISHED":
-		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, published_at=? WHERE release_id=? AND status='DRAFT'`, status, now, releaseID)
+		// 如果已经是 PUBLISHED，则直接返回成功（幂等）
+		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, published_at=?
+			WHERE release_id=? AND (status='DRAFT' OR status='PUBLISHED')`, status, now, releaseID)
 	case "REVOKED":
-		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, revoked_at=? WHERE release_id=? AND status!='REVOKED'`, status, now, releaseID)
+		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, revoked_at=?
+			WHERE release_id=? AND status!='REVOKED'`, status, now, releaseID)
 	default:
 		return errors.New("invalid release status")
 	}

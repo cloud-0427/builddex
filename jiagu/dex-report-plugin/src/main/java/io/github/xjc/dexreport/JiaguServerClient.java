@@ -75,11 +75,16 @@ final class JiaguServerClient {
         release.payloadKeyVersion = longField(response, "payloadKeyVersion", -1);
         release.status = stringField(response, "status");
         String localHash = sha256(Files.readAllBytes(payload.toPath()));
+        boolean statusOk = "DRAFT".equals(release.status) || "PUBLISHED".equals(release.status);
         if (!payloadId.equals(release.payloadId) || payloadVersion != release.payloadVersion ||
                 !packageName.equals(release.packageName) || versionCode != release.versionCode ||
                 !certificateSha256.equals(release.certificateSha256) ||
-                !localHash.equals(release.plaintextSha256) || !"DRAFT".equals(release.status)) {
-            throw new IOException("Jiagu release response does not match uploaded payload");
+                !localHash.equals(release.plaintextSha256) || !statusOk) {
+            throw new IOException(String.format("Jiagu release response mismatch. " +
+                    "Expected: [pkg=%s, ver=%d, hash=%s, status=DRAFT|PUBLISHED]. " +
+                    "Got: [pkg=%s, ver=%d, hash=%s, status=%s]",
+                    packageName, versionCode, localHash,
+                    release.packageName, release.versionCode, release.plaintextSha256, release.status));
         }
         return release;
     }

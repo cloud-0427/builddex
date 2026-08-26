@@ -595,7 +595,9 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 	}
 	deviceKey := deriveDeviceKey(a.cfg.MasterKey, companyID, credential.DeviceID, release)
 	grantID, _ := secure.RandomToken(18)
-	wrapped, err := secure.WrapRSAOAEP(wrapKey, deviceKey, []byte(grantID))
+	// Android KeyStore RSA-OAEP often does not support non-empty labels (P parameter).
+	// We use an empty label to ensure compatibility.
+	wrapped, err := secure.WrapRSAOAEP(wrapKey, deviceKey, nil)
 	clear(deviceKey)
 	if err != nil {
 		writeInternal(w, err)
@@ -608,7 +610,7 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 		PayloadID: release.PayloadID, PayloadVersion: release.PayloadVersion, PackageName: release.PackageName,
 		VersionCode: release.VersionCode, CertificateSHA256: release.CertificateSHA256,
 		PayloadPlaintextSHA256: release.PlaintextSHA256, PayloadKeyVersion: release.PayloadKeyVersion,
-		WrappedPayloadKeySHA256: secure.SHA256URL([]byte(wrapped)), WrapLabel: grantID,
+		WrappedPayloadKeySHA256: secure.SHA256URL([]byte(wrapped)), WrapLabel: "",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(a.cfg.GrantTTL).Unix(),
 	}
 	grantToken, err := secure.SignJWS(secure.CompanySigningKey(a.cfg.MasterKey, companyID), "company-sign-v1", grant)
@@ -617,8 +619,8 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"grant": grantToken, "wrappedPayloadKey": wrapped, "wrapAlgorithm": "RSA-OAEP-SHA256",
-		"wrapLabel": grantID, "downloadPath": fmt.Sprintf("/api/v1/companies/%s/unpack/download", companyID),
+		"grant": grantToken, "wrappedPayloadKey": wrapped, "wrapAlgorithm": "RSA-OAEP",
+		"wrapLabel": "", "downloadPath": fmt.Sprintf("/api/v1/companies/%s/unpack/download", companyID),
 		"expiresAt": grant.ExpiresAt,
 	})
 }

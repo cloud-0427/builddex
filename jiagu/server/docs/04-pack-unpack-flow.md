@@ -140,10 +140,10 @@ DevicePayloadKey = HMAC-SHA256(
 服务端用设备 `wrapPublicKey` 执行：
 
 ```text
-RSA-OAEP-SHA256(DevicePayloadKey, label=grantId)
+RSA-OAEP-SHA256(DevicePayloadKey, label=empty)
 ```
 
-响应中的 `wrappedPayloadKey` 是 Base64URL 编码。客户端解封时必须使用响应的 `wrapLabel`，否则 OAEP 解密失败。
+响应中的 `wrappedPayloadKey` 是 Base64URL 编码。为了兼容 Android KeyStore，RSA-OAEP 必须使用空标签（Empty Label/PSource.PSpecified.DEFAULT）。响应中的 `wrapLabel` 将始终为空字符串。
 
 ## Grant
 
