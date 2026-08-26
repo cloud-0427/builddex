@@ -28,6 +28,7 @@ public final class DexReportPlugin implements Plugin<Project> {
         extension.getAntiDebugEnabled().convention(true);
         extension.getSignatureCheckEnabled().convention(true);
         extension.getResObfuscationEnabled().convention(true);
+        extension.getPublish().convention(true);
 
         project.getPluginManager().withPlugin("com.android.application", plugin -> {
             addJiaguRuntimeDependency(project);
@@ -56,6 +57,7 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getCertificateSha256().set(project.provider(() ->
                                     SigningCertificate.sha256Base64Url(resolveSigningConfig(
                                             androidExtension, variant.getBuildType()))));
+                            task.getPublish().set(ext.getPublish());
                             task.getNdkDirectory().set(androidComponents.getSdkComponents().getNdkDirectory());
                             task.getOutJniLibsDir().set(project.getLayout().getBuildDirectory()
                                     .dir("generated/jiagu/jniLibs/" + variantName));

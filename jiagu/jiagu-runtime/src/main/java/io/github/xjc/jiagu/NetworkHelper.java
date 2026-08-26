@@ -18,6 +18,9 @@ import com.google.android.play.core.integrity.StandardIntegrityManager;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -77,12 +80,35 @@ public final class NetworkHelper {
                         wrapPublicKey, deviceId);
                 saveCredential(context, config, credential);
             }
-            Authorization authorization = authorize(
-                    context, config, signing, wrapping.getPrivate(), deviceId, credential);
-            byte[] container = postBytes(config.downloadUrl(),
-                    new JSONObject().put("grant", authorization.grant).toString());
-            return decryptContainer(config, authorization.grantClaims,
-                    authorization.payloadKey, container);
+
+            Authorization authorization = loadAuthorization(context, config, deviceId, wrapping.getPrivate());
+            if (authorization == null) {
+                authorization = authorize(
+                        context, config, signing, wrapping.getPrivate(), deviceId, credential);
+                saveAuthorization(context, config, authorization);
+            }
+
+            File cache = payloadCacheFile(context, config, deviceId);
+            byte[] container = readPayloadCache(cache);
+            if (container == null) {
+                container = downloadPayload(config, authorization.grant);
+                savePayloadCache(cache, container);
+            }
+            byte[] retryKey = Arrays.copyOf(authorization.payloadKey,
+                    authorization.payloadKey.length);
+            try {
+                return decryptContainer(config, authorization.grantClaims,
+                        authorization.payloadKey, container);
+            } catch (Exception invalidCache) {
+                if (!cache.delete()) {
+                    Log.w(TAG, "Unable to delete invalid payload cache");
+                }
+                byte[] fresh = downloadPayload(config, authorization.grant);
+                savePayloadCache(cache, fresh);
+                return decryptContainer(config, authorization.grantClaims, retryKey, fresh);
+            } finally {
+                Arrays.fill(retryKey, (byte) 0);
+            }
         } catch (Throwable error) {
             Log.e(TAG, "Device authorization failed", error);
             return null;
@@ -142,6 +168,11 @@ public final class NetworkHelper {
         if (!"RSA-OAEP".equals(response.getString("wrapAlgorithm"))) {
             throw new SecurityException("wrap algorithm mismatch");
         }
+        byte[] key = decryptWrappedKey(wrapPrivate, wrapped);
+        return new Authorization(grant, claims, wrapped, key);
+    }
+
+    private static byte[] decryptWrappedKey(PrivateKey wrapPrivate, String wrapped) throws Exception {
         Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
         // Android KeyStore RSA-OAEP implementation defaults MGF1 to SHA-1.
         // For maximum compatibility on API 29-34, we use SHA-1 for both main and MGF1 digests.
@@ -154,7 +185,7 @@ public final class NetworkHelper {
             Arrays.fill(key, (byte) 0);
             throw new SecurityException("invalid device payload key length");
         }
-        return new Authorization(grant, claims, key);
+        return key;
     }
 
     private static byte[] decryptContainer(Config config, JSONObject grant,
@@ -312,6 +343,38 @@ public final class NetworkHelper {
         preferences.edit().putString(key, token).apply();
     }
 
+    private static Authorization loadAuthorization(Context context, Config config,
+                                                   String deviceId, PrivateKey wrapPrivate) {
+        String key = sha256Unchecked(bytes(config.companyId + "|" + config.releaseId + "|auth"));
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String grant = prefs.getString(key, null);
+        String wrapped = prefs.getString(key + ".wrapped", null);
+        if (grant == null || wrapped == null) {
+            return null;
+        }
+        try {
+            JSONObject claims = verifyJws(config, grant);
+            if (claims.getLong("expiresAt") < System.currentTimeMillis() / 1000L + 30L) {
+                return null;
+            }
+            verifyGrant(config, claims, deviceId, wrapped);
+            byte[] payloadKey = decryptWrappedKey(wrapPrivate, wrapped);
+            return new Authorization(grant, claims, wrapped, payloadKey);
+        } catch (Exception e) {
+            prefs.edit().remove(key).remove(key + ".wrapped").apply();
+            return null;
+        }
+    }
+
+    private static void saveAuthorization(Context context, Config config, Authorization auth) {
+        String key = sha256Unchecked(bytes(config.companyId + "|" + config.releaseId + "|auth"));
+        SharedPreferences preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        preferences.edit()
+                .putString(key, auth.grant)
+                .putString(key + ".wrapped", auth.wrappedKey)
+                .apply();
+    }
+
     private static KeyPair getOrCreateSigningKey(Config config) throws Exception {
         String alias = alias("sign", config);
         KeyStore store = loadKeyStore();
@@ -373,6 +436,43 @@ public final class NetworkHelper {
 
     private static byte[] postBytes(String url, String json) throws Exception {
         return request(url, json.getBytes(StandardCharsets.UTF_8), MAX_PAYLOAD_BYTES);
+    }
+
+    private static byte[] downloadPayload(Config config, String grant) throws Exception {
+        return postBytes(config.downloadUrl(), new JSONObject().put("grant", grant).toString());
+    }
+
+    private static File payloadCacheFile(Context context, Config config, String deviceId) {
+        File directory = new File(context.getNoBackupFilesDir(), "jiagu_payloads");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IllegalStateException("cannot create Jiagu payload cache directory");
+        }
+        String name = sha256Unchecked(bytes(config.companyId + "|" + config.releaseId +
+                "|" + deviceId + "|" + config.payloadPlaintextSha256));
+        return new File(directory, name + ".jgpd");
+    }
+
+    private static byte[] readPayloadCache(File file) throws Exception {
+        if (!file.isFile() || file.length() < 40 || file.length() > MAX_PAYLOAD_BYTES) {
+            return null;
+        }
+        try (FileInputStream input = new FileInputStream(file)) {
+            return readLimited(input, MAX_PAYLOAD_BYTES);
+        }
+    }
+
+    private static void savePayloadCache(File target, byte[] value) throws Exception {
+        File temporary = new File(target.getParentFile(), target.getName() + ".tmp");
+        try (FileOutputStream output = new FileOutputStream(temporary)) {
+            output.write(value);
+            output.getFD().sync();
+        }
+        if (target.exists() && !target.delete()) {
+            throw new IllegalStateException("cannot replace Jiagu payload cache");
+        }
+        if (!temporary.renameTo(target)) {
+            throw new IllegalStateException("cannot commit Jiagu payload cache");
+        }
     }
 
     private static byte[] request(String url, byte[] body, int maxResponseBytes) throws Exception {
@@ -461,11 +561,13 @@ public final class NetworkHelper {
     private static final class Authorization {
         final String grant;
         final JSONObject grantClaims;
+        final String wrappedKey;
         final byte[] payloadKey;
 
-        Authorization(String grant, JSONObject grantClaims, byte[] payloadKey) {
+        Authorization(String grant, JSONObject grantClaims, String wrappedKey, byte[] payloadKey) {
             this.grant = grant;
             this.grantClaims = grantClaims;
+            this.wrappedKey = wrappedKey;
             this.payloadKey = payloadKey;
         }
     }

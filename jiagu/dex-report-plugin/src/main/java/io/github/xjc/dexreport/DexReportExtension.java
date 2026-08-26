@@ -71,4 +71,10 @@ public abstract class DexReportExtension {
      */
     public abstract org.gradle.api.provider.ListProperty<String> getResConfigs();
 
+    /**
+     * 是否在构建成功后自动将版本标记为 PUBLISHED，默认 true。
+     * 开发阶段建议设为 false，以支持在不升级版本号的情况下覆盖更新草稿。
+     */
+    public abstract Property<Boolean> getPublish();
+
 }

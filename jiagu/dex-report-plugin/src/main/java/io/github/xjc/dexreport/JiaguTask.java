@@ -73,6 +73,9 @@ public abstract class JiaguTask extends DefaultTask {
     @Input
     public abstract Property<String> getCertificateSha256();
 
+    @Input
+    public abstract Property<Boolean> getPublish();
+
     @InputFiles
     public abstract ListProperty<RegularFile> getAllJars();
 
@@ -230,9 +233,13 @@ public abstract class JiaguTask extends DefaultTask {
                     } finally {
                         Files.deleteIfExists(runtimeConfig.toPath());
                     }
-                    client.publish(release.releaseId);
+                    if (getPublish().get()) {
+                        client.publish(release.releaseId);
+                        getLogger().lifecycle("[Jiagu] release 已发布: {}", release.releaseId);
+                    } else {
+                        getLogger().lifecycle("[Jiagu] release 保持 DRAFT 状态 (未启用自动发布)");
+                    }
                     finishStage("服务端创建发布与 RuntimeConfig ELF", stageStartedAt, stageTimes);
-                    getLogger().lifecycle("[Jiagu] release 已发布: {}", release.releaseId);
                 } finally {
                     Files.deleteIfExists(tempPayload.toPath());
                 }

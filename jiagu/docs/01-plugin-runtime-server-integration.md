@@ -315,6 +315,13 @@ Native 必须执行：
 
 缓存文件必须绑定 releaseId、deviceId 和摘要。缓存复制到另一台设备后，因为没有原 Keystore RSA 私钥，无法解封 Key。
 
+`/unpack/download` 不应在每次 App 启动时调用：
+
+- 首次安装、releaseId 变化、缓存丢失或 JGPD 校验失败时才下载；
+- 普通启动可以刷新短期 AUTHORIZE，以执行撤销检查并取得同一设备 Payload Key，然后直接解密本地 JGPD；
+- Grant 尚未过期时，可以直接复用 Grant、wrapped Key和 JGPD；
+- 只有真正重新下载设备 Payload 时才增加 `delivery_count`。
+
 ### 7.5 Java 与 Native 职责
 
 | Java/Kotlin 层 | Native 层 |
