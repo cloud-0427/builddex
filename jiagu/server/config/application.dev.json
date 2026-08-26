@@ -1,0 +1,9 @@
+{
+  "dataDir": "data/dev/companies",
+  "integrityMode": "disabled",
+  "logging": {
+    "level": "debug",
+    "format": "text",
+    "directory": "logs/dev"
+  }
+}

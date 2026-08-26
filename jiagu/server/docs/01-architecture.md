@@ -1,0 +1,104 @@
+# 01. 总体架构
+
+## 目标
+
+服务端在不保存全量设备数据、不保存每设备 Payload 文件的前提下，实现：
+
+- 按公司隔离授权和数据；
+- 管理授权起止时间、打包次数、下发次数及限额；
+- 标准 Payload 加密存储；
+- 不同设备获得不同 Payload Key 和不同密文；
+- 服务端响应签名、设备持有证明和防重放；
+- 支持 Play Integrity、撤销和后续字段扩展。
+
+## 部署结构
+
+```text
+Android / Gradle / 管理端
+              │
+              ▼
+       Jiagu Go HTTP Server :8761
+       ├── 公司管理模块
+       ├── 打包发布模块
+       ├── 设备凭证模块
+       ├── Play Integrity 模块
+       ├── 授权与撤销模块
+       ├── Payload 重加密模块
+       └── 审计与计数模块
+              │
+              ▼
+       data/companies/
+       ├── company-a.db
+       ├── company-b.db
+       └── company-c.db
+```
+
+服务是一个进程、一个部署单元。SQLite 驱动采用纯 Go 实现，不需要安装本机 SQLite 或启用 CGO。
+
+## 数据隔离
+
+`companyId` 只允许：
+
+```text
+[A-Za-z0-9][A-Za-z0-9_-]{1,63}
+```
+
+公司数据库路径固定为：
+
+```text
+{JIAGU_DATA_DIR}/{companyId}.db
+```
+
+不接受斜杠、点号或任意文件路径，因此不能利用公司标识跨目录访问文件。
+
+服务没有全局公司数据库。查询公司列表时扫描数据目录内符合规则的 `.db` 文件，再读取各自的 `company_info`。
+
+## 无设备存储设计
+
+正常设备不写入长期设备表。首次注册成功后，服务端签发 `DEVICE_CREDENTIAL` JWS，其中包含：
+
+- companyId；
+- deviceId；
+- 设备签名公钥；
+- 设备 Key 封装公钥；
+- packageName；
+- 签名证书摘要；
+- 签发和过期时间。
+
+Credential 由客户端保存。后续服务端只验证 Credential 签名和设备请求签名，不查询设备记录。
+
+只有需要撤销的设备才写入 `revocations`。因此长期存储规模与公司数、Payload 版本数和异常设备数有关，而不与正常设备总数线性相关。
+
+## 一机一码
+
+设备 Payload Key 通过服务端主密钥动态派生：
+
+```text
+HMAC-SHA256(
+    masterKey,
+    domain || companyId || deviceId || releaseId || payloadId ||
+    payloadVersion || packageName || versionCode || certificateDigest ||
+    payloadHash || payloadKeyVersion
+)
+```
+
+派生结果不写数据库。不同设备、不同 Payload 或不同 Key 版本得到不同 Key。
+
+标准 Payload 在 SQLite 中只保存一份。设备下载时，服务端解密标准 Payload，再用派生的设备 Key 实时重新加密并返回。设备专属密文由 Android 客户端缓存，服务端不保存。
+
+## 信任边界
+
+| 边界 | 信任内容 | 不信任内容 |
+|---|---|---|
+| 管理接口 | 服务端管理员 Token | 普通客户端请求 |
+| 打包接口 | 公司 API Key、公司授权状态 | 客户端提交的统计和权限字段 |
+| 设备注册 | 服务端 challenge、设备签名、Play Integrity | 客户端自报设备 ID |
+| Payload 授权 | 服务端签名 Credential、设备私钥持有证明 | Manifest 中的期望签名值 |
+| Android 运行时 | Native 内置服务端公钥、Keystore 私钥 | 本地文件、系统时间、Java 层判断 |
+
+## 当前实现边界
+
+- 单 Payload 默认最大 64 MB，可通过环境变量调整。
+- 当前加密实现以单个 AES-GCM 消息处理完整 Payload，因此打包和下发时会占用约数倍 Payload 大小的瞬时内存。
+- 如果后续 Payload 增长到数百 MB，应升级为分块容器和分块 AES-GCM，但不需要改变 API 和数据库主体。
+- 客户端一旦在已授权设备内取得明文 Key，服务端无法让攻击者遗忘旧 Key；撤销主要阻止未来授权和新版本下发。

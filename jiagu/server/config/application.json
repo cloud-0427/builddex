@@ -1,0 +1,17 @@
+{
+  "listenAddr": ":8761",
+  "maxPayloadMB": 64,
+  "challengeTTLSeconds": 180,
+  "grantTTLSeconds": 600,
+  "deviceCredentialTTLSeconds": 2592000,
+  "logging": {
+    "console": true,
+    "fileEnabled": true,
+    "filePrefix": "jiagu-server",
+    "maxSizeMB": 50,
+    "maxAgeDays": 2,
+    "maxBackups": 10,
+    "compress": true,
+    "localTime": true
+  }
+}

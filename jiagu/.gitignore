@@ -9,6 +9,12 @@
 /.idea/assetWizardSettings.xml
 .DS_Store
 /build
+/server/data/
+/server/build/
+/server/logs/
+/server/*.db
+/server/*.db-shm
+/server/*.db-wal
 /captures
 .externalNativeBuild
 .cxx

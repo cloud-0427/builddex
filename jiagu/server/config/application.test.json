@@ -1,0 +1,12 @@
+{
+  "dataDir": "data/test/companies",
+  "integrityMode": "disabled",
+  "challengeTTLSeconds": 60,
+  "grantTTLSeconds": 120,
+  "deviceCredentialTTLSeconds": 3600,
+  "logging": {
+    "level": "debug",
+    "format": "text",
+    "directory": "logs/test"
+  }
+}
