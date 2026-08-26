@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Jiagu · 公司管理</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="actions.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin/" aria-label="Jiagu 管理台">
+        <span class="brand-mark">J</span>
+        <span><strong>Jiagu</strong><small>安全服务管理台</small></span>
+      </a>
+      <nav aria-label="主导航">
+        <a class="nav-item active" href="/admin/"><span class="nav-icon">企</span>公司管理</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="health-dot"></span>
+        <span><strong>服务已连接</strong><small id="serviceAddress"></small></span>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">授权中心</p><h1>公司管理</h1></div>
+        <div class="top-actions">
+          <button class="icon-button" id="refreshButton" type="button" title="刷新" aria-label="刷新">↻</button>
+          <button class="user-chip" id="changeTokenButton" type="button"><span>A</span>管理员</button>
+        </div>
+      </header>
+
+      <section class="content">
+        <div class="intro">
+          <div><h2>公司与授权</h2><p>管理接入公司的有效期、调用限额与服务状态。</p></div>
+          <button class="primary-button" id="createButton" type="button"><span>＋</span>新建公司</button>
+        </div>
+
+        <div class="metrics" aria-label="公司统计">
+          <article class="metric-card"><span class="metric-icon blue">企</span><div><small>公司总数</small><strong id="totalMetric">—</strong></div></article>
+          <article class="metric-card"><span class="metric-icon green">✓</span><div><small>正常授权</small><strong id="activeMetric">—</strong></div></article>
+          <article class="metric-card"><span class="metric-icon amber">!</span><div><small>即将到期</small><strong id="expiringMetric">—</strong></div></article>
+          <article class="metric-card"><span class="metric-icon slate">停</span><div><small>停用 / 已删除</small><strong id="inactiveMetric">—</strong></div></article>
+        </div>
+
+        <section class="table-card">
+          <div class="table-tools">
+            <label class="search"><span>⌕</span><input id="searchInput" type="search" placeholder="搜索公司 ID 或说明" autocomplete="off"></label>
+            <div class="filters" role="group" aria-label="状态筛选">
+              <button class="filter active" data-status="ALL" type="button">全部</button>
+              <button class="filter" data-status="ACTIVE" type="button">正常</button>
+              <button class="filter" data-status="SUSPENDED" type="button">已暂停</button>
+              <button class="filter" data-status="REVOKED" type="button">已删除</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>公司</th><th>授权状态</th><th>授权有效期</th><th>打包额度</th><th>下发额度</th><th>更新时间</th><th><span class="sr-only">操作</span></th></tr></thead>
+              <tbody id="companyRows"></tbody>
+            </table>
+            <div class="table-state" id="tableState"><span class="spinner"></span><p>正在读取公司信息…</p></div>
+          </div>
+          <footer class="table-footer"><span id="resultCount">共 0 家公司</span><span>限额为 0 表示不限量</span></footer>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="scrim hidden" id="drawerScrim"></div>
+  <aside class="drawer" id="detailDrawer" aria-hidden="true" aria-labelledby="detailTitle">
+    <div class="drawer-header">
+      <div><p class="eyebrow">公司详情</p><h2 id="detailTitle">—</h2></div>
+      <button class="icon-button" id="closeDrawerButton" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="drawer-body" id="detailBody"></div>
+    <div class="drawer-actions">
+      <button class="danger-ghost" id="deleteButton" type="button">逻辑删除</button>
+      <div class="action-cluster">
+        <button class="secondary-button" id="statusButton" type="button">暂停服务</button>
+        <button class="primary-button" id="editButton" type="button">编辑信息</button>
+      </div>
+    </div>
+  </aside>
+
+  <dialog id="companyDialog">
+    <form id="companyForm">
+      <div class="dialog-header"><div><p class="eyebrow" id="formEyebrow">公司接入</p><h2 id="formTitle">新建公司</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></div>
+      <div class="form-grid">
+        <label class="field full"><span>公司 ID <b>*</b></span><input name="companyId" required minlength="2" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,63}" placeholder="例如 acme_android"><small>创建后不可修改，仅支持字母、数字、下划线和连字符</small></label>
+        <label class="field full"><span>公司说明</span><input name="description" maxlength="200" placeholder="例如 ACME Android 产品线"></label>
+        <label class="field"><span>授权开始时间 <b>*</b></span><input name="authorizedFrom" type="datetime-local" required></label>
+        <label class="field"><span>授权结束时间</span><input name="authorizedUntil" type="datetime-local"><small>留空表示永久有效</small></label>
+        <label class="field"><span>打包次数上限</span><input name="packLimit" type="number" min="0" step="1" value="0"><small>0 表示不限量</small></label>
+        <label class="field"><span>下发次数上限</span><input name="deliveryLimit" type="number" min="0" step="1" value="0"><small>0 表示不限量</small></label>
+        <label class="field full edit-only"><span>授权状态</span><select name="status"><option value="ACTIVE">正常</option><option value="SUSPENDED">暂停</option><option value="EXPIRED">过期</option></select></label>
+        <label class="field full"><span>扩展信息（JSON）</span><textarea name="ext" rows="5" spellcheck="false" placeholder='{"contractNo":"C-2026-001","contact":"security@example.com"}'></textarea><small id="jsonHint">可填写合同号、联系人等自定义信息</small></label>
+      </div>
+      <div class="dialog-actions"><button class="secondary-button dialog-close" type="button">取消</button><button class="primary-button" id="saveButton" type="submit">创建公司</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="compact-dialog" id="tokenDialog">
+    <form id="tokenForm">
+      <div class="token-symbol">⌁</div><h2>连接管理服务</h2><p>请输入管理员 Token。它仅保存在当前浏览器标签页中，关闭后自动清除。</p>
+      <label class="field"><span>管理员 Token</span><input name="token" type="password" required autocomplete="current-password" placeholder="输入 JIAGU_ADMIN_TOKEN"></label>
+      <p class="form-error" id="tokenError"></p><button class="primary-button full-button" type="submit">连接并进入</button>
+    </form>
+  </dialog>
+
+  <dialog class="compact-dialog" id="keyDialog">
+    <div class="success-symbol">✓</div><h2>公司创建成功</h2><p>API Key 只会显示这一次，请立即复制并保存到安全位置。</p>
+    <label class="key-box"><span>公司 API Key</span><output id="apiKeyOutput"></output></label>
+    <div class="dialog-actions"><button class="secondary-button" id="closeKeyButton" type="button">我已保存</button><button class="primary-button" id="copyKeyButton" type="button">复制 API Key</button></div>
+  </dialog>
+
+  <dialog class="compact-dialog" id="deleteDialog">
+    <div class="danger-symbol">!</div><h2>确认逻辑删除？</h2><p id="deleteMessage"></p><div class="notice">数据库文件和历史记录会保留；公司状态将改为“已删除”，其打包和设备授权会立即停止。</div>
+    <div class="dialog-actions"><button class="secondary-button" id="cancelDeleteButton" type="button">取消</button><button class="danger-button" id="confirmDeleteButton" type="button">确认删除</button></div>
+  </dialog>
+
+  <dialog class="compact-dialog" id="statusDialog">
+    <div class="token-symbol" id="statusSymbol">Ⅱ</div><h2 id="statusDialogTitle">暂停公司服务？</h2><p id="statusMessage"></p>
+    <div class="notice" id="statusNotice"></div>
+    <div class="dialog-actions"><button class="secondary-button" id="cancelStatusButton" type="button">取消</button><button class="primary-button" id="confirmStatusButton" type="button">确认暂停</button></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js" defer></script>
+</body>
+</html>

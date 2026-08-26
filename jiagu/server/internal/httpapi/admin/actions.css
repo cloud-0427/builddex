@@ -1,0 +1,24 @@
+.drawer-actions {
+  gap: 10px;
+}
+
+.action-cluster {
+  display: flex;
+  gap: 9px;
+}
+
+.primary-button:disabled,
+.secondary-button:disabled,
+.danger-button:disabled,
+.danger-ghost:disabled {
+  cursor: not-allowed;
+  box-shadow: none;
+  opacity: 0.48;
+}
+
+@media (max-width: 480px) {
+  .drawer-actions,
+  .action-cluster {
+    flex-wrap: wrap;
+  }
+}

@@ -111,7 +111,23 @@ Content-Type: application/json
 }
 ```
 
-未传字段保持不变。状态支持 ACTIVE、SUSPENDED、EXPIRED、REVOKED。
+未传字段保持不变。状态支持 ACTIVE、SUSPENDED、EXPIRED、REVOKED。公司进入 `REVOKED` 后不可恢复为其他状态。
+
+### `DELETE /api/v1/companies/{companyId}`
+
+权限：管理员。
+
+功能：逻辑删除公司。接口将公司状态修改为 `REVOKED`，不删除公司 SQLite 文件、版本数据和操作记录。重复调用返回成功。
+
+### 公司管理页面
+
+服务端内置公司管理页面，启动后访问：
+
+```text
+http://host:8761/admin/
+```
+
+管理员 Token 仅保存在当前浏览器标签页的 `sessionStorage` 中。
 
 ### `GET /api/v1/companies/{companyId}/public-config`
 

@@ -81,7 +81,9 @@ func (a *API) routes() {
 	a.mux.HandleFunc("POST /api/v1/companies", a.createCompany)
 	a.mux.HandleFunc("GET /api/v1/companies/{companyId}", a.getCompany)
 	a.mux.HandleFunc("PATCH /api/v1/companies/{companyId}", a.updateCompany)
+	a.mux.HandleFunc("DELETE /api/v1/companies/{companyId}", a.deleteCompany)
 	a.mux.HandleFunc("GET /api/v1/companies/{companyId}/public-config", a.publicConfig)
+	a.routesAdmin()
 
 	a.mux.HandleFunc("GET /api/v1/companies/{companyId}/pack/releases", a.listReleases)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/pack/releases", a.createRelease)
@@ -235,6 +237,10 @@ func (a *API) updateCompany(w http.ResponseWriter, r *http.Request) {
 		value, _ := json.Marshal(*input.Ext)
 		extJSON = string(value)
 	}
+	if current.Status == "REVOKED" && status != "REVOKED" {
+		writeError(w, http.StatusConflict, "COMPANY_REVOKED", "a revoked company cannot be restored")
+		return
+	}
 	if packLimit < 0 || deliveryLimit < 0 || (until != 0 && until <= from) || !validCompanyStatus(status) {
 		writeError(w, http.StatusBadRequest, "INVALID_COMPANY", "invalid limits or authorization time")
 		return
@@ -245,6 +251,33 @@ func (a *API) updateCompany(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, _ := store.GetCompany(r.Context(), db)
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// deleteCompany performs a logical delete. The per-company database and its
+// audit history remain available to administrators, while all authorization
+// checks reject the company because its status is REVOKED.
+func (a *API) deleteCompany(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	db, ok := a.openCompany(w, r)
+	if !ok {
+		return
+	}
+	current, err := store.GetCompany(r.Context(), db)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if current.Status != "REVOKED" {
+		if err := store.UpdateCompany(r.Context(), db, current.Description, current.AuthorizedFrom,
+			current.AuthorizedUntil, current.PackLimit, current.DeliveryLimit, "REVOKED", current.ExtJSON); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		store.AddOperationLog(r.Context(), db, "COMPANY_REVOKE", "SUCCESS", requestID(r.Context()), current.CompanyID)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) publicConfig(w http.ResponseWriter, r *http.Request) {

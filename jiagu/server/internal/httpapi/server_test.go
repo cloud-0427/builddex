@@ -141,6 +141,80 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	}
 }
 
+func TestCompanyManagementAndLogicalDelete(t *testing.T) {
+	dbs, err := store.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbs.Close()
+	handler := New(config.Config{
+		AdminToken: "admin", MasterKey: bytes.Repeat([]byte{0x42}, 32),
+		MaxPayloadBytes: 1 << 20, ChallengeTTL: time.Minute, GrantTTL: time.Minute,
+		DeviceCredentialTTL: time.Hour, IntegrityMode: "disabled",
+	}, dbs)
+
+	created := doJSON(t, handler, http.MethodPost, "/api/v1/companies", "Bearer admin", "", map[string]any{
+		"companyId": "logical-delete", "description": "keep the database",
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create company: %d %s", created.Code, created.Body.String())
+	}
+	paused := doJSON(t, handler, http.MethodPatch, "/api/v1/companies/logical-delete", "Bearer admin", "", map[string]any{
+		"status": "SUSPENDED",
+	})
+	if paused.Code != http.StatusOK {
+		t.Fatalf("pause company: %d %s", paused.Code, paused.Body.String())
+	}
+	resumed := doJSON(t, handler, http.MethodPatch, "/api/v1/companies/logical-delete", "Bearer admin", "", map[string]any{
+		"status": "ACTIVE",
+	})
+	if resumed.Code != http.StatusOK {
+		t.Fatalf("resume company: %d %s", resumed.Code, resumed.Body.String())
+	}
+
+	deleted := doJSON(t, handler, http.MethodDelete, "/api/v1/companies/logical-delete", "Bearer admin", "", nil)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete company: %d %s", deleted.Code, deleted.Body.String())
+	}
+
+	got := doJSON(t, handler, http.MethodGet, "/api/v1/companies/logical-delete", "Bearer admin", "", nil)
+	if got.Code != http.StatusOK {
+		t.Fatalf("get deleted company: %d %s", got.Code, got.Body.String())
+	}
+	var company store.Company
+	decodeResponse(t, got, &company)
+	if company.Status != "REVOKED" {
+		t.Fatalf("status = %q, want REVOKED", company.Status)
+	}
+	restore := doJSON(t, handler, http.MethodPatch, "/api/v1/companies/logical-delete", "Bearer admin", "", map[string]any{
+		"status": "ACTIVE",
+	})
+	if restore.Code != http.StatusConflict {
+		t.Fatalf("restore revoked company: %d %s", restore.Code, restore.Body.String())
+	}
+
+	again := doJSON(t, handler, http.MethodDelete, "/api/v1/companies/logical-delete", "Bearer admin", "", nil)
+	if again.Code != http.StatusNoContent {
+		t.Fatalf("idempotent delete: %d %s", again.Code, again.Body.String())
+	}
+}
+
+func TestAdminPageIsServed(t *testing.T) {
+	dbs, err := store.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbs.Close()
+	handler := New(config.Config{IntegrityMode: "disabled"}, dbs)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte("公司管理")) {
+		t.Fatalf("admin page: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 type challengeValue struct{ ID, Value string }
 
 func newChallenge(t *testing.T, handler http.Handler, purpose string) challengeValue {
