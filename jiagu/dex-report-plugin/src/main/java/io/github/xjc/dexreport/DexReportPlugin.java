@@ -2,6 +2,9 @@ package io.github.xjc.dexreport;
 
 import com.android.build.api.artifact.ScopedArtifact;
 import com.android.build.api.artifact.SingleArtifact;
+import com.android.build.api.dsl.ApkSigningConfig;
+import com.android.build.api.dsl.ApplicationBuildType;
+import com.android.build.api.dsl.ApplicationExtension;
 import com.android.build.api.variant.ApplicationAndroidComponentsExtension;
 import com.android.build.api.variant.ScopedArtifacts;
 import org.gradle.api.Plugin;
@@ -22,9 +25,6 @@ public final class DexReportPlugin implements Plugin<Project> {
     public void apply(Project project) {
         DexReportExtension extension = project.getExtensions().create("dexReport", DexReportExtension.class);
 
-        extension.getEnableMultiVersion().convention(true);
-        extension.getPublicKeyJsonKey().convention("akmKeys");
-        extension.getKeyExpiryDays().convention(2);
         extension.getAntiDebugEnabled().convention(true);
         extension.getSignatureCheckEnabled().convention(true);
         extension.getResObfuscationEnabled().convention(true);
@@ -34,6 +34,8 @@ public final class DexReportPlugin implements Plugin<Project> {
 
             ApplicationAndroidComponentsExtension androidComponents =
                     project.getExtensions().getByType(ApplicationAndroidComponentsExtension.class);
+            ApplicationExtension androidExtension =
+                    project.getExtensions().getByType(ApplicationExtension.class);
 
             androidComponents.onVariants(androidComponents.selector().all(), variant -> {
                 String variantName = variant.getName();
@@ -43,17 +45,17 @@ public final class DexReportPlugin implements Plugin<Project> {
                         "jiagu" + variantCap, JiaguTask.class, task -> {
                             task.setGroup("jiagu");
                             DexReportExtension ext = project.getExtensions().getByType(DexReportExtension.class);
-                            task.getPublicKeyPath().set(ext.getPublicKeyPath());
-                            task.getPublicKeyJsonKey().set(ext.getPublicKeyJsonKey());
-                            task.getEnableMultiVersion().set(ext.getEnableMultiVersion());
+                            task.getServerUrl().set(ext.getServerUrl());
+                            task.getCompanyId().set(ext.getCompanyId());
+                            task.getCompanyApiKey().set(ext.getCompanyApiKey());
                             task.getPackageName().set(variant.getApplicationId());
                             if (!variant.getOutputs().isEmpty()) {
                                 task.getVersionName().set(variant.getOutputs().get(0).getVersionName());
                                 task.getVersionCode().set(variant.getOutputs().get(0).getVersionCode());
                             }
-                            task.getKeyExpiryDays().set(ext.getKeyExpiryDays());
-                            task.getKeysFile().set(project.getRootProject().getLayout()
-                                    .getProjectDirectory().file("jiagu_keys.json"));
+                            task.getCertificateSha256().set(project.provider(() ->
+                                    SigningCertificate.sha256Base64Url(resolveSigningConfig(
+                                            androidExtension, variant.getBuildType()))));
                             task.getNdkDirectory().set(androidComponents.getSdkComponents().getNdkDirectory());
                             task.getOutJniLibsDir().set(project.getLayout().getBuildDirectory()
                                     .dir("generated/jiagu/jniLibs/" + variantName));
@@ -73,9 +75,6 @@ public final class DexReportPlugin implements Plugin<Project> {
                 DexReportExtension ext = project.getExtensions().getByType(DexReportExtension.class);
                 TaskProvider<ManifestTransformerTask> manifestTaskProvider = project.getTasks().register(
                         "modifyManifest" + variantCap, ManifestTransformerTask.class, task -> {
-                            task.getKeyUrl().set(ext.getPublicKeyPath());
-                            task.getJsonKey().set(ext.getPublicKeyJsonKey());
-                            task.getExpiryDays().set(ext.getKeyExpiryDays());
                             task.getAntiDebugEnabled().set(ext.getAntiDebugEnabled());
                             task.getSignatureCheckEnabled().set(ext.getSignatureCheckEnabled());
                             task.getExpectedSignature().set(ext.getExpectedSignature());
@@ -93,6 +92,23 @@ public final class DexReportPlugin implements Plugin<Project> {
                 }
             });
         });
+    }
+
+    private static ApkSigningConfig resolveSigningConfig(
+            ApplicationExtension androidExtension, String buildTypeName) {
+        if (buildTypeName == null) {
+            throw new IllegalStateException("Jiagu requires a signed Android application variant");
+        }
+        ApplicationBuildType buildType = androidExtension.getBuildTypes().getByName(buildTypeName);
+        ApkSigningConfig signingConfig = buildType.getSigningConfig();
+        if (signingConfig == null && "debug".equals(buildTypeName)) {
+            signingConfig = androidExtension.getSigningConfigs().findByName("debug");
+        }
+        if (signingConfig == null) {
+            throw new IllegalStateException(
+                    "Jiagu cannot resolve signingConfig for build type " + buildTypeName);
+        }
+        return signingConfig;
     }
 
     private void registerResourceObfuscation(

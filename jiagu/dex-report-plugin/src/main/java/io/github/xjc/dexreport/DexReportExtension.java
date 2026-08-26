@@ -37,25 +37,14 @@ public abstract class DexReportExtension {
      */
     public abstract Property<String> getAttachToTask();
 
-    /**
-     * 公钥获取路径（支持 http://, https:// 或本地文件路径）。
-     */
-    public abstract Property<String> getPublicKeyPath();
+    /** 密钥服务地址，例如 https://jiagu.example.com:8761。 */
+    public abstract Property<String> getServerUrl();
 
-    /**
-     * 公钥所在的 JSON 根对象 Key 名。
-     */
-    public abstract Property<String> getPublicKeyJsonKey();
+    /** 服务端公司标识。 */
+    public abstract Property<String> getCompanyId();
 
-    /**
-     * 是否启用多版本支持。如果为 true，将根据 versionCode 从 JSON 中查找对应公钥。
-     */
-    public abstract Property<Boolean> getEnableMultiVersion();
-
-    /**
-     * 密钥有效期（天），默认 2 天。
-     */
-    public abstract Property<Integer> getKeyExpiryDays();
+    /** 公司打包 API Key。仅用于构建期 HTTP 请求，不得写入 APK。 */
+    public abstract Property<String> getCompanyApiKey();
 
     /**
      * 是否启用反调试和 Hook 检测，默认 true。

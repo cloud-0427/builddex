@@ -145,166 +145,6 @@ static __attribute__((always_inline)) inline bool verify_signature(JNIEnv* env, 
     return true;
 }
 
-// 辅助函数：使用 JNI 调用 Java 的 AES-GCM 解密
-bool decrypt_aes_gcm(JNIEnv *env, unsigned char* data, size_t size, const std::string& key_base64) {
-    if (key_base64.empty() || size < 28) return false;
-
-    // 1. 获取 IV (前 12 字节)
-    jbyteArray iv_array = env->NewByteArray(12);
-    env->SetByteArrayRegion(iv_array, 0, 12, reinterpret_cast<jbyte*>(data));
-
-    // 2. 获取加密数据 (IV 之后的部分)
-    size_t cipher_len = size - 12;
-    jbyteArray cipher_array = env->NewByteArray(cipher_len);
-    env->SetByteArrayRegion(cipher_array, 0, cipher_len, reinterpret_cast<jbyte*>(data + 12));
-
-    // 3. 准备密钥
-    jclass base64_class = env->FindClass(X("android/util/Base64"));
-    jmethodID decode_mid = env->GetStaticMethodID(base64_class, X("decode"), X("(Ljava/lang/String;I)[B"));
-    jbyteArray key_bytes = (jbyteArray)env->CallStaticObjectMethod(base64_class, decode_mid, env->NewStringUTF(key_base64.c_str()), 0); // 0 = DEFAULT
-
-    // 提取私钥中的原始字节并截取 32 字节 (AES-256)
-    jbyte* kb = env->GetByteArrayElements(key_bytes, nullptr);
-    jbyteArray aes_key_array = env->NewByteArray(32);
-    env->SetByteArrayRegion(aes_key_array, 0, 32, kb);
-    env->ReleaseByteArrayElements(key_bytes, kb, 0);
-
-    // 4. 执行 AES-GCM 解密
-    jclass cipher_class = env->FindClass(X("javax/crypto/Cipher"));
-    JNI_CHECK_NULL(cipher_class, "Cipher class not found", false);
-    jmethodID get_instance = env->GetStaticMethodID(cipher_class, X("getInstance"), X("(Ljava/lang/String;)Ljavax/crypto/Cipher;"));
-    JNI_CHECK_NULL(get_instance, "Cipher.getInstance not found", false);
-    jobject cipher = env->CallStaticObjectMethod(cipher_class, get_instance, env->NewStringUTF(X("AES/GCM/NoPadding")));
-    JNI_CHECK_NULL(cipher, "Cipher instance creation failed", false);
-
-    jclass key_spec_class = env->FindClass(X("javax/crypto/spec/SecretKeySpec"));
-    JNI_CHECK_NULL(key_spec_class, "SecretKeySpec class not found", false);
-    jmethodID key_spec_init = env->GetMethodID(key_spec_class, "<init>", X("([BLjava/lang/String;)V"));
-    JNI_CHECK_NULL(key_spec_init, "SecretKeySpec.<init> not found", false);
-    jobject key_spec = env->NewObject(key_spec_class, key_spec_init, aes_key_array, env->NewStringUTF(X("AES")));
-
-    jclass gcm_spec_class = env->FindClass("javax/crypto/spec/GCMParameterSpec");
-    JNI_CHECK_NULL(gcm_spec_class, "GCMParameterSpec class not found", false);
-    jmethodID gcm_spec_init = env->GetMethodID(gcm_spec_class, "<init>", "(I[B)V");
-    JNI_CHECK_NULL(gcm_spec_init, "GCMParameterSpec.<init> not found", false);
-    jobject gcm_spec = env->NewObject(gcm_spec_class, gcm_spec_init, 128, iv_array);
-
-    jmethodID init_mid = env->GetMethodID(cipher_class, "init", "(ILjava/security/Key;Ljava/security/spec/AlgorithmParameterSpec;)V");
-    env->CallVoidMethod(cipher, init_mid, 2, key_spec, gcm_spec); // 2 = DECRYPT_MODE
-
-    jmethodID do_final_mid = env->GetMethodID(cipher_class, "doFinal", "([B)[B");
-    jbyteArray decrypted_bytes = (jbyteArray)env->CallObjectMethod(cipher, do_final_mid, cipher_array);
-
-    if (env->ExceptionCheck()) {
-        LOGE("Jiagu_Native: AES-GCM decryption failed (likely bad key/tag)");
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-        return false;
-    }
-
-    // 5. 将结果拷回原内存
-    jbyte* db = env->GetByteArrayElements(decrypted_bytes, nullptr);
-    jsize db_len = env->GetArrayLength(decrypted_bytes);
-    std::memcpy(data, db, db_len);
-    env->ReleaseByteArrayElements(decrypted_bytes, db, 0);
-    return true;
-}
-
-// 辅助函数：十六进制字符串转字节数组
-std::vector<unsigned char> hex_to_bytes(const std::string& hex) {
-    std::vector<unsigned char> bytes;
-    for (size_t i = 0; i < hex.length(); i += 2) {
-        std::string byteString = hex.substr(i, 2);
-        unsigned char byte = (unsigned char) strtol(byteString.c_str(), nullptr, 16);
-        bytes.push_back(byte);
-    }
-    return bytes;
-}
-
-// 核心逻辑：从包裹块中解密出真正的 Session Key
-std::string decrypt_kms_key(JNIEnv *env, const std::string& kms_blob_str, const std::string& pkg_name, const std::string& version_name) {
-    // kms_blob_str 格式: salt|nonce|bksBlob
-    size_t first_pipe = kms_blob_str.find('|');
-    size_t second_pipe = kms_blob_str.find('|', first_pipe + 1);
-    if (first_pipe == std::string::npos || second_pipe == std::string::npos) return "";
-
-    std::string salt_hex = kms_blob_str.substr(0, first_pipe);
-    std::string nonce_hex = kms_blob_str.substr(first_pipe + 1, second_pipe - first_pipe - 1);
-    std::string bks_blob_hex = kms_blob_str.substr(second_pipe + 1);
-
-    auto nonce_bytes = hex_to_bytes(nonce_hex);
-    auto bks_blob_bytes = hex_to_bytes(bks_blob_hex);
-
-    // 动态派生 Master Key: SHA-256(pkg:version:salt)
-    // 使用 JNI 调用 Java MessageDigest 确保算法实现对齐且代码精简
-    jclass digest_class = env->FindClass("java/security/MessageDigest");
-    JNI_CHECK_NULL(digest_class, "MessageDigest class not found", "");
-    jmethodID get_instance = env->GetStaticMethodID(digest_class, "getInstance", "(Ljava/lang/String;)Ljava/security/MessageDigest;");
-    JNI_CHECK_NULL(get_instance, "MessageDigest.getInstance not found", "");
-    jobject digest_obj = env->CallStaticObjectMethod(digest_class, get_instance, env->NewStringUTF(X("SHA-256")));
-    JNI_CHECK_NULL(digest_obj, "MessageDigest instance creation failed", "");
-
-    // 构造混淆盐值
-    std::string salt_str = X("JIAGU_SALT_2026");
-
-    std::string input_str = pkg_name + ":" + version_name + ":" + salt_str;
-    jbyteArray input_bytes = env->NewByteArray(input_str.length());
-    env->SetByteArrayRegion(input_bytes, 0, input_str.length(), reinterpret_cast<const jbyte*>(input_str.c_str()));
-
-    jmethodID digest_mid = env->GetMethodID(digest_class, "digest", "([B)[B");
-    jbyteArray master_key_array = (jbyteArray)env->CallObjectMethod(digest_obj, digest_mid, input_bytes);
-
-    jbyteArray nonce_array = env->NewByteArray(nonce_bytes.size());
-    env->SetByteArrayRegion(nonce_array, 0, nonce_bytes.size(), reinterpret_cast<const jbyte*>(nonce_bytes.data()));
-
-    jbyteArray blob_array = env->NewByteArray(bks_blob_bytes.size());
-    env->SetByteArrayRegion(blob_array, 0, bks_blob_bytes.size(), reinterpret_cast<const jbyte*>(bks_blob_bytes.data()));
-
-    // 调用 Java AES-GCM 解密出 Session Key
-    jclass cipher_class = env->FindClass("javax/crypto/Cipher");
-    JNI_CHECK_NULL(cipher_class, "Cipher class not found in KMS", "");
-    jmethodID get_cipher_instance = env->GetStaticMethodID(cipher_class, "getInstance", "(Ljava/lang/String;)Ljavax/crypto/Cipher;");
-    JNI_CHECK_NULL(get_cipher_instance, "Cipher.getInstance not found in KMS", "");
-    jobject cipher = env->CallStaticObjectMethod(cipher_class, get_cipher_instance, env->NewStringUTF("AES/GCM/NoPadding"));
-    JNI_CHECK_NULL(cipher, "Cipher instance creation failed in KMS", "");
-
-    jclass key_spec_class = env->FindClass("javax/crypto/spec/SecretKeySpec");
-    JNI_CHECK_NULL(key_spec_class, "SecretKeySpec class not found in KMS", "");
-    jmethodID key_spec_init = env->GetMethodID(key_spec_class, "<init>", "([BLjava/lang/String;)V");
-    JNI_CHECK_NULL(key_spec_init, "SecretKeySpec.<init> not found in KMS", "");
-    jobject key_spec = env->NewObject(key_spec_class, key_spec_init, master_key_array, env->NewStringUTF("AES"));
-    JNI_CHECK_NULL(key_spec, "SecretKeySpec instance creation failed in KMS", "");
-
-    jclass gcm_spec_class = env->FindClass("javax/crypto/spec/GCMParameterSpec");
-    JNI_CHECK_NULL(gcm_spec_class, "GCMParameterSpec class not found in KMS", "");
-    jmethodID gcm_spec_init = env->GetMethodID(gcm_spec_class, "<init>", "(I[B)V");
-    JNI_CHECK_NULL(gcm_spec_init, "GCMParameterSpec.<init> not found in KMS", "");
-    jobject gcm_spec = env->NewObject(gcm_spec_class, gcm_spec_init, 128, nonce_array);
-    JNI_CHECK_NULL(gcm_spec, "GCMParameterSpec instance creation failed in KMS", "");
-
-    jmethodID init_mid = env->GetMethodID(cipher_class, "init", "(ILjava/security/Key;Ljava/security/spec/AlgorithmParameterSpec;)V");
-    JNI_CHECK_NULL(init_mid, "Cipher.init not found in KMS", "");
-    env->CallVoidMethod(cipher, init_mid, 2, key_spec, gcm_spec); // DECRYPT_MODE
-
-    jmethodID do_final_mid = env->GetMethodID(cipher_class, "doFinal", "([B)[B");
-    JNI_CHECK_NULL(do_final_mid, "Cipher.doFinal not found in KMS", "");
-    jbyteArray session_key_bytes = (jbyteArray)env->CallObjectMethod(cipher, do_final_mid, blob_array);
-    JNI_CHECK_NULL(session_key_bytes, "Session Key decryption failed in KMS", "");
-
-    jclass base64_class = env->FindClass("android/util/Base64");
-    JNI_CHECK_NULL(base64_class, "Base64 class not found in KMS", "");
-    jmethodID encode_mid = env->GetStaticMethodID(base64_class, "encodeToString", "([BI)Ljava/lang/String;");
-    JNI_CHECK_NULL(encode_mid, "Base64.encodeToString not found in KMS", "");
-    jstring session_key_base64_j = (jstring)env->CallStaticObjectMethod(base64_class, encode_mid, session_key_bytes, 2); // 2 = NO_WRAP
-    JNI_CHECK_NULL(session_key_base64_j, "Base64 encoding failed in KMS", "");
-
-    const char* sk_base64 = env->GetStringUTFChars(session_key_base64_j, nullptr);
-    std::string result(sk_base64);
-    env->ReleaseStringUTFChars(session_key_base64_j, sk_base64);
-
-    return result;
-}
-
 // 辅助函数：注入 DEX 到 ClassLoader
 void inject_dex_elements(JNIEnv *env, jobject system_loader, jobject memory_loader) {
     jclass base_loader_class = env->FindClass(X("dalvik/system/BaseDexClassLoader"));
@@ -380,8 +220,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     JNI_CHECK_NULL(bundle_class, "Bundle class not found", );
     jmethodID get_string = env->GetMethodID(bundle_class, "getString", "(Ljava/lang/String;)Ljava/lang/String;");
 
-    jstring key_url_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF(X("KEY_URL")));
-    jstring json_key_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF(X("JSON_KEY")));
     jstring real_app_name_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF(X("REAL_APPLICATION")));
 
     // 读取防护配置
@@ -403,64 +241,16 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         env->ReleaseStringUTFChars(expected_sig_j, expected_sig);
     }
 
-    const char *key_url = env->GetStringUTFChars(key_url_j, nullptr);
-    const char *json_key = env->GetStringUTFChars(json_key_j, nullptr);
     const char *real_app_name = env->GetStringUTFChars(real_app_name_j, nullptr);
     const char *pkg_name_str = env->GetStringUTFChars(pkg_name, nullptr);
 
-    // 2. 安全获取私钥 (KeyStore 硬件绑定 + 有效期校验)
-    std::string private_key;
-    jclass network_helper = env->FindClass("io/github/xjc/jiagu/NetworkHelper");
-    if (network_helper) {
-         jmethodID get_secure_mid = env->GetStaticMethodID(network_helper, "getSecureKey", "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;");
-         JNI_CHECK_NULL(get_secure_mid, "getSecureKey method not found", );
-
-         // 获取 vcode 和 vname 逻辑
-         jclass pkg_info_class = env->FindClass("android/content/pm/PackageInfo");
-         JNI_CHECK_NULL(pkg_info_class, "PackageInfo class not found", );
-         jmethodID get_pkg_info_mid = env->GetMethodID(pm_class, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
-         JNI_CHECK_NULL(get_pkg_info_mid, "getPackageInfo method not found", );
-         jobject pkg_info = env->CallObjectMethod(pm, get_pkg_info_mid, pkg_name, 0);
-         JNI_CHECK_NULL(pkg_info, "PackageInfo not found", );
-         jfieldID vcode_fid = env->GetFieldID(env->GetObjectClass(pkg_info), "versionCode", "I");
-         JNI_CHECK_NULL(vcode_fid, "versionCode field not found", );
-         jint vcode = env->GetIntField(pkg_info, vcode_fid);
-
-         jfieldID vname_fid = env->GetFieldID(env->GetObjectClass(pkg_info), "versionName", "Ljava/lang/String;");
-         JNI_CHECK_NULL(vname_fid, "versionName field not found", );
-         jstring vname_j = (jstring)env->GetObjectField(pkg_info, vname_fid);
-         JNI_CHECK_NULL(vname_j, "versionName not found", );
-         const char* vname_str = env->GetStringUTFChars(vname_j, nullptr);
-
-         jstring fetched_key_j = (jstring)env->CallStaticObjectMethod(network_helper, get_secure_mid, context, key_url_j, json_key_j, vcode);
-         if (fetched_key_j) {
-             const char* fetched_key_raw = env->GetStringUTFChars(fetched_key_j, nullptr);
-             std::string fetched_key_str(fetched_key_raw);
-
-             // 执行 KMS 密钥解封，还原 Session Key (传入包名和版本名进行动态 Master Key 派生)
-             private_key = decrypt_kms_key(env, fetched_key_str, pkg_name_str, vname_str);
-
-             env->ReleaseStringUTFChars(fetched_key_j, fetched_key_raw);
-         }
-         env->ReleaseStringUTFChars(vname_j, vname_str);
-    }
-
-    if (private_key.empty()) {
-        LOGE("Jiagu_Native: CRITICAL - Failed to acquire decryption key.");
-        env->ReleaseStringUTFChars(key_url_j, key_url);
-        env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
-        env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
-        return;
-    }
-
-    // 3. 由 Android linker 加载真实 ELF，并从其只读自定义段取得加密载荷。
+    // 2. 从只读 ELF 段读取构建期固定的 RuntimeConfig。
     using payload_address_fn = const uint8_t* (*)();
     using payload_size_fn = size_t (*)();
 
     void* payload_handle = dlopen("liblog_ext.so", RTLD_NOW | RTLD_LOCAL);
     if (!payload_handle) {
-        LOGE("Jiagu_Native: Failed to load payload ELF: %s", dlerror());
-        env->ReleaseStringUTFChars(key_url_j, key_url);
+        LOGE("Jiagu_Native: Failed to load RuntimeConfig ELF: %s", dlerror());
         env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
         env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
         return;
@@ -471,62 +261,60 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     auto payload_size = reinterpret_cast<payload_size_fn>(
             dlsym(payload_handle, "jg_payload_size"));
     if (!payload_address || !payload_size) {
-        LOGE("Jiagu_Native: Payload ELF exports are missing: %s", dlerror());
+        LOGE("Jiagu_Native: RuntimeConfig ELF exports are missing: %s", dlerror());
         dlclose(payload_handle);
         return;
     }
 
-    const uint8_t* payload_source = payload_address();
-    size_t payload_length = payload_size();
-    if (!payload_source || payload_length < 8) {
-        LOGE("Jiagu_Native: Payload ELF returned invalid data");
+    const uint8_t* config_source = payload_address();
+    size_t config_length = payload_size();
+    if (!config_source || config_length < 32 || config_length > 64 * 1024) {
+        LOGE("Jiagu_Native: RuntimeConfig ELF returned invalid data");
         dlclose(payload_handle);
         return;
     }
-
-    // ELF 段是只读映射；复制后才能在缓冲区内执行解密。
-    std::vector<char> full_buffer(
-            reinterpret_cast<const char*>(payload_source),
-            reinterpret_cast<const char*>(payload_source) + payload_length);
+    std::string runtime_config(reinterpret_cast<const char*>(config_source), config_length);
     dlclose(payload_handle);
 
-    if (std::memcmp(full_buffer.data(), "JG2\0", 4) != 0) {
+    // 3. Java 层完成 Keystore、Integrity、Credential/Grant 验证、设备 Key 解封和 JGPD 解密。
+    jclass network_helper = env->FindClass("io/github/xjc/jiagu/NetworkHelper");
+    JNI_CHECK_NULL(network_helper, "NetworkHelper class not found", );
+    jmethodID get_payload_mid = env->GetStaticMethodID(
+            network_helper, "getAuthorizedPayload", "(Landroid/content/Context;Ljava/lang/String;)[B");
+    JNI_CHECK_NULL(get_payload_mid, "getAuthorizedPayload method not found", );
+    jstring runtime_config_j = env->NewStringUTF(runtime_config.c_str());
+    jbyteArray payload_array = (jbyteArray)env->CallStaticObjectMethod(
+            network_helper, get_payload_mid, context, runtime_config_j);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+    JNI_CHECK_NULL(payload_array, "device authorization returned no payload", );
+    jsize payload_length = env->GetArrayLength(payload_array);
+    if (payload_length < 8 || payload_length > 128 * 1024 * 1024) {
+        LOGE("Jiagu_Native: Invalid authorized payload size: %d", payload_length);
+        return;
+    }
+    std::vector<char> full_buffer(static_cast<size_t>(payload_length));
+    env->GetByteArrayRegion(payload_array, 0, payload_length,
+                            reinterpret_cast<jbyte*>(full_buffer.data()));
+
+    if (std::memcmp(full_buffer.data(), "JG3\0", 4) != 0) {
         LOGE("Jiagu_Native: Invalid payload magic");
         return;
     }
 
     size_t offset = 4;
-    int meta_size = read_int_be(full_buffer.data(), offset);
-    if (meta_size < 28 || static_cast<size_t>(meta_size) > full_buffer.size() - offset) {
-        LOGE("Jiagu_Native: Invalid metadata size: %d", meta_size);
-        return;
-    }
-
-    unsigned char* meta_ptr = reinterpret_cast<unsigned char*>(full_buffer.data() + offset);
-    if (!decrypt_aes_gcm(env, meta_ptr, static_cast<size_t>(meta_size), private_key)) {
-        LOGE("Jiagu_Native: Failed to decrypt payload metadata");
-        return;
-    }
-
-    size_t meta_plain_size = static_cast<size_t>(meta_size) - 12 - 16;
-    if (meta_plain_size < 4) {
-        LOGE("Jiagu_Native: Decrypted metadata is too small");
-        return;
-    }
-
-    unsigned char* meta_data_ptr = meta_ptr;
-    size_t meta_offset = 0;
-    int dex_count = (meta_data_ptr[0] << 24) | (meta_data_ptr[1] << 16) |
-                    (meta_data_ptr[2] << 8) | meta_data_ptr[3];
-    meta_offset += 4;
+    int dex_count = read_int_be(full_buffer.data(), offset);
     if (dex_count <= 0 || dex_count > 128 ||
-            meta_plain_size < 4 + static_cast<size_t>(dex_count) * 12) {
+            offset + static_cast<size_t>(dex_count) * 12 > full_buffer.size()) {
         LOGE("Jiagu_Native: Invalid DEX count: %d", dex_count);
         return;
     }
 
-    offset += static_cast<size_t>(meta_size);
-    size_t body_start = offset;
+    unsigned char* meta_data_ptr = reinterpret_cast<unsigned char*>(full_buffer.data());
+    size_t meta_offset = offset;
+    size_t body_start = offset + static_cast<size_t>(dex_count) * 12;
     size_t body_size = full_buffer.size() - body_start;
 
     jclass byte_buffer_class = env->FindClass("java/nio/ByteBuffer");
@@ -554,9 +342,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
                              static_cast<unsigned char>(meta_data_ptr[meta_offset + 3]);
         meta_offset += 4;
 
-        // Each encrypted DEX is IV (12 bytes) + ciphertext + GCM tag (16 bytes).
-        // Validate all metadata before deriving a pointer into the payload buffer.
-        if (dex_offset < 0 || dex_size < 28 || dex_plain_size <= 0 ||
+        // JG3 stores zlib-compressed DEX entries after the metadata table.
+        if (dex_offset < 0 || dex_size <= 0 || dex_plain_size <= 0 ||
                 dex_plain_size > 256 * 1024 * 1024 ||
                 static_cast<size_t>(dex_offset) > body_size ||
                 static_cast<size_t>(dex_size) > body_size - static_cast<size_t>(dex_offset)) {
@@ -565,14 +352,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
             return;
         }
 
-        unsigned char* dex_ptr = reinterpret_cast<unsigned char*>(
+        const unsigned char* dex_ptr = reinterpret_cast<const unsigned char*>(
                 full_buffer.data() + body_start + static_cast<size_t>(dex_offset));
-        if (!decrypt_aes_gcm(env, dex_ptr, static_cast<size_t>(dex_size), private_key)) {
-            LOGE("Jiagu_Native: Failed to decrypt DEX entry %d", i);
-            return;
-        }
-
-        int compressed_size = dex_size - 12 - 16;
         jobject bb = env->CallStaticObjectMethod(
                 byte_buffer_class, allocate_direct, static_cast<jint>(dex_plain_size));
         JNI_CHECK_NULL(bb, "DEX buffer allocation failed", );
@@ -580,9 +361,9 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         JNI_CHECK_NULL(direct_buffer, "DirectBufferAddress access failed", );
         uLongf inflated_size = static_cast<uLongf>(dex_plain_size);
         int inflate_result = uncompress(
-                reinterpret_cast<Bytef*>(direct_buffer), &inflated_size,
-                reinterpret_cast<const Bytef*>(dex_ptr),
-                static_cast<uLong>(compressed_size));
+                 reinterpret_cast<Bytef*>(direct_buffer), &inflated_size,
+                 reinterpret_cast<const Bytef*>(dex_ptr),
+                 static_cast<uLong>(dex_size));
         if (inflate_result != Z_OK || inflated_size != static_cast<uLongf>(dex_plain_size)) {
             LOGE("Jiagu_Native: Failed to decompress DEX entry %d (zlib=%d, actual=%lu, expected=%d)",
                  i, inflate_result, static_cast<unsigned long>(inflated_size), dex_plain_size);
@@ -669,7 +450,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         env->CallVoidMethod(gRealApp, attach_mid, context);
     }
 
-    env->ReleaseStringUTFChars(key_url_j, key_url);
     env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
     env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
 }

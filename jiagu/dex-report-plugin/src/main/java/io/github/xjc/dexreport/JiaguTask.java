@@ -44,10 +44,6 @@ import com.android.tools.r8.D8Command;
 import com.android.tools.r8.OutputMode;
 
 import org.gradle.api.tasks.Internal;
-import java.security.*;
-import javax.crypto.Cipher;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -66,27 +62,22 @@ public abstract class JiaguTask extends DefaultTask {
     public abstract Property<Integer> getVersionCode();
 
     @Input
-    @org.gradle.api.tasks.Optional
-    public abstract Property<String> getPublicKeyPath();
+    public abstract Property<String> getServerUrl();
 
     @Input
-    @org.gradle.api.tasks.Optional
-    public abstract Property<String> getPublicKeyJsonKey();
+    public abstract Property<String> getCompanyId();
+
+    @Internal
+    public abstract Property<String> getCompanyApiKey();
 
     @Input
-    public abstract Property<Boolean> getEnableMultiVersion();
-
-    @Input
-    public abstract Property<Integer> getKeyExpiryDays();
+    public abstract Property<String> getCertificateSha256();
 
     @InputFiles
     public abstract ListProperty<RegularFile> getAllJars();
 
     @InputFiles
     public abstract ListProperty<Directory> getAllDirectories();
-
-    @Internal
-    public abstract RegularFileProperty getKeysFile();
 
     @Internal
     public abstract DirectoryProperty getNdkDirectory();
@@ -105,9 +96,14 @@ public abstract class JiaguTask extends DefaultTask {
 
         long stageStartedAt = System.nanoTime();
         int versionCode = getVersionCode().get();
-        // 生成或复用 Session Key，仅用于构建期加密，不写入 Manifest。
-        byte[] sessionKey = handleKeyManagement(versionCode);
-        finishStage("密钥准备", stageStartedAt, stageTimes);
+        String companyId = getCompanyId().get().trim();
+        String companyApiKey = getCompanyApiKey().get().trim();
+        String serverUrl = getServerUrl().get().trim();
+        if (companyId.isEmpty() || companyApiKey.isEmpty() || serverUrl.isEmpty()) {
+            throw new IOException("serverUrl, companyId and companyApiKey are required");
+        }
+        getLogger().lifecycle("[Jiagu] 服务端={}, 公司={}, Key 指纹={}", serverUrl, companyId,
+                shortFingerprint(companyApiKey));
 
         File outputJarFile = getOutputJar().get().getAsFile();
         File jniLibsDir = getOutJniLibsDir().get().getAsFile();
@@ -186,64 +182,62 @@ public abstract class JiaguTask extends DefaultTask {
                 // 按照文件名排序，确保 classes.dex, classes2.dex 等顺序一致
                 Arrays.sort(dexFiles, Comparator.comparing(File::getName));
                 
-                // 先生成与 ABI 无关的加密载荷，再为每个 ABI 链接成真实 ELF。
+                // 生成服务端标准明文 JG3 容器。服务端会使用随机 Canonical Key 加密保存，
+                // 设备下载时再转换为设备专属 JGPD 密文。
                 File tempPayload = File.createTempFile("jiagu_payload", ".bin");
                 long rawDexBytes = 0;
                 long compressedDexBytes = 0;
-                long uncompressedPayloadBytes;
+                long uncompressedPayloadBytes = 0;
                 stageStartedAt = System.nanoTime();
                 try (FileOutputStream fos = new FileOutputStream(tempPayload)) {
-                    // JG2 表示 DEX 在加密前经过 zlib 压缩；运行时据此选择解压路径。
-                    fos.write("JG2\0".getBytes(StandardCharsets.UTF_8));
-                    
-                    // 2. 写入加密元数据与压缩主体。压缩必须发生在加密前，否则密文几乎不可压缩。
-                    java.util.List<byte[]> metaEntries = new java.util.ArrayList<>();
-                    long currentOffset = 0;
-                    java.io.ByteArrayOutputStream bodyStream = new java.io.ByteArrayOutputStream();
+                    fos.write("JG3\0".getBytes(StandardCharsets.UTF_8));
+                    fos.write(intToBytes(dexFiles.length));
 
+                    java.util.List<byte[]> compressedEntries = new java.util.ArrayList<>();
+                    long currentOffset = 0;
                     for (File dexFile : dexFiles) {
                         byte[] dexData = Files.readAllBytes(dexFile.toPath());
                         byte[] compressedDex = compress(dexData);
-                        byte[] encryptedDex = encrypt(compressedDex, sessionKey);
                         rawDexBytes += dexData.length;
                         compressedDexBytes += compressedDex.length;
-                        
-                        java.nio.ByteBuffer entry = java.nio.ByteBuffer.allocate(12);
-                        entry.putInt((int)currentOffset);
-                        entry.putInt(encryptedDex.length);
-                        entry.putInt(dexData.length);
-                        metaEntries.add(entry.array());
-
-                        bodyStream.write(encryptedDex);
-                        currentOffset += encryptedDex.length;
+                        compressedEntries.add(compressedDex);
+                        fos.write(intToBytes((int) currentOffset));
+                        fos.write(intToBytes(compressedDex.length));
+                        fos.write(intToBytes(dexData.length));
+                        currentOffset += compressedDex.length;
+                        uncompressedPayloadBytes += dexData.length;
                     }
-
-                    java.nio.ByteBuffer metaBlock = java.nio.ByteBuffer.allocate(4 + metaEntries.size() * 12);
-                    metaBlock.putInt(dexFiles.length);
-                    for (byte[] e : metaEntries) metaBlock.put(e);
-
-                    byte[] encryptedMeta = encrypt(metaBlock.array(), sessionKey);
-                    fos.write(intToBytes(encryptedMeta.length));
-                    fos.write(encryptedMeta);
-                    fos.write(bodyStream.toByteArray());
-
-                    // 加密只增加固定的 IV + Tag；用于展示采用压缩前格式时的载荷大小。
-                    uncompressedPayloadBytes = 4L + 4L + encryptedMeta.length
-                            + rawDexBytes + (long) dexFiles.length * 28L;
+                    for (byte[] entry : compressedEntries) {
+                        fos.write(entry);
+                    }
                 }
-                finishStage("DEX 压缩与加密", stageStartedAt, stageTimes);
+                finishStage("DEX 压缩与 JG3 封装", stageStartedAt, stageTimes);
                 logCompression("DEX 数据", rawDexBytes, compressedDexBytes);
-                logCompression("加密载荷", uncompressedPayloadBytes, tempPayload.length());
+                logCompression("JG3 Payload", uncompressedPayloadBytes, tempPayload.length());
 
                 try {
                     stageStartedAt = System.nanoTime();
-                    buildPayloadLibraries(tempPayload, jniLibsDir, uncompressedPayloadBytes);
-                    finishStage("四 ABI ELF 并行链接", stageStartedAt, stageTimes);
+                    JiaguServerClient client = new JiaguServerClient(serverUrl, companyId, companyApiKey);
+                    JiaguServerClient.PublicConfig publicConfig = client.getPublicConfig();
+                    JiaguServerClient.Release release = client.createRelease(
+                            tempPayload, "app-main", versionCode, getPackageName().get(), versionCode,
+                            getCertificateSha256().get());
+                    File runtimeConfig = File.createTempFile("jiagu_runtime_config", ".json");
+                    try {
+                        Files.write(runtimeConfig.toPath(), runtimeConfigJson(
+                                serverUrl, companyId, publicConfig, release).getBytes(StandardCharsets.UTF_8));
+                        buildPayloadLibraries(runtimeConfig, jniLibsDir, runtimeConfig.length());
+                    } finally {
+                        Files.deleteIfExists(runtimeConfig.toPath());
+                    }
+                    client.publish(release.releaseId);
+                    finishStage("服务端创建发布与 RuntimeConfig ELF", stageStartedAt, stageTimes);
+                    getLogger().lifecycle("[Jiagu] release 已发布: {}", release.releaseId);
                 } finally {
                     Files.deleteIfExists(tempPayload.toPath());
                 }
 
-                getLogger().lifecycle("[Jiagu] 加密载荷 ELF 构建成功: liblog_ext.so 已生成至四个 ABI 目录");
+                getLogger().lifecycle("[Jiagu] RuntimeConfig ELF 构建成功: liblog_ext.so 已生成至四个 ABI 目录");
             } else {
                 throw new IOException("D8 failed to produce any DEX files");
             }
@@ -251,7 +245,7 @@ public abstract class JiaguTask extends DefaultTask {
             getLogger().error(e.getMessage(), e);
             throw e;
         } catch (Exception e) {
-            String message = "[Jiagu] DEX 转换或加密载荷 ELF 构建失败";
+            String message = "[Jiagu] DEX 转换、服务端发布或 RuntimeConfig ELF 构建失败";
             getLogger().error(message, e);
             throw new IOException(message, e);
         } finally {
@@ -579,180 +573,31 @@ public abstract class JiaguTask extends DefaultTask {
         }
     }
 
-    private byte[] handleKeyManagement(int versionCode) {
-        File keyFile = getKeysFile().get().getAsFile();
-        String jsonKey = getPublicKeyJsonKey().getOrElse("akmKeys");
-        String pkgName = getPackageName().get();
-        String versionName = getVersionName().get();
-
-        // 动态派生 Master Key: SHA-256(pkg:version:salt)
-        byte[] masterKey;
-        try {
-            String input = pkgName + ":" + versionName + ":JIAGU_SALT_2026";
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            masterKey = digest.digest(input.getBytes(StandardCharsets.UTF_8));
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("SHA-256 not available", e);
-        }
-
-        try {
-            // 1. 本地密钥存储读取
-            String content = "{}";
-            if (keyFile.exists()) {
-                content = new String(Files.readAllBytes(keyFile.toPath()), StandardCharsets.UTF_8);
-            }
-
-            // 2. 检查当前版本是否已存在合法的 Key
-            String versionPattern = "\"" + versionCode + "\":\\s*\\{([^}]+)\\}";
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile(versionPattern, java.util.regex.Pattern.DOTALL).matcher(content);
-            if (m.find()) {
-                String body = m.group(1);
-                String nonceHex = extractJsonField(body, "nonce");
-                String bksBlobHex = extractJsonField(body, "bksBlob");
-
-                if (nonceHex != null && bksBlobHex != null) {
-                    getLogger().lifecycle("[Jiagu] 检测到版本 {} 已存在密钥，正在尝试复用...", versionCode);
-                    try {
-                        byte[] nonce = hexToBytes(nonceHex);
-                        byte[] bksBlob = hexToBytes(bksBlobHex);
-
-                        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-                        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(masterKey, "AES"), new GCMParameterSpec(128, nonce));
-                        byte[] sessionKey = cipher.doFinal(bksBlob);
-
-                        getLogger().lifecycle("[Jiagu] 成功复用版本 {} 的现有密钥。", versionCode);
-                        
-                        getLogger().lifecycle("**************************************************");
-                        getLogger().lifecycle("[Jiagu] 现有密钥块内容 (请确保已部署至服务器 {} 节点):", jsonKey);
-                        getLogger().lifecycle(m.group(0));
-                        getLogger().lifecycle("**************************************************");
-                        
-                        return sessionKey;
-                    } catch (Exception e) {
-                        getLogger().warn("[Jiagu] 复用密钥失败（可能 Master Key 已更改），将重新生成: {}", e.getMessage());
-                    }
-                }
-            }
-
-            // 3. 生成工业级 KMS 结构数据 (重新生成或新生成)
-            getLogger().lifecycle("[Jiagu] 正在为版本 {} 生成工业级加固密钥块...", versionCode);
-            
-            // 生成 Session Key (真正加密 DEX 的钥匙)
-            byte[] sessionKey = new byte[32];
-            SecureRandom.getInstanceStrong().nextBytes(sessionKey);
-
-            // 生成 Salt 和 Nonce
-            byte[] salt = new byte[16];
-            byte[] nonce = new byte[12];
-            SecureRandom.getInstanceStrong().nextBytes(salt);
-            SecureRandom.getInstanceStrong().nextBytes(nonce);
-            
-            // 生成 bksBlob (使用 Master Key 加密 Session Key)
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(masterKey, "AES"), new GCMParameterSpec(128, nonce));
-            byte[] bksBlob = cipher.doFinal(sessionKey);
-
-            String saltHex = bytesToHex(salt);
-            String nonceHex = bytesToHex(nonce);
-            String bksBlobHex = bytesToHex(bksBlob);
-
-            // 4. 更新本地 JSON 文件 (KMS 结构)
-            String newEntry = String.format("  \"%d\": {\n    \"keyVersion\": 1,\n    \"enabled\": true,\n    \"salt\": \"%s\",\n    \"nonce\": \"%s\",\n    \"bksBlob\": \"%s\"\n  }", 
-                                            versionCode, saltHex, nonceHex, bksBlobHex);
-            
-            if (content.trim().equals("{}") || content.trim().isEmpty()) {
-                content = "{\n" + newEntry + "\n}";
-            } else {
-                int lastBrace = content.lastIndexOf("}");
-                if (lastBrace != -1) {
-                    content = content.substring(0, lastBrace).trim();
-                    if (content.endsWith("{")) {
-                        content += "\n" + newEntry + "\n}";
-                    } else {
-                        content += ",\n" + newEntry + "\n}";
-                    }
-                }
-            }
-            Files.write(keyFile.toPath(), content.getBytes(StandardCharsets.UTF_8));
-
-            getLogger().lifecycle("**************************************************");
-            getLogger().lifecycle("[Jiagu] 工业级加固密钥包已保存至: {}", keyFile.getAbsolutePath());
-            getLogger().lifecycle("[Jiagu] 请将以下 JSON 结构部署到您的密钥分发服务器 ({} 节点):", jsonKey);
-            getLogger().lifecycle(newEntry);
-            getLogger().lifecycle("**************************************************");
-            
-            return sessionKey;
-        } catch (Exception e) {
-            getLogger().error("[Jiagu] 密钥管理失败: {}", e.getMessage());
-            throw new RuntimeException("Jiagu Failure", e);
-        }
+    private String runtimeConfigJson(String serverUrl, String companyId,
+                                     JiaguServerClient.PublicConfig publicConfig,
+                                     JiaguServerClient.Release release) {
+        return "{" +
+                "\"configVersion\":1," +
+                "\"serverUrl\":" + JiaguServerClient.json(serverUrl) + "," +
+                "\"companyId\":" + JiaguServerClient.json(companyId) + "," +
+                "\"releaseId\":" + JiaguServerClient.json(release.releaseId) + "," +
+                "\"payloadId\":" + JiaguServerClient.json(release.payloadId) + "," +
+                "\"payloadVersion\":" + release.payloadVersion + "," +
+                "\"packageName\":" + JiaguServerClient.json(release.packageName) + "," +
+                "\"versionCode\":" + release.versionCode + "," +
+                "\"certificateSha256\":" + JiaguServerClient.json(release.certificateSha256) + "," +
+                "\"payloadPlaintextSha256\":" + JiaguServerClient.json(release.plaintextSha256) + "," +
+                "\"payloadKeyVersion\":" + release.payloadKeyVersion + "," +
+                "\"serverKeyId\":" + JiaguServerClient.json(publicConfig.serverKeyId) + "," +
+                "\"serverPublicKey\":" + JiaguServerClient.json(publicConfig.serverPublicKey) + "," +
+                "\"integrityMode\":" + JiaguServerClient.json(publicConfig.integrityMode) + "," +
+                "\"integrityCloudProjectNumber\":" + publicConfig.integrityCloudProjectNumber +
+                "}";
     }
 
-    private static String extractJsonField(String json, String fieldName) {
-        String pattern = "\"" + fieldName + "\":\\s*\"([^\"]+)\"";
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(json);
-        return m.find() ? m.group(1) : null;
-    }
-
-    private static byte[] hexToBytes(String hex) {
-        int len = hex.length();
-        byte[] data = new byte[len / 2];
-        for (int i = 0; i < len; i += 2) {
-            data[i / 2] = (byte) ((Character.digit(hex.charAt(i), 16) << 4)
-                                 + Character.digit(hex.charAt(i+1), 16));
-        }
-        return data;
-    }
-
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
-    }
-
-    private String fetchRemotePublicKey(String urlString) {
-        try {
-            java.net.URL url = new java.net.URL(urlString);
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
-            if (conn.getResponseCode() != 200) {
-                getLogger().warn("[Jiagu] 网络请求失败，状态码: {}", conn.getResponseCode());
-                return null;
-            }
-            try (InputStream is = conn.getInputStream()) {
-                return new String(readStream(is), StandardCharsets.UTF_8);
-            }
-        } catch (Exception e) {
-            getLogger().warn("[Jiagu] 无法访问网络公钥路径: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    private byte[] encrypt(byte[] data, byte[] sessionKey) {
-        try {
-            // 1. 使用传入的 Session Key
-            byte[] aesKey = new byte[32]; // 确保 256 位
-            System.arraycopy(sessionKey, 0, aesKey, 0, Math.min(sessionKey.length, 32));
-
-            // 2. 使用 AES-GCM 加密 DEX 数据
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            byte[] iv = new byte[12];
-            SecureRandom.getInstanceStrong().nextBytes(iv);
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(aesKey, "AES"), new GCMParameterSpec(128, iv));
-            byte[] ciphertextWithTag = cipher.doFinal(data);
-
-            // 3. 构造加密包: IV(12) + Ciphertext + Tag
-            byte[] result = new byte[iv.length + ciphertextWithTag.length];
-            System.arraycopy(iv, 0, result, 0, iv.length);
-            System.arraycopy(ciphertextWithTag, 0, result, iv.length, ciphertextWithTag.length);
-            
-            return result;
-        } catch (Exception e) {
-            throw new RuntimeException("Encryption failed", e);
-        }
+    private String shortFingerprint(String secret) throws IOException {
+        String fingerprint = JiaguServerClient.sha256(secret.getBytes(StandardCharsets.UTF_8));
+        return fingerprint.substring(0, Math.min(12, fingerprint.length()));
     }
 
     private byte[] readStream(InputStream is) throws IOException {

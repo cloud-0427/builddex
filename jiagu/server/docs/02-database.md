@@ -35,6 +35,8 @@ ORDER BY table_name;
 
 用途：记录数据库 Schema 版本，为后续自动迁移保留入口。
 
+当前最新版本：**2**
+
 | 字段 | 说明 |
 |---|---|
 | schema_version | 当前数据库结构版本 |
@@ -114,7 +116,7 @@ ORDER BY table_name;
 唯一约束：
 
 ```text
-payload_id + payload_version
+package_name + payload_id + payload_version
 ```
 
 ## `challenges`

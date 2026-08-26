@@ -55,6 +55,7 @@ func main() {
 		zap.Duration("grantTTL", cfg.GrantTTL),
 		zap.Duration("deviceCredentialTTL", cfg.DeviceCredentialTTL),
 		zap.String("integrityMode", cfg.IntegrityMode),
+		zap.Int64("integrityCloudProjectNumber", cfg.IntegrityCloudProjectNumber),
 		zap.Bool("googleCredentialsConfigured", cfg.GoogleCredential != ""),
 		zap.String("adminTokenSource", configSource(cfg.UsingDevAdminToken)),
 		zap.String("adminTokenFingerprint", fingerprint([]byte(cfg.AdminToken))),

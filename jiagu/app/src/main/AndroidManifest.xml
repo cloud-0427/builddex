@@ -14,6 +14,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.Jiagu">
 
         <!-- 这里没有 ProxyApplication，没有 meta-data，完全不知道加固的存在 -->

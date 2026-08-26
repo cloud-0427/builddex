@@ -141,6 +141,131 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	}
 }
 
+func TestReleaseIdempotency(t *testing.T) {
+	master := bytes.Repeat([]byte{0x42}, 32)
+	dbs, err := store.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbs.Close()
+	handler := New(config.Config{
+		AdminToken: "admin", MasterKey: master, MaxPayloadBytes: 1 << 20,
+		IntegrityMode: "disabled",
+	}, dbs)
+
+	companyResponse := doJSON(t, handler, http.MethodPost, "/api/v1/companies", "Bearer admin", "", map[string]any{
+		"companyId": "acme",
+	})
+	var companyCreated struct {
+		CompanyAPIKey string `json:"companyApiKey"`
+	}
+	decodeResponse(t, companyResponse, &companyCreated)
+
+	// 1. Create a DRAFT release
+	createDraft := func(version string, content []byte) *httptest.ResponseRecorder {
+		var multipartBody bytes.Buffer
+		writer := multipart.NewWriter(&multipartBody)
+		_ = writer.WriteField("payloadId", "core")
+		_ = writer.WriteField("payloadVersion", version)
+		_ = writer.WriteField("packageName", "com.example.app")
+		_ = writer.WriteField("versionCode", version)
+		_ = writer.WriteField("certificateSha256", "cert")
+		file, _ := writer.CreateFormFile("payload", "payload.bin")
+		_, _ = file.Write(content)
+		_ = writer.Close()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/companies/acme/pack/releases", &multipartBody)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("X-Company-Key", companyCreated.CompanyAPIKey)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	res1 := createDraft("1", []byte("v1 content"))
+	if res1.Code != http.StatusCreated {
+		t.Fatalf("first create: %d %s", res1.Code, res1.Body.String())
+	}
+	var release1 store.Release
+	decodeResponse(t, res1, &release1)
+
+	// 2. Re-create same DRAFT (should update and return 201)
+	res2 := createDraft("1", []byte("v1 updated content"))
+	if res2.Code != http.StatusCreated {
+		t.Fatalf("update draft: %d %s", res2.Code, res2.Body.String())
+	}
+	var release2 store.Release
+	decodeResponse(t, res2, &release2)
+	if release2.ReleaseID == release1.ReleaseID {
+		t.Fatal("should have new releaseId after update")
+	}
+
+	// 3. Publish and try same content (should return 200)
+	doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/publish", "", companyCreated.CompanyAPIKey, map[string]any{})
+	res3 := createDraft("1", []byte("v1 updated content"))
+	if res3.Code != http.StatusOK {
+		t.Fatalf("idempotent published: %d %s", res3.Code, res3.Body.String())
+	}
+	var release3 store.Release
+	decodeResponse(t, res3, &release3)
+	if release3.ReleaseID != release2.ReleaseID {
+		t.Fatal("should return existing releaseId")
+	}
+
+	// 4. Try different content for published (should return 409)
+	res4 := createDraft("1", []byte("v1 different content"))
+	if res4.Code != http.StatusConflict {
+		t.Fatalf("conflict published: %d %s", res4.Code, res4.Body.String())
+	}
+}
+
+func TestMultiPackageSupport(t *testing.T) {
+	master := bytes.Repeat([]byte{0x42}, 32)
+	dbs, err := store.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbs.Close()
+	handler := New(config.Config{
+		AdminToken: "admin", MasterKey: master, MaxPayloadBytes: 1 << 20,
+		IntegrityMode: "disabled",
+	}, dbs)
+
+	companyResponse := doJSON(t, handler, http.MethodPost, "/api/v1/companies", "Bearer admin", "", map[string]any{
+		"companyId": "acme",
+	})
+	var companyCreated struct {
+		CompanyAPIKey string `json:"companyApiKey"`
+	}
+	decodeResponse(t, companyResponse, &companyCreated)
+
+	createRelease := func(pkg, version string) int {
+		var multipartBody bytes.Buffer
+		writer := multipart.NewWriter(&multipartBody)
+		_ = writer.WriteField("payloadId", "core")
+		_ = writer.WriteField("payloadVersion", version)
+		_ = writer.WriteField("packageName", pkg)
+		_ = writer.WriteField("versionCode", version)
+		_ = writer.WriteField("certificateSha256", "cert")
+		file, _ := writer.CreateFormFile("payload", "payload.bin")
+		_, _ = file.Write([]byte("content"))
+		_ = writer.Close()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/companies/acme/pack/releases", &multipartBody)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("X-Company-Key", companyCreated.CompanyAPIKey)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	if code := createRelease("com.pkg.a", "1"); code != http.StatusCreated {
+		t.Fatalf("pkg a: %d", code)
+	}
+	// Previously this would fail due to UNIQUE(payload_id, payload_version)
+	if code := createRelease("com.pkg.b", "1"); code != http.StatusCreated {
+		t.Fatalf("pkg b: %d", code)
+	}
+}
+
 func TestCompanyManagementAndLogicalDelete(t *testing.T) {
 	dbs, err := store.NewManager(t.TempDir())
 	if err != nil {

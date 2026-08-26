@@ -14,3 +14,15 @@
 -keep class **.R$* {
     public static <fields>;
 }
+
+# Google Play Integrity and GMS Tasks missing classes warnings
+-dontwarn com.google.android.gms.tasks.Task
+-dontwarn com.google.android.gms.tasks.Tasks
+-dontwarn com.google.android.play.core.integrity.IntegrityManagerFactory
+-dontwarn com.google.android.play.core.integrity.StandardIntegrityManager$PrepareIntegrityTokenRequest$Builder
+-dontwarn com.google.android.play.core.integrity.StandardIntegrityManager$PrepareIntegrityTokenRequest
+-dontwarn com.google.android.play.core.integrity.StandardIntegrityManager$StandardIntegrityToken
+-dontwarn com.google.android.play.core.integrity.StandardIntegrityManager$StandardIntegrityTokenProvider
+-dontwarn com.google.android.play.core.integrity.StandardIntegrityManager$StandardIntegrityTokenRequest$Builder
+-dontwarn com.google.android.play.core.integrity.StandardIntegrityManager$StandardIntegrityTokenRequest
+-dontwarn com.google.android.play.core.integrity.StandardIntegrityManager

@@ -27,20 +27,21 @@ type LoggingConfig struct {
 }
 
 type Config struct {
-	Environment         string
-	ListenAddr          string
-	DataDir             string
-	AdminToken          string
-	MasterKey           []byte
-	MaxPayloadBytes     int64
-	ChallengeTTL        time.Duration
-	GrantTTL            time.Duration
-	DeviceCredentialTTL time.Duration
-	IntegrityMode       string
-	GoogleCredential    string
-	UsingDevAdminToken  bool
-	UsingDevMasterKey   bool
-	Logging             LoggingConfig
+	Environment                 string
+	ListenAddr                  string
+	DataDir                     string
+	AdminToken                  string
+	MasterKey                   []byte
+	MaxPayloadBytes             int64
+	ChallengeTTL                time.Duration
+	GrantTTL                    time.Duration
+	DeviceCredentialTTL         time.Duration
+	IntegrityMode               string
+	IntegrityCloudProjectNumber int64
+	GoogleCredential            string
+	UsingDevAdminToken          bool
+	UsingDevMasterKey           bool
+	Logging                     LoggingConfig
 }
 
 type Options struct {
@@ -88,14 +89,15 @@ func LoadWithOptions(options Options) (Config, error) {
 }
 
 type fileConfig struct {
-	ListenAddr                 *string            `json:"listenAddr"`
-	DataDir                    *string            `json:"dataDir"`
-	MaxPayloadMB               *int               `json:"maxPayloadMB"`
-	ChallengeTTLSeconds        *int               `json:"challengeTTLSeconds"`
-	GrantTTLSeconds            *int               `json:"grantTTLSeconds"`
-	DeviceCredentialTTLSeconds *int               `json:"deviceCredentialTTLSeconds"`
-	IntegrityMode              *string            `json:"integrityMode"`
-	Logging                    *fileLoggingConfig `json:"logging"`
+	ListenAddr                  *string            `json:"listenAddr"`
+	DataDir                     *string            `json:"dataDir"`
+	MaxPayloadMB                *int               `json:"maxPayloadMB"`
+	ChallengeTTLSeconds         *int               `json:"challengeTTLSeconds"`
+	GrantTTLSeconds             *int               `json:"grantTTLSeconds"`
+	DeviceCredentialTTLSeconds  *int               `json:"deviceCredentialTTLSeconds"`
+	IntegrityMode               *string            `json:"integrityMode"`
+	IntegrityCloudProjectNumber *int64             `json:"integrityCloudProjectNumber"`
+	Logging                     *fileLoggingConfig `json:"logging"`
 }
 
 type fileLoggingConfig struct {
@@ -143,6 +145,9 @@ func applyConfigFile(cfg *Config, path string) error {
 	}
 	if values.IntegrityMode != nil {
 		cfg.IntegrityMode = strings.ToLower(*values.IntegrityMode)
+	}
+	if values.IntegrityCloudProjectNumber != nil {
+		cfg.IntegrityCloudProjectNumber = *values.IntegrityCloudProjectNumber
 	}
 	if values.Logging != nil {
 		logging := values.Logging
@@ -204,6 +209,11 @@ func applyEnvironment(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("JIAGU_INTEGRITY_MODE")); value != "" {
 		cfg.IntegrityMode = strings.ToLower(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("JIAGU_INTEGRITY_CLOUD_PROJECT_NUMBER")); value != "" {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed >= 0 {
+			cfg.IntegrityCloudProjectNumber = parsed
+		}
 	}
 	if value := strings.TrimSpace(os.Getenv("JIAGU_LOG_LEVEL")); value != "" {
 		cfg.Logging.Level = strings.ToLower(value)

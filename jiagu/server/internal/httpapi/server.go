@@ -289,8 +289,9 @@ func (a *API) publicConfig(w http.ResponseWriter, r *http.Request) {
 	privateKey := secure.CompanySigningKey(a.cfg.MasterKey, companyID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"companyId": companyID, "grantAlgorithm": "EdDSA", "serverKeyId": "company-sign-v1",
-		"serverPublicKey": secure.PublicKeyURL(privateKey.Public().(ed25519.PublicKey)),
-		"integrityMode":   a.cfg.IntegrityMode,
+		"serverPublicKey":             secure.PublicKeyURL(privateKey.Public().(ed25519.PublicKey)),
+		"integrityMode":               a.cfg.IntegrityMode,
+		"integrityCloudProjectNumber": a.cfg.IntegrityCloudProjectNumber,
 	})
 }
 
@@ -349,11 +350,37 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := store.CreateRelease(r.Context(), db, store.NewRelease{Release: release}); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			existing, getErr := store.GetReleaseByVersion(r.Context(), db, release.PackageName, release.PayloadID, release.PayloadVersion)
+			if getErr == nil {
+				if existing.Status == "DRAFT" {
+					if updateErr := store.UpdateRelease(r.Context(), db, store.NewRelease{Release: release}); updateErr == nil {
+						zap.L().Info("release draft updated", zap.String("releaseId", releaseID), zap.String("packageName", release.PackageName))
+						release.Status = "DRAFT"
+						release.CreatedAt = time.Now().Unix()
+						writeJSON(w, http.StatusCreated, release)
+						return
+					}
+				} else if existing.Status == "PUBLISHED" {
+					if existing.PlaintextSHA256 == release.PlaintextSHA256 {
+						zap.L().Info("release already published with same content, returning existing", zap.String("releaseId", existing.ReleaseID))
+						writeJSON(w, http.StatusOK, existing)
+						return
+					}
+					writeError(w, http.StatusConflict, "RELEASE_ALREADY_PUBLISHED", "this version is already published with different content; please increment versionCode")
+					return
+				}
+			}
+		}
+		zap.L().Error("failed to create release in store", zap.String("releaseId", releaseID), zap.Error(err))
 		writeStoreError(w, err)
 		return
 	}
 	store.AddOperationLog(r.Context(), db, "PACK_CREATE", "SUCCESS", requestID(r.Context()), releaseID)
 	release.CanonicalPayload, release.CanonicalKeyCiphertext = nil, nil
+	release.Status = "DRAFT"
+	release.CreatedAt = time.Now().Unix()
+	zap.L().Info("release created", zap.String("releaseId", releaseID), zap.String("packageName", release.PackageName))
 	writeJSON(w, http.StatusCreated, release)
 }
 
@@ -844,6 +871,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	zap.L().Warn("sending error response", zap.Int("status", status), zap.String("code", code), zap.String("message", message))
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
 }
 

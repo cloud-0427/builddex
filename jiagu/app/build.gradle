@@ -21,8 +21,9 @@ dexReport {
     // 支持 "assemble" (默认), "bundle" (生成AAB), "install" (安装) 等。
     attachToTask = "assemble"
 
-    publicKeyPath = "https://game-cdn-a.acmemob.com/bc_androidgoogle.json"
-    publicKeyJsonKey = "apKeys"
+    serverUrl = "http://192.168.111.115:8761"
+    companyId = "app-dev"
+    companyApiKey = "m-H03NqNlkdnU7yD75_j-nUKwkAhK_G5-bQLObstMQ4"
     // debug 检测，测试关闭，线上可以打开，默认是打开的
     antiDebugEnabled = false
     

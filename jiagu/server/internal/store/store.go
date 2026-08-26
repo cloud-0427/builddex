@@ -288,6 +288,27 @@ func CreateRelease(ctx context.Context, db *sql.DB, release NewRelease) error {
 	return tx.Commit()
 }
 
+func UpdateRelease(ctx context.Context, db *sql.DB, release NewRelease) error {
+	now := time.Now().Unix()
+	result, err := db.ExecContext(ctx, `UPDATE payload_releases SET
+		release_id=?, package_name=?, version_code=?, certificate_sha256=?,
+		plaintext_sha256=?, canonical_ciphertext_sha256=?, canonical_payload=?,
+		canonical_key_ciphertext=?, payload_key_version=?, status='DRAFT', created_at=?
+		WHERE payload_id=? AND payload_version=? AND status='DRAFT'`,
+		release.ReleaseID, release.PackageName, release.VersionCode, release.CertificateSHA256,
+		release.PlaintextSHA256, release.CanonicalCipherSHA256, release.CanonicalPayload,
+		release.CanonicalKeyCiphertext, release.PayloadKeyVersion, now,
+		release.PayloadID, release.PayloadVersion)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
 func ListReleases(ctx context.Context, db *sql.DB) ([]Release, error) {
 	rows, err := db.QueryContext(ctx, releaseSelect+` ORDER BY created_at DESC`)
 	if err != nil {
@@ -313,6 +334,15 @@ func GetRelease(ctx context.Context, db *sql.DB, releaseID string, publishedOnly
 		query += ` AND status='PUBLISHED'`
 	}
 	value, err := scanRelease(db.QueryRowContext(ctx, query, releaseID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Release{}, ErrNotFound
+	}
+	return value, err
+}
+
+func GetReleaseByVersion(ctx context.Context, db *sql.DB, packageName, payloadID string, payloadVersion int64) (Release, error) {
+	value, err := scanRelease(db.QueryRowContext(ctx, releaseSelect+` WHERE package_name=? AND payload_id=? AND payload_version=?`,
+		packageName, payloadID, payloadVersion))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Release{}, ErrNotFound
 	}
@@ -425,6 +455,9 @@ func scanRelease(row scanner) (Release, error) {
 }
 
 func initializeSchema(ctx context.Context, db *sql.DB) error {
+	if err := migrateSchema(ctx, db); err != nil {
+		return fmt.Errorf("migrate company schema: %w", err)
+	}
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("initialize company schema: %w", err)
 	}
@@ -437,13 +470,75 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func migrateSchema(ctx context.Context, db *sql.DB) error {
+	var version int
+	err := db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta LIMIT 1`).Scan(&version)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil // New database, initializeSchema will handle it
+		}
+		return err
+	}
+
+	if version < 2 {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		// Migration from 1 to 2: Update UNIQUE constraint in payload_releases
+		_, err = tx.ExecContext(ctx, `ALTER TABLE payload_releases RENAME TO payload_releases_old`)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `CREATE TABLE payload_releases (
+			release_id TEXT PRIMARY KEY,
+			payload_id TEXT NOT NULL,
+			payload_version INTEGER NOT NULL,
+			package_name TEXT NOT NULL,
+			version_code INTEGER NOT NULL,
+			certificate_sha256 TEXT NOT NULL,
+			plaintext_sha256 TEXT NOT NULL,
+			canonical_ciphertext_sha256 TEXT NOT NULL,
+			canonical_payload BLOB NOT NULL,
+			canonical_key_ciphertext BLOB NOT NULL,
+			payload_key_version INTEGER NOT NULL DEFAULT 1,
+			status TEXT NOT NULL CHECK(status IN ('DRAFT','PUBLISHED','REVOKED')),
+			created_at INTEGER NOT NULL,
+			published_at INTEGER NOT NULL DEFAULT 0,
+			revoked_at INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(package_name, payload_id, payload_version)
+		)`)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO payload_releases SELECT * FROM payload_releases_old`)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `DROP TABLE payload_releases_old`)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE schema_meta SET schema_version=2, updated_at=unixepoch()`)
+		if err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
     schema_version INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 INSERT INTO schema_meta(schema_version, updated_at)
-SELECT 1, unixepoch() WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
+SELECT 2, unixepoch() WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
 
 CREATE TABLE IF NOT EXISTS schema_descriptions (
     table_name TEXT PRIMARY KEY,
@@ -490,7 +585,7 @@ CREATE TABLE IF NOT EXISTS payload_releases (
     created_at INTEGER NOT NULL,
     published_at INTEGER NOT NULL DEFAULT 0,
     revoked_at INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(payload_id, payload_version)
+    UNIQUE(package_name, payload_id, payload_version)
 );
 CREATE INDEX IF NOT EXISTS idx_payload_release_status ON payload_releases(status, version_code);
 
