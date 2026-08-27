@@ -89,6 +89,11 @@ type NewRelease struct {
 	Release
 }
 
+type ReleaseLog struct {
+	Release
+	DeliveryCount int64 `json:"deliveryCount"`
+}
+
 func NewManager(dir string) (*Manager, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -341,6 +346,55 @@ func ListReleases(ctx context.Context, db *sql.DB) ([]Release, error) {
 		values = append(values, value)
 	}
 	return values, rows.Err()
+}
+
+func ListPackLogs(ctx context.Context, db *sql.DB, page, pageSize int) ([]ReleaseLog, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	var total int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM payload_releases`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `SELECT release_id, payload_id, payload_version, package_name, version_code,
+		certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
+		resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
+		canonical_ciphertext_sha256, payload_key_version, status, created_at, updated_at,
+		published_at, revoked_at,
+		(SELECT COUNT(*) FROM operation_logs WHERE operation='UNPACK_DELIVERY' AND detail=release_id) as delivery_count
+		FROM payload_releases
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`
+
+	rows, err := db.QueryContext(ctx, query, pageSize, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var logs []ReleaseLog
+	for rows.Next() {
+		var log ReleaseLog
+		var certsJSON string
+		err := rows.Scan(&log.ReleaseID, &log.PayloadID, &log.PayloadVersion, &log.PackageName,
+			&log.VersionCode, &certsJSON, &log.CertificateSetSHA256,
+			&log.BusinessDexSHA256, &log.ResourcesSHA256, &log.NativeLibsSHA256,
+			&log.ReleaseBuildSHA256, &log.PlaintextSHA256, &log.CanonicalCipherSHA256,
+			&log.PayloadKeyVersion, &log.Status, &log.CreatedAt, &log.UpdatedAt,
+			&log.PublishedAt, &log.RevokedAt, &log.DeliveryCount)
+		if err != nil {
+			return nil, 0, err
+		}
+		_ = json.Unmarshal([]byte(certsJSON), &log.CertificateSHA256Digests)
+		logs = append(logs, log)
+	}
+	return logs, total, nil
 }
 
 func GetRelease(ctx context.Context, db *sql.DB, releaseID string, publishedOnly bool) (Release, error) {

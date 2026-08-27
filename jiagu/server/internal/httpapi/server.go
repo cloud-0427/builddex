@@ -88,6 +88,7 @@ func (a *API) routes() {
 	a.mux.HandleFunc("GET /api/v1/companies/{companyId}", a.getCompany)
 	a.mux.HandleFunc("PATCH /api/v1/companies/{companyId}", a.updateCompany)
 	a.mux.HandleFunc("DELETE /api/v1/companies/{companyId}", a.deleteCompany)
+	a.mux.HandleFunc("GET /api/v1/companies/{companyId}/pack-logs", a.listPackLogs)
 	a.mux.HandleFunc("GET /api/v1/companies/{companyId}/public-config", a.publicConfig)
 	a.routesAdmin()
 
@@ -194,6 +195,32 @@ func (a *API) listCompanies(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeResponse(w, http.StatusOK, "COMPANIES_LISTED", "Companies listed.", map[string]any{"items": companies})
+}
+
+func (a *API) listPackLogs(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+	db, ok := a.openCompany(w, r)
+	if !ok {
+		return
+	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	logs, total, err := store.ListPackLogs(r.Context(), db, page, pageSize)
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	writeResponse(w, http.StatusOK, "PACK_LOGS_LISTED", "Pack logs listed.", map[string]any{
+		"items": logs, "total": total, "page": page, "pageSize": pageSize,
+	})
 }
 
 func (a *API) getCompany(w http.ResponseWriter, r *http.Request) {
