@@ -7,6 +7,8 @@
 - 按公司隔离授权和数据；
 - 管理授权起止时间、打包次数、下发次数及限额；
 - 标准 Payload 加密存储；
+- 同一 `packageName + versionCode` 唯一 Release 的构建一致性锁；
+- 锁定最终业务 DEX、资源/Manifest/assets、Native Library 和允许签名证书集合；
 - 不同设备获得不同 Payload Key 和不同密文；
 - 服务端响应签名、设备持有证明和防重放；
 - 支持 Play Integrity、撤销和后续字段扩展。
@@ -67,6 +69,8 @@ Android / Gradle / 管理端
 
 Credential 由客户端保存。后续服务端只验证 Credential 签名和设备请求签名，不查询设备记录。
 
+一个 Release 可以配置多个允许签名证书摘要，用于同时支持 Play App Signing、受控侧载和证书轮换历史。Credential 只记录当前设备实际安装包使用的证书摘要；该摘要必须属于 Release 的允许集合。
+
 只有需要撤销的设备才写入 `revocations`。因此长期存储规模与公司数、Payload 版本数和异常设备数有关，而不与正常设备总数线性相关。
 
 ## 一机一码
@@ -77,14 +81,45 @@ Credential 由客户端保存。后续服务端只验证 Credential 签名和设
 HMAC-SHA256(
     masterKey,
     domain || companyId || deviceId || releaseId || payloadId ||
-    payloadVersion || packageName || versionCode || certificateDigest ||
-    payloadHash || payloadKeyVersion
+    payloadVersion || packageName || versionCode || actualCertificateDigest ||
+    releaseBuildHash || payloadHash || payloadKeyVersion
 )
 ```
 
 派生结果不写数据库。不同设备、不同 Payload 或不同 Key 版本得到不同 Key。
 
 标准 Payload 在 SQLite 中只保存一份。设备下载时，服务端解密标准 Payload，再用派生的设备 Key 实时重新加密并返回。设备专属密文由 Android 客户端缓存，服务端不保存。
+
+## Release 构建一致性锁
+
+同一公司数据库内，Release 唯一身份为：
+
+```text
+packageName + versionCode
+```
+
+一个版本只有一个 Release 和一个标准 Payload。DRAFT 可以保留 releaseId 原地修订；PUBLISHED 和 REVOKED 永不允许替换。正式版本发布后，同 package/version 的 Debug 构建若内容不同，将收到明确的 409，必须提升 versionCode 或使用不同 applicationId。
+
+Release 构建摘要由三部分组成：
+
+```text
+releaseBuildSha256 = SHA-256(
+    canonical(
+        "JIAGU-RELEASE-BUILD-V1",
+        businessDexSha256,
+        resourcesSha256,
+        nativeLibsSha256
+    )
+)
+```
+
+- `businessDexSha256`：D8 最终业务 DEX；
+- `resourcesSha256`：最终 Manifest、resources.arsc、res 和 assets；
+- `nativeLibsSha256`：所有 ABI 的应用、依赖和 Jiagu Runtime `.so`，排除包含 Release 配置的 `liblog_ext.so`。
+
+哈希使用排序后的路径、长度和内容摘要，不依赖 ZIP/JAR 时间戳、压缩级别或 Entry 顺序。APK、ABI/资源 Split 和 AAB 聚合同一 Variant 的全部输入，使用同一个 Release。
+
+该机制是构建期版本锁，不在设备启动时重新扫描 Play 生成的 Split APK。运行时继续通过 Play Integrity、签名证书、versionCode、Grant 和 Payload 加密完整性建立信任。
 
 ## 信任边界
 
@@ -95,6 +130,8 @@ HMAC-SHA256(
 | 设备注册 | 服务端 challenge、设备签名、Play Integrity | 客户端自报设备 ID |
 | Payload 授权 | 服务端签名 Credential、设备私钥持有证明 | Manifest 中的期望签名值 |
 | Android 运行时 | Native 内置服务端公钥、Keystore 私钥 | 本地文件、系统时间、Java 层判断 |
+
+JSON API 统一返回 `code/message/details`。`code` 是稳定机器码，`message` 仅供人阅读，`details` 始终为对象。Payload 下载成功仍返回二进制，失败返回统一 JSON。
 
 ## 当前实现边界
 

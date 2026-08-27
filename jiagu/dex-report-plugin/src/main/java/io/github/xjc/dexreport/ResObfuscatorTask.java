@@ -21,9 +21,11 @@ import java.util.zip.ZipOutputStream;
  * A Gradle task that obfuscates resource paths and keys in an Android resource package (.ap_).
  * It renames files in res/, updates the Global String Pool, and obfuscates the Key String Pool.
  */
+@org.gradle.work.DisableCachingByDefault(because = "Mutates the linked Android resource package in place")
 public abstract class ResObfuscatorTask extends DefaultTask {
 
     @InputFile
+    @org.gradle.api.tasks.PathSensitive(org.gradle.api.tasks.PathSensitivity.NONE)
     public abstract RegularFileProperty getInputResourcePackage();
 
     @OutputFile
@@ -113,11 +115,14 @@ public abstract class ResObfuscatorTask extends DefaultTask {
         try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
             Path sourcePath = sourceDir.toPath();
             try (java.util.stream.Stream<Path> paths = Files.walk(sourcePath)) {
-                paths.forEach(path -> {
+                paths.filter(Files::isRegularFile)
+                        .sorted(Comparator.comparing(path -> sourcePath.relativize(path).toString().replace('\\', '/')))
+                        .forEach(path -> {
                     if (Files.isDirectory(path)) return;
                     String name = sourcePath.relativize(path).toString().replace('\\', '/');
                     try {
                         ZipEntry entry = new ZipEntry(name);
+                        entry.setTime(0L);
                     
                     // resources.arsc must be STORED and uncompressed for Android 11+
                     if (name.equals("resources.arsc")) {
@@ -154,6 +159,7 @@ public abstract class ResObfuscatorTask extends DefaultTask {
 
         File[] typeDirs = resRoot.listFiles(File::isDirectory);
         if (typeDirs == null) return;
+        Arrays.sort(typeDirs, Comparator.comparing(File::getName));
 
         int folderCount = 0;
         for (File typeDir : typeDirs) {
@@ -164,6 +170,7 @@ public abstract class ResObfuscatorTask extends DefaultTask {
 
             File[] files = typeDir.listFiles();
             if (files == null) continue;
+            Arrays.sort(files, Comparator.comparing(File::getName));
 
             int fileCount = 0;
             for (File file : files) {

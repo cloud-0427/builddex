@@ -93,6 +93,11 @@ func DeriveDevicePayloadKey(master []byte, companyID string, values ...string) [
 	return HMAC256(master, "jiagu-device-payload-v1", all...)
 }
 
+func DeriveDevicePayloadKeyV2(master []byte, companyID string, values ...string) []byte {
+	all := append([]string{companyID}, values...)
+	return HMAC256(master, "jiagu-device-payload-v2", all...)
+}
+
 func CompanySigningKey(master []byte, companyID string) ed25519.PrivateKey {
 	seed := HMAC256(master, "jiagu-company-signing-v1", companyID)
 	return ed25519.NewKeyFromSeed(seed)

@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -48,14 +50,16 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	}
 	decodeResponse(t, companyResponse, &companyCreated)
 
-	payload := []byte("secret dex payload")
+	payload := testJG3(t, []byte("secret dex payload"))
 	var multipartBody bytes.Buffer
 	writer := multipart.NewWriter(&multipartBody)
-	_ = writer.WriteField("payloadId", "core")
-	_ = writer.WriteField("payloadVersion", "1")
+	_ = writer.WriteField("payloadId", "app-main")
+	_ = writer.WriteField("payloadVersion", "7")
 	_ = writer.WriteField("packageName", "com.example.app")
 	_ = writer.WriteField("versionCode", "7")
-	_ = writer.WriteField("certificateSha256", "cert-digest")
+	certificate := secure.SHA256URL([]byte("cert-digest"))
+	_ = writer.WriteField("certificateSha256Digest", certificate)
+	writeBuildHashes(t, writer, payload, "resources-v1", "native-v1")
 	file, _ := writer.CreateFormFile("payload", "payload.bin")
 	_, _ = file.Write(payload)
 	_ = writer.Close()
@@ -84,12 +88,14 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	wrapEncoded := base64.RawURLEncoding.EncodeToString(wrapDER)
 
 	enrollChallenge := newChallenge(t, handler, "ENROLL")
-	enrollMessage := canonical("ENROLL-V1", "acme", enrollChallenge.ID, enrollChallenge.Value,
-		release.ReleaseID, release.PackageName, strconv.FormatInt(release.VersionCode, 10), release.CertificateSHA256,
+	enrollMessage := canonical("ENROLL-V2", "acme", enrollChallenge.ID, enrollChallenge.Value,
+		release.ReleaseID, release.PackageName, strconv.FormatInt(release.VersionCode, 10), certificate,
+		release.CertificateSetSHA256, release.ReleaseBuildSHA256,
 		signEncoded, wrapEncoded)
 	enroll := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/enroll", "", "", map[string]any{
 		"challengeId": enrollChallenge.ID, "challenge": enrollChallenge.Value, "releaseId": release.ReleaseID,
-		"signPublicKey": signEncoded, "wrapPublicKey": wrapEncoded, "deviceSignature": signMessage(t, signPrivate, enrollMessage),
+		"actualCertificateSha256": certificate,
+		"signPublicKey":           signEncoded, "wrapPublicKey": wrapEncoded, "deviceSignature": signMessage(t, signPrivate, enrollMessage),
 	})
 	if enroll.Code != http.StatusCreated {
 		t.Fatalf("enroll: %d %s", enroll.Code, enroll.Body.String())
@@ -100,9 +106,41 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	}
 	decodeResponse(t, enroll, &enrolled)
 
+	// A published release is not bound to the first enrolled device. A second
+	// phone gets its own credential and device identity under the same company.
+	secondSignPrivate, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	secondSignDER, _ := x509.MarshalPKIXPublicKey(&secondSignPrivate.PublicKey)
+	secondWrapPrivate, _ := rsa.GenerateKey(rand.Reader, 2048)
+	secondWrapDER, _ := x509.MarshalPKIXPublicKey(&secondWrapPrivate.PublicKey)
+	secondSignEncoded := base64.RawURLEncoding.EncodeToString(secondSignDER)
+	secondWrapEncoded := base64.RawURLEncoding.EncodeToString(secondWrapDER)
+	secondChallenge := newChallenge(t, handler, "ENROLL")
+	secondMessage := canonical("ENROLL-V2", "acme", secondChallenge.ID, secondChallenge.Value,
+		release.ReleaseID, release.PackageName, strconv.FormatInt(release.VersionCode, 10), certificate,
+		release.CertificateSetSHA256, release.ReleaseBuildSHA256,
+		secondSignEncoded, secondWrapEncoded)
+	secondEnroll := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/enroll", "", "", map[string]any{
+		"challengeId": secondChallenge.ID, "challenge": secondChallenge.Value, "releaseId": release.ReleaseID,
+		"actualCertificateSha256": certificate,
+		"signPublicKey":           secondSignEncoded, "wrapPublicKey": secondWrapEncoded,
+		"deviceSignature": signMessage(t, secondSignPrivate, secondMessage),
+	})
+	if secondEnroll.Code != http.StatusCreated {
+		t.Fatalf("second device enroll: %d %s", secondEnroll.Code, secondEnroll.Body.String())
+	}
+	var secondEnrolled struct {
+		DeviceID         string `json:"deviceId"`
+		DeviceCredential string `json:"deviceCredential"`
+	}
+	decodeResponse(t, secondEnroll, &secondEnrolled)
+	if secondEnrolled.DeviceID == enrolled.DeviceID || secondEnrolled.DeviceCredential == enrolled.DeviceCredential {
+		t.Fatal("different devices must receive independent identities and credentials")
+	}
+
 	authChallenge := newChallenge(t, handler, "AUTHORIZE")
-	authMessage := canonical("AUTHORIZE-V1", "acme", authChallenge.ID, authChallenge.Value, release.ReleaseID,
-		secure.SHA256URL([]byte(enrolled.DeviceCredential)), enrolled.DeviceID)
+	authMessage := canonical("AUTHORIZE-V2", "acme", authChallenge.ID, authChallenge.Value, release.ReleaseID,
+		secure.SHA256URL([]byte(enrolled.DeviceCredential)), enrolled.DeviceID,
+		release.ReleaseBuildSHA256, strconv.FormatInt(release.PayloadKeyVersion, 10))
 	authorized := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/authorize", "", "", map[string]any{
 		"challengeId": authChallenge.ID, "challenge": authChallenge.Value, "releaseId": release.ReleaseID,
 		"deviceCredential": enrolled.DeviceCredential, "deviceSignature": signMessage(t, signPrivate, authMessage),
@@ -113,9 +151,13 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	var authorization struct {
 		Grant             string `json:"grant"`
 		WrappedPayloadKey string `json:"wrappedPayloadKey"`
+		WrapAlgorithm     string `json:"wrapAlgorithm"`
 		WrapLabel         string `json:"wrapLabel"`
 	}
 	decodeResponse(t, authorized, &authorization)
+	if authorization.WrapAlgorithm != "RSA-OAEP-SHA1" || authorization.WrapLabel != "" {
+		t.Fatalf("unexpected wrap parameters: %q label=%q", authorization.WrapAlgorithm, authorization.WrapLabel)
+	}
 
 	download := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/download", "", "", map[string]any{"grant": authorization.Grant})
 	if download.Code != http.StatusOK {
@@ -126,7 +168,7 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 		t.Fatal("invalid device payload container")
 	}
 	wrapped, _ := base64.RawURLEncoding.DecodeString(authorization.WrappedPayloadKey)
-	deviceKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, wrapPrivate, wrapped, []byte(authorization.WrapLabel))
+	deviceKey, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, wrapPrivate, wrapped, []byte(authorization.WrapLabel))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,15 +205,17 @@ func TestReleaseIdempotency(t *testing.T) {
 
 	// 1. Create a DRAFT release
 	createDraft := func(version string, content []byte) *httptest.ResponseRecorder {
+		payload := testJG3(t, content)
 		var multipartBody bytes.Buffer
 		writer := multipart.NewWriter(&multipartBody)
-		_ = writer.WriteField("payloadId", "core")
+		_ = writer.WriteField("payloadId", "app-main")
 		_ = writer.WriteField("payloadVersion", version)
 		_ = writer.WriteField("packageName", "com.example.app")
 		_ = writer.WriteField("versionCode", version)
-		_ = writer.WriteField("certificateSha256", "cert")
+		_ = writer.WriteField("certificateSha256Digest", secure.SHA256URL([]byte("cert")))
+		writeBuildHashes(t, writer, payload, "resources-"+string(content), "native-v1")
 		file, _ := writer.CreateFormFile("payload", "payload.bin")
-		_, _ = file.Write(content)
+		_, _ = file.Write(payload)
 		_ = writer.Close()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/companies/acme/pack/releases", &multipartBody)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -188,15 +232,38 @@ func TestReleaseIdempotency(t *testing.T) {
 	var release1 store.Release
 	decodeResponse(t, res1, &release1)
 
-	// 2. Re-create same DRAFT (should update and return 201)
+	// Runtime endpoints must distinguish an existing DRAFT from an unknown release.
+	draftEnroll := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/enroll", "", "", map[string]any{
+		"releaseId": release1.ReleaseID,
+	})
+	if draftEnroll.Code != http.StatusConflict {
+		t.Fatalf("draft enroll: %d %s", draftEnroll.Code, draftEnroll.Body.String())
+	}
+	var draftEnvelope struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Details struct {
+			ReleaseID string `json:"releaseId"`
+			Status    string `json:"status"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(draftEnroll.Body.Bytes(), &draftEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if draftEnvelope.Code != "RELEASE_NOT_PUBLISHED" || draftEnvelope.Message == "" ||
+		draftEnvelope.Details.ReleaseID != release1.ReleaseID || draftEnvelope.Details.Status != "DRAFT" {
+		t.Fatalf("unexpected draft release envelope: %s", draftEnroll.Body.String())
+	}
+
+	// 2. Update the same DRAFT in place.
 	res2 := createDraft("1", []byte("v1 updated content"))
-	if res2.Code != http.StatusCreated {
+	if res2.Code != http.StatusOK {
 		t.Fatalf("update draft: %d %s", res2.Code, res2.Body.String())
 	}
 	var release2 store.Release
 	decodeResponse(t, res2, &release2)
-	if release2.ReleaseID == release1.ReleaseID {
-		t.Fatal("should have new releaseId after update")
+	if release2.ReleaseID != release1.ReleaseID || release2.PayloadKeyVersion != release1.PayloadKeyVersion+1 {
+		t.Fatal("draft update must preserve releaseId and increment payloadKeyVersion")
 	}
 
 	// 3. Publish and try same content (should return 200)
@@ -215,6 +282,32 @@ func TestReleaseIdempotency(t *testing.T) {
 	res4 := createDraft("1", []byte("v1 different content"))
 	if res4.Code != http.StatusConflict {
 		t.Fatalf("conflict published: %d %s", res4.Code, res4.Body.String())
+	}
+	var conflict struct {
+		Code    string `json:"code"`
+		Details struct {
+			PackageName       string   `json:"packageName"`
+			VersionCode       int64    `json:"versionCode"`
+			ChangedComponents []string `json:"changedComponents"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(res4.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Code != "PUBLISHED_VERSION_MODIFIED" || conflict.Details.PackageName != "com.example.app" ||
+		conflict.Details.VersionCode != 1 || len(conflict.Details.ChangedComponents) == 0 {
+		t.Fatalf("unexpected published conflict envelope: %s", res4.Body.String())
+	}
+
+	// 5. Revoked versions can never be reused, even with byte-identical content.
+	revoked := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/revoke", "", companyCreated.CompanyAPIKey, map[string]any{})
+	if revoked.Code != http.StatusOK {
+		t.Fatalf("revoke release: %d %s", revoked.Code, revoked.Body.String())
+	}
+	res5 := createDraft("1", []byte("v1 updated content"))
+	if res5.Code != http.StatusConflict || !bytes.Contains(res5.Body.Bytes(), []byte("REVOKED_VERSION_REUSE_FORBIDDEN")) {
+		t.Fatalf("reuse revoked release: %d %s", res5.Code, res5.Body.String())
 	}
 }
 
@@ -239,15 +332,17 @@ func TestMultiPackageSupport(t *testing.T) {
 	decodeResponse(t, companyResponse, &companyCreated)
 
 	createRelease := func(pkg, version string) int {
+		payload := testJG3(t, []byte("content"))
 		var multipartBody bytes.Buffer
 		writer := multipart.NewWriter(&multipartBody)
-		_ = writer.WriteField("payloadId", "core")
+		_ = writer.WriteField("payloadId", "app-main")
 		_ = writer.WriteField("payloadVersion", version)
 		_ = writer.WriteField("packageName", pkg)
 		_ = writer.WriteField("versionCode", version)
-		_ = writer.WriteField("certificateSha256", "cert")
+		_ = writer.WriteField("certificateSha256Digest", secure.SHA256URL([]byte("cert")))
+		writeBuildHashes(t, writer, payload, "resources-v1", "native-v1")
 		file, _ := writer.CreateFormFile("payload", "payload.bin")
-		_, _ = file.Write([]byte("content"))
+		_, _ = file.Write(payload)
 		_ = writer.Close()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/companies/acme/pack/releases", &multipartBody)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -298,7 +393,7 @@ func TestCompanyManagementAndLogicalDelete(t *testing.T) {
 	}
 
 	deleted := doJSON(t, handler, http.MethodDelete, "/api/v1/companies/logical-delete", "Bearer admin", "", nil)
-	if deleted.Code != http.StatusNoContent {
+	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete company: %d %s", deleted.Code, deleted.Body.String())
 	}
 
@@ -319,7 +414,7 @@ func TestCompanyManagementAndLogicalDelete(t *testing.T) {
 	}
 
 	again := doJSON(t, handler, http.MethodDelete, "/api/v1/companies/logical-delete", "Bearer admin", "", nil)
-	if again.Code != http.StatusNoContent {
+	if again.Code != http.StatusOK {
 		t.Fatalf("idempotent delete: %d %s", again.Code, again.Body.String())
 	}
 }
@@ -337,6 +432,98 @@ func TestAdminPageIsServed(t *testing.T) {
 	handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte("公司管理")) {
 		t.Fatalf("admin page: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	scriptRequest := httptest.NewRequest(http.MethodGet, "/admin/app.js", nil)
+	scriptRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(scriptRecorder, scriptRequest)
+	if scriptRecorder.Code != http.StatusOK {
+		t.Fatalf("admin script: %d %s", scriptRecorder.Code, scriptRecorder.Body.String())
+	}
+	if scriptRecorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("admin script cache control: %q", scriptRecorder.Header().Get("Cache-Control"))
+	}
+	if !bytes.Contains(scriptRecorder.Body.Bytes(), []byte(`document.execCommand("copy")`)) {
+		t.Fatal("admin script does not contain the clipboard compatibility path")
+	}
+}
+
+func TestCompanyAuthCheckReturnsEnvelopeForValidAndInvalidKeys(t *testing.T) {
+	dbs, err := store.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbs.Close()
+	handler := New(config.Config{
+		AdminToken: "admin", MasterKey: bytes.Repeat([]byte{0x42}, 32),
+	}, dbs)
+	created := doJSON(t, handler, http.MethodPost, "/api/v1/companies", "Bearer admin", "", map[string]any{
+		"companyId": "auth-check", "authorizedUntil": time.Now().Add(time.Hour).Unix(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create company: %d %s", created.Code, created.Body.String())
+	}
+	var company struct {
+		CompanyAPIKey string `json:"companyApiKey"`
+	}
+	decodeResponse(t, created, &company)
+
+	valid := doJSON(t, handler, http.MethodGet,
+		"/api/v1/companies/auth-check/pack/auth-check", "", company.CompanyAPIKey, nil)
+	if valid.Code != http.StatusOK {
+		t.Fatalf("valid auth check: %d %s", valid.Code, valid.Body.String())
+	}
+	var validEnvelope struct {
+		Code    string `json:"code"`
+		Details struct {
+			CompanyID string `json:"companyId"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(valid.Body.Bytes(), &validEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if validEnvelope.Code != "COMPANY_AUTHORIZED" || validEnvelope.Details.CompanyID != "auth-check" {
+		t.Fatalf("valid auth check response: %+v", validEnvelope)
+	}
+
+	invalid := doJSON(t, handler, http.MethodGet,
+		"/api/v1/companies/auth-check/pack/auth-check", "", "wrong-key", nil)
+	if invalid.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid auth check: %d %s", invalid.Code, invalid.Body.String())
+	}
+	var invalidEnvelope struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(invalid.Body.Bytes(), &invalidEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if invalidEnvelope.Code != "COMPANY_UNAUTHORIZED" || invalidEnvelope.Message == "" {
+		t.Fatalf("invalid auth check response: %+v", invalidEnvelope)
+	}
+}
+
+func TestUnknownAPIUsesResponseEnvelope(t *testing.T) {
+	dbs, err := store.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbs.Close()
+	handler := New(config.Config{IntegrityMode: "disabled"}, dbs)
+	response := doJSON(t, handler, http.MethodGet, "/api/v1/not-a-real-endpoint", "", "", nil)
+	if response.Code != http.StatusNotFound || response.Header().Get("Content-Type") != "application/json; charset=utf-8" {
+		t.Fatalf("unknown API response: %d %s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Code    string         `json:"code"`
+		Message string         `json:"message"`
+		Details map[string]any `json:"details"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Code != "API_NOT_FOUND" || envelope.Message == "" || envelope.Details == nil {
+		t.Fatalf("invalid error envelope: %s", response.Body.String())
 	}
 }
 
@@ -384,7 +571,47 @@ func doJSON(t *testing.T, handler http.Handler, method, path, admin, companyKey 
 
 func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, target any) {
 	t.Helper()
-	if err := json.Unmarshal(response.Body.Bytes(), target); err != nil {
+	var envelope struct {
+		Details json.RawMessage `json:"details"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
+	if len(envelope.Details) == 0 {
+		t.Fatalf("response is missing details: %s", response.Body.String())
+	}
+	if err := json.Unmarshal(envelope.Details, target); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testJG3(t *testing.T, dex []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(dex); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result := make([]byte, 20+compressed.Len())
+	copy(result[:4], []byte{'J', 'G', '3', 0})
+	binary.BigEndian.PutUint32(result[4:8], 1)
+	binary.BigEndian.PutUint32(result[8:12], 0)
+	binary.BigEndian.PutUint32(result[12:16], uint32(compressed.Len()))
+	binary.BigEndian.PutUint32(result[16:20], uint32(len(dex)))
+	copy(result[20:], compressed.Bytes())
+	return result
+}
+
+func writeBuildHashes(t *testing.T, writer *multipart.Writer, payload []byte, resourcesSeed, nativeSeed string) {
+	t.Helper()
+	businessHash, err := businessDexHashFromJG3(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.WriteField("businessDexSha256", businessHash)
+	_ = writer.WriteField("resourcesSha256", secure.SHA256URL([]byte(resourcesSeed)))
+	_ = writer.WriteField("nativeLibsSha256", secure.SHA256URL([]byte(nativeSeed)))
 }

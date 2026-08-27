@@ -22,6 +22,7 @@ repositories {
 dependencies {
     compileOnly 'com.android.tools.build:gradle-api:9.3.1'
     implementation 'com.android.tools:r8:8.3.37' // Use a version compatible with AGP 9.3.1 if possible, but 8.3.x is common
+    testImplementation 'junit:junit:4.13.2'
 }
 
 java {
@@ -41,14 +42,30 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
-tasks.named('processResources') {
-    filesMatching('jiagu-publication.properties') {
-        expand(
-                runtimeGroup: publicationGroup,
-                runtimeVersion: publicationVersion
-        )
+/**
+ * 解决 "Cannot resolve resource filtering of MatchingCopyAction" 警告。
+ * IDEA 的 JPS 构建器无法处理 processResources 任务中的 filesMatching 或 filter 闭包。
+ * 解决方案：将文件生成逻辑独立到自定义任务，并将其输出目录添加到资源集中。
+ */
+def generateJiaguProperties = tasks.register('generateJiaguProperties') {
+    def outputDir = layout.buildDirectory.dir("generated/jiagu-resources")
+    def propertiesFile = outputDir.map { it.file("jiagu-publication.properties") }
+
+    outputs.dir(outputDir)
+    inputs.property('runtimeGroup', publicationGroup)
+    inputs.property('runtimeVersion', publicationVersion)
+
+    doLast {
+        def file = propertiesFile.get().asFile
+        file.parentFile.mkdirs()
+        file.text = """runtime.group=${publicationGroup}
+runtime.artifact=jiagu-runtime
+runtime.version=${publicationVersion}
+"""
     }
 }
+
+sourceSets.main.resources.srcDir(generateJiaguProperties)
 
 gradlePlugin {
     plugins {

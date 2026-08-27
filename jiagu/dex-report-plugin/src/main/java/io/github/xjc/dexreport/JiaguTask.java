@@ -9,9 +9,15 @@ import org.gradle.api.provider.ListProperty;
 import org.gradle.api.provider.Property;
 import org.gradle.api.tasks.Input;
 import org.gradle.api.tasks.InputFiles;
+import org.gradle.api.tasks.InputFile;
+import org.gradle.api.tasks.InputDirectory;
+import org.gradle.api.tasks.Optional;
+import org.gradle.api.tasks.PathSensitive;
+import org.gradle.api.tasks.PathSensitivity;
 import org.gradle.api.tasks.OutputFile;
 import org.gradle.api.tasks.OutputDirectory;
 import org.gradle.api.tasks.TaskAction;
+import org.gradle.work.DisableCachingByDefault;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -32,6 +38,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -50,36 +57,57 @@ import java.nio.charset.StandardCharsets;
  * 核心加固打包任务：
  * 负责遍历所有的 Class 文件，将壳代码放入输出 Jar，将业务代码加密。
  */
+@DisableCachingByDefault(because = "Creates and updates a server-side release and embeds its identity")
 public abstract class JiaguTask extends DefaultTask {
 
-    @Input
+    @Internal
     public abstract Property<String> getPackageName();
 
-    @Input
+    @Internal
     public abstract Property<String> getVersionName();
 
-    @Input
+    @Internal
     public abstract Property<Integer> getVersionCode();
 
-    @Input
+    @Internal
     public abstract Property<String> getServerUrl();
 
-    @Input
+    @Internal
     public abstract Property<String> getCompanyId();
 
     @Internal
     public abstract Property<String> getCompanyApiKey();
 
-    @Input
+    @Internal
     public abstract Property<String> getCertificateSha256();
 
-    @Input
+    @Internal
+    public abstract ListProperty<String> getCertificateSha256Digests();
+
+    @Internal
+    public abstract RegularFileProperty getResourcePackage();
+
+    @Internal
+    public abstract DirectoryProperty getMergedAssets();
+
+    @Internal
+    public abstract org.gradle.api.file.ConfigurableFileCollection getNativeInputs();
+
+    @Internal
     public abstract Property<Boolean> getPublish();
 
+    @Input
+    public abstract Property<Boolean> getAntiDebugEnabled();
+
+    @Internal
+    public abstract Property<String> getBuildInvocationId();
+
     @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
     public abstract ListProperty<RegularFile> getAllJars();
 
     @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
     public abstract ListProperty<Directory> getAllDirectories();
 
     @Internal
@@ -88,8 +116,17 @@ public abstract class JiaguTask extends DefaultTask {
     @OutputFile
     public abstract RegularFileProperty getOutputJar();
 
-    @OutputDirectory
+    @Internal
     public abstract DirectoryProperty getOutJniLibsDir();
+
+    @Internal
+    public abstract RegularFileProperty getReleaseMetadataFile();
+
+    @OutputFile
+    public abstract RegularFileProperty getPayloadFile();
+
+    @OutputFile
+    public abstract RegularFileProperty getBusinessDexSha256File();
 
     @TaskAction
     public void execute() throws IOException {
@@ -98,18 +135,12 @@ public abstract class JiaguTask extends DefaultTask {
         getLogger().lifecycle("[Jiagu][计时] 加固任务开始: {}", getPath());
 
         long stageStartedAt = System.nanoTime();
-        int versionCode = getVersionCode().get();
-        String companyId = getCompanyId().get().trim();
-        String companyApiKey = getCompanyApiKey().get().trim();
-        String serverUrl = getServerUrl().get().trim();
-        if (companyId.isEmpty() || companyApiKey.isEmpty() || serverUrl.isEmpty()) {
-            throw new IOException("serverUrl, companyId and companyApiKey are required");
-        }
-        getLogger().lifecycle("[Jiagu] 服务端={}, 公司={}, Key 指纹={}", serverUrl, companyId,
-                shortFingerprint(companyApiKey));
-
         File outputJarFile = getOutputJar().get().getAsFile();
-        File jniLibsDir = getOutJniLibsDir().get().getAsFile();
+        File payloadFile = getPayloadFile().get().getAsFile();
+        File businessDexSha256File = getBusinessDexSha256File().get().getAsFile();
+        Files.createDirectories(outputJarFile.toPath().getParent());
+        Files.createDirectories(payloadFile.toPath().getParent());
+        Files.createDirectories(businessDexSha256File.toPath().getParent());
 
         // ... 省略部分中间 JAR 处理逻辑 (与之前相同) ...
 
@@ -182,17 +213,19 @@ public abstract class JiaguTask extends DefaultTask {
 
             File[] dexFiles = tempDexDir.toFile().listFiles((dir, name) -> name.endsWith(".dex"));
             if (dexFiles != null && dexFiles.length > 0) {
+                Arrays.sort(dexFiles, Comparator.comparing(File::getName));
+                String businessDexSha256 = hashFiles("JIAGU-BUSINESS-DEX-V1", Arrays.asList(dexFiles));
+                Files.write(businessDexSha256File.toPath(), businessDexSha256.getBytes(StandardCharsets.UTF_8));
                 // 按照文件名排序，确保 classes.dex, classes2.dex 等顺序一致
                 Arrays.sort(dexFiles, Comparator.comparing(File::getName));
                 
                 // 生成服务端标准明文 JG3 容器。服务端会使用随机 Canonical Key 加密保存，
                 // 设备下载时再转换为设备专属 JGPD 密文。
-                File tempPayload = File.createTempFile("jiagu_payload", ".bin");
                 long rawDexBytes = 0;
                 long compressedDexBytes = 0;
                 long uncompressedPayloadBytes = 0;
                 stageStartedAt = System.nanoTime();
-                try (FileOutputStream fos = new FileOutputStream(tempPayload)) {
+                try (FileOutputStream fos = new FileOutputStream(payloadFile)) {
                     fos.write("JG3\0".getBytes(StandardCharsets.UTF_8));
                     fos.write(intToBytes(dexFiles.length));
 
@@ -216,43 +249,13 @@ public abstract class JiaguTask extends DefaultTask {
                 }
                 finishStage("DEX 压缩与 JG3 封装", stageStartedAt, stageTimes);
                 logCompression("DEX 数据", rawDexBytes, compressedDexBytes);
-                logCompression("JG3 Payload", uncompressedPayloadBytes, tempPayload.length());
-
-                try {
-                    stageStartedAt = System.nanoTime();
-                    JiaguServerClient client = new JiaguServerClient(serverUrl, companyId, companyApiKey);
-                    JiaguServerClient.PublicConfig publicConfig = client.getPublicConfig();
-                    JiaguServerClient.Release release = client.createRelease(
-                            tempPayload, "app-main", versionCode, getPackageName().get(), versionCode,
-                            getCertificateSha256().get());
-                    File runtimeConfig = File.createTempFile("jiagu_runtime_config", ".json");
-                    try {
-                        Files.write(runtimeConfig.toPath(), runtimeConfigJson(
-                                serverUrl, companyId, publicConfig, release).getBytes(StandardCharsets.UTF_8));
-                        buildPayloadLibraries(runtimeConfig, jniLibsDir, runtimeConfig.length());
-                    } finally {
-                        Files.deleteIfExists(runtimeConfig.toPath());
-                    }
-                    if (getPublish().get()) {
-                        client.publish(release.releaseId);
-                        getLogger().lifecycle("[Jiagu] release 已发布: {}", release.releaseId);
-                    } else {
-                        getLogger().lifecycle("[Jiagu] release 保持 DRAFT 状态 (未启用自动发布)");
-                    }
-                    finishStage("服务端创建发布与 RuntimeConfig ELF", stageStartedAt, stageTimes);
-                } finally {
-                    Files.deleteIfExists(tempPayload.toPath());
-                }
-
-                getLogger().lifecycle("[Jiagu] RuntimeConfig ELF 构建成功: liblog_ext.so 已生成至四个 ABI 目录");
+                logCompression("JG3 Payload", uncompressedPayloadBytes, payloadFile.length());
+                getLogger().lifecycle("[Jiagu] 业务 DEX Payload 已准备: {}", payloadFile);
             } else {
                 throw new IOException("D8 failed to produce any DEX files");
             }
-        } catch (NdkConfigurationException e) {
-            getLogger().error(e.getMessage(), e);
-            throw e;
         } catch (Exception e) {
-            String message = "[Jiagu] DEX 转换、服务端发布或 RuntimeConfig ELF 构建失败";
+            String message = "[Jiagu] 业务 DEX 转换与 Payload 生成失败";
             getLogger().error(message, e);
             throw new IOException(message, e);
         } finally {
@@ -261,8 +264,7 @@ public abstract class JiaguTask extends DefaultTask {
             tempBusinessJar.delete();
         }
         
-        getLogger().lifecycle("[Jiagu] 任务完成。输出: {}, 加密包目录: {}",
-                outputJarFile.getName(), jniLibsDir.getName());
+        getLogger().lifecycle("[Jiagu] 业务代码加固阶段完成。输出: {}", outputJarFile.getName());
         long totalMs = elapsedMillis(taskStartedAt);
         getLogger().lifecycle("[Jiagu][计时] ===== 加固阶段耗时汇总 =====");
         for (Map.Entry<String, Long> entry : stageTimes.entrySet()) {
@@ -278,7 +280,8 @@ public abstract class JiaguTask extends DefaultTask {
 
         // 适度回调：保留 R 类在壳中。
         // 完全移除 R 类可能导致某些系统资源（如图标、主题）在壳 Application 阶段解析失败。
-        boolean shouldKeepInShell = name.startsWith("io/github/xjc/jiagu/") || 
+        boolean shouldKeepInShell = name.startsWith("io/github/xjc/jiagu/") ||
+                                   name.startsWith("com/google/crypto/tink/") ||
                                    name.contains("/R$") || name.endsWith("/R.class");
 
         if (shouldKeepInShell || !name.endsWith(".class")) {
@@ -584,7 +587,7 @@ public abstract class JiaguTask extends DefaultTask {
                                      JiaguServerClient.PublicConfig publicConfig,
                                      JiaguServerClient.Release release) {
         return "{" +
-                "\"configVersion\":1," +
+                "\"configVersion\":2," +
                 "\"serverUrl\":" + JiaguServerClient.json(serverUrl) + "," +
                 "\"companyId\":" + JiaguServerClient.json(companyId) + "," +
                 "\"releaseId\":" + JiaguServerClient.json(release.releaseId) + "," +
@@ -592,14 +595,176 @@ public abstract class JiaguTask extends DefaultTask {
                 "\"payloadVersion\":" + release.payloadVersion + "," +
                 "\"packageName\":" + JiaguServerClient.json(release.packageName) + "," +
                 "\"versionCode\":" + release.versionCode + "," +
-                "\"certificateSha256\":" + JiaguServerClient.json(release.certificateSha256) + "," +
+                "\"certificateSha256Digests\":" + jsonArray(release.certificateSha256Digests) + "," +
+                "\"certificateSetSha256\":" + JiaguServerClient.json(release.certificateSetSha256) + "," +
+                "\"businessDexSha256\":" + JiaguServerClient.json(release.businessDexSha256) + "," +
+                "\"resourcesSha256\":" + JiaguServerClient.json(release.resourcesSha256) + "," +
+                "\"nativeLibsSha256\":" + JiaguServerClient.json(release.nativeLibsSha256) + "," +
+                "\"releaseBuildSha256\":" + JiaguServerClient.json(release.releaseBuildSha256) + "," +
                 "\"payloadPlaintextSha256\":" + JiaguServerClient.json(release.plaintextSha256) + "," +
                 "\"payloadKeyVersion\":" + release.payloadKeyVersion + "," +
                 "\"serverKeyId\":" + JiaguServerClient.json(publicConfig.serverKeyId) + "," +
                 "\"serverPublicKey\":" + JiaguServerClient.json(publicConfig.serverPublicKey) + "," +
+                "\"wrapAlgorithm\":\"RSA-OAEP-SHA1\"," +
                 "\"integrityMode\":" + JiaguServerClient.json(publicConfig.integrityMode) + "," +
                 "\"integrityCloudProjectNumber\":" + publicConfig.integrityCloudProjectNumber +
                 "}";
+    }
+
+    private void writeReleaseMetadata(JiaguServerClient.Release release) throws IOException {
+        File target = getReleaseMetadataFile().get().getAsFile();
+        Files.createDirectories(target.toPath().getParent());
+        Files.write(target.toPath(), ("{\"releaseId\":" + JiaguServerClient.json(release.releaseId) +
+                ",\"status\":" + JiaguServerClient.json(release.status) +
+                ",\"buildInvocationId\":" + JiaguServerClient.json(getBuildInvocationId().get()) + "}")
+                .getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String hashResourcePackage() throws IOException {
+        if (!getResourcePackage().isPresent() || !getResourcePackage().get().getAsFile().isFile()) {
+            return hashEntryValues("JIAGU-RESOURCES-V1", new ArrayList<>());
+        }
+        List<EntryValue> entries = new ArrayList<>();
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(getResourcePackage().get().getAsFile())) {
+            Enumeration<? extends java.util.zip.ZipEntry> all = zip.entries();
+            while (all.hasMoreElements()) {
+                java.util.zip.ZipEntry entry = all.nextElement();
+                String name = entry.getName().replace('\\', '/');
+                if (entry.isDirectory() || !(name.equals("AndroidManifest.xml") || name.equals("resources.arsc") ||
+                        name.startsWith("res/") || name.startsWith("assets/"))) continue;
+                try (InputStream input = zip.getInputStream(entry)) {
+                    entries.add(new EntryValue(name, readStream(input)));
+                }
+            }
+        }
+        if (getMergedAssets().isPresent() && getMergedAssets().get().getAsFile().isDirectory()) {
+            File root = getMergedAssets().get().getAsFile();
+            try (java.util.stream.Stream<Path> paths = Files.walk(root.toPath())) {
+                for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile)::iterator) {
+                    String name = "assets/" + root.toPath().relativize(path).toString().replace('\\', '/');
+                    entries.add(new EntryValue(name, Files.readAllBytes(path)));
+                }
+            }
+        }
+        return hashEntryValues("JIAGU-RESOURCES-V1", entries);
+    }
+
+    private String hashNativeInputs() throws IOException {
+        List<EntryValue> entries = new ArrayList<>();
+        for (File file : getNativeInputs().getFiles()) {
+            if (file.isDirectory()) {
+                try (java.util.stream.Stream<Path> paths = Files.walk(file.toPath())) {
+                    for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile)
+                            .filter(value -> value.getFileName().toString().endsWith(".so"))::iterator) {
+                        if (!path.getFileName().toString().equals("liblog_ext.so")) {
+                            File library = path.toFile();
+                            entries.add(new EntryValue(nativePath(library), strippedNativeBytes(library)));
+                        }
+                    }
+                }
+                continue;
+            }
+            if (!file.isFile()) continue;
+            if (file.getName().endsWith(".so") && !file.getName().equals("liblog_ext.so")) {
+                entries.add(new EntryValue(nativePath(file), strippedNativeBytes(file)));
+            } else if (file.getName().endsWith(".aar") || file.getName().endsWith(".zip")) {
+                try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(file)) {
+                    Enumeration<? extends java.util.zip.ZipEntry> all = zip.entries();
+                    while (all.hasMoreElements()) {
+                        java.util.zip.ZipEntry entry = all.nextElement();
+                        String name = entry.getName().replace('\\', '/');
+                        if (entry.isDirectory() || !name.startsWith("jni/") || !name.endsWith(".so") ||
+                                name.endsWith("/liblog_ext.so")) continue;
+                        try (InputStream input = zip.getInputStream(entry)) {
+                            entries.add(new EntryValue(name.substring(4), readStream(input)));
+                        }
+                    }
+                }
+            }
+        }
+        return hashEntryValues("JIAGU-NATIVE-LIBS-V1", entries);
+    }
+
+    private byte[] strippedNativeBytes(File library) throws IOException {
+        File temporary = File.createTempFile("jiagu_native_", ".so");
+        try {
+            Files.copy(library.toPath(), temporary.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            File prebuilt = new File(getNdkDirectory().get().getAsFile(), "toolchains/llvm/prebuilt");
+            File[] hosts = prebuilt.listFiles(File::isDirectory);
+            if (hosts == null || hosts.length == 0) throw new IOException("NDK llvm prebuilt directory is unavailable");
+            Arrays.sort(hosts, Comparator.comparing(File::getName));
+            File strip = new File(hosts[0], "bin/llvm-strip" + (isWindows() ? ".exe" : ""));
+            if (!strip.isFile()) throw new IOException("NDK llvm-strip is unavailable: " + strip);
+            runCommand(Arrays.asList(strip.getAbsolutePath(), "--strip-unneeded", temporary.getAbsolutePath()),
+                    temporary.getParentFile(), "normalize native library " + library.getName());
+            return Files.readAllBytes(temporary.toPath());
+        } finally {
+            Files.deleteIfExists(temporary.toPath());
+        }
+    }
+
+    private String nativePath(File file) {
+        String value = file.getPath().replace('\\', '/');
+        for (String abi : Arrays.asList("arm64-v8a", "armeabi-v7a", "x86", "x86_64")) {
+            if (value.contains("/" + abi + "/")) return abi + "/" + file.getName();
+        }
+        return "unknown/" + file.getName();
+    }
+
+    private String hashFiles(String domain, List<File> files) throws IOException {
+        List<EntryValue> entries = new ArrayList<>();
+        for (File file : files) entries.add(new EntryValue(file.getName(), Files.readAllBytes(file.toPath())));
+        return hashEntryValues(domain, entries);
+    }
+
+    private String hashEntryValues(String domain, List<EntryValue> entries) throws IOException {
+        java.util.TreeMap<String, byte[]> unique = new java.util.TreeMap<>();
+        for (EntryValue entry : entries) {
+            byte[] previous = unique.putIfAbsent(entry.path, entry.data);
+            if (previous != null && !Arrays.equals(previous, entry.data)) {
+                throw new IOException("Conflicting final build entries share path " + entry.path);
+            }
+        }
+        List<String> values = new ArrayList<>();
+        values.add(domain);
+        for (Map.Entry<String, byte[]> entry : unique.entrySet()) {
+            values.add(entry.getKey());
+            values.add(Integer.toString(entry.getValue().length));
+            values.add(JiaguServerClient.sha256(entry.getValue()));
+        }
+        return JiaguServerClient.sha256(canonical(values.toArray(new String[0])).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String canonical(String... values) {
+        StringBuilder result = new StringBuilder();
+        for (String value : values) result.append(value.getBytes(StandardCharsets.UTF_8).length)
+                .append(':').append(value).append('\n');
+        return result.toString();
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows");
+    }
+
+    private static List<String> sortedUnique(List<String> values) {
+        java.util.TreeSet<String> set = new java.util.TreeSet<>();
+        for (String value : values) if (value != null && !value.trim().isEmpty()) set.add(value.trim());
+        return new ArrayList<>(set);
+    }
+
+    private static String jsonArray(List<String> values) {
+        StringBuilder result = new StringBuilder("[");
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) result.append(',');
+            result.append(JiaguServerClient.json(values.get(i)));
+        }
+        return result.append(']').toString();
+    }
+
+    private static final class EntryValue {
+        final String path;
+        final byte[] data;
+        EntryValue(String path, byte[] data) { this.path = path; this.data = data; }
     }
 
     private String shortFingerprint(String secret) throws IOException {

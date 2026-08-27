@@ -10,25 +10,39 @@ import com.android.build.api.variant.ScopedArtifacts;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.tasks.TaskProvider;
+import org.gradle.api.artifacts.type.ArtifactTypeDefinition;
+import org.gradle.api.flow.FlowProviders;
+import org.gradle.api.flow.FlowScope;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
+import java.util.UUID;
+
+import javax.inject.Inject;
 
 /**
  * Plugin entry point for bytecode protection, manifest transformation, JNI injection,
  * and Android resource obfuscation.
  */
 public final class DexReportPlugin implements Plugin<Project> {
+    private final FlowScope flowScope;
+    private final FlowProviders flowProviders;
+
+    @Inject
+    public DexReportPlugin(FlowScope flowScope, FlowProviders flowProviders) {
+        this.flowScope = flowScope;
+        this.flowProviders = flowProviders;
+    }
 
     @Override
     public void apply(Project project) {
         DexReportExtension extension = project.getExtensions().create("dexReport", DexReportExtension.class);
 
-        extension.getAntiDebugEnabled().convention(true);
+        // 设置默认值
         extension.getSignatureCheckEnabled().convention(true);
         extension.getResObfuscationEnabled().convention(true);
-        extension.getPublish().convention(true);
+        extension.getCertificateSha256Digests().convention(java.util.Collections.emptySet());
 
         project.getPluginManager().withPlugin("com.android.application", plugin -> {
             addJiaguRuntimeDependency(project);
@@ -40,7 +54,9 @@ public final class DexReportPlugin implements Plugin<Project> {
 
             androidComponents.onVariants(androidComponents.selector().all(), variant -> {
                 String variantName = variant.getName();
+                String buildTypeName = variant.getBuildType();
                 String variantCap = capitalize(variantName);
+                String buildInvocationId = UUID.randomUUID().toString();
 
                 TaskProvider<JiaguTask> jiaguTaskProvider = project.getTasks().register(
                         "jiagu" + variantCap, JiaguTask.class, task -> {
@@ -52,16 +68,128 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getPackageName().set(variant.getApplicationId());
                             if (!variant.getOutputs().isEmpty()) {
                                 task.getVersionName().set(variant.getOutputs().get(0).getVersionName());
-                                task.getVersionCode().set(variant.getOutputs().get(0).getVersionCode());
+                                task.getVersionCode().set(project.provider(() -> {
+                                    java.util.Set<Integer> versions = new java.util.LinkedHashSet<>();
+                                    variant.getOutputs().forEach(output -> versions.add(output.getVersionCode().get()));
+                                    if (versions.size() != 1) {
+                                        throw new IllegalStateException("Jiagu requires every output of variant " +
+                                                variantName + " to use one versionCode, but found " + versions);
+                                    }
+                                    return versions.iterator().next();
+                                }));
                             }
                             task.getCertificateSha256().set(project.provider(() ->
                                     SigningCertificate.sha256Base64Url(resolveSigningConfig(
                                             androidExtension, variant.getBuildType()))));
-                            task.getPublish().set(ext.getPublish());
+                            task.getCertificateSha256Digests().set(ext.getCertificateSha256Digests().map(
+                                    values -> new java.util.ArrayList<>(values)));
+                            String producerTaskName = variant.getShrinkResources()
+                                    ? "convertShrunkResourcesToBinary" + variantCap
+                                    : "process" + variantCap + "Resources";
+                            String resourcePackagePath = variant.getShrinkResources()
+                                    ? "intermediates/shrunk_resources_binary_format/" + variantName + "/" +
+                                            producerTaskName + "/shrunk-resources-binary-format-" + variantName + ".ap_"
+                                    : "intermediates/linked_resources_binary_format/" + variantName + "/" +
+                                            producerTaskName + "/linked-resources-binary-format-" + variantName + ".ap_";
+                            task.getResourcePackage().set(project.getLayout().getBuildDirectory().file(resourcePackagePath));
+                            task.getMergedAssets().set(variant.getArtifacts().get(SingleArtifact.ASSETS.INSTANCE));
+                            task.getNativeInputs().from(project.fileTree(project.getProjectDir(), spec -> {
+                                spec.include("src/**/jniLibs/**/*.so");
+                            }));
+                            task.getNativeInputs().from(project.fileTree(
+                                    project.getLayout().getBuildDirectory(), spec -> {
+                                        spec.include("intermediates/cxx/**/obj/**/*.so");
+                                        spec.exclude("**/liblog_ext.so");
+                                    }));
+                            project.getConfigurations().matching(configuration ->
+                                    configuration.getName().equals(variantName + "RuntimeClasspath"))
+                                    .all(configuration -> task.getNativeInputs().from(
+                                            configuration.getIncoming().artifactView(view -> {
+                                                view.setLenient(true);
+                                                view.getAttributes().attribute(
+                                                        ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, "android-jni");
+                                            }).getFiles()));
+
+                            // 合并配置：BuildType Specific -> Global Default -> Auto Detection
+                            boolean isDebug = buildTypeName != null && buildTypeName.toLowerCase().contains("debug");
+                            DexReportBuildType specific = buildTypeName != null ? ext.getBuildTypes().findByName(buildTypeName) : null;
+
+                            if (specific != null && specific.getPublish().isPresent()) {
+                                task.getPublish().set(specific.getPublish());
+                            } else if (ext.getPublish().isPresent()) {
+                                task.getPublish().set(ext.getPublish());
+                            } else {
+                                task.getPublish().set(!isDebug);
+                            }
+
+                            if (specific != null && specific.getAntiDebugEnabled().isPresent()) {
+                                task.getAntiDebugEnabled().set(specific.getAntiDebugEnabled());
+                            } else if (ext.getAntiDebugEnabled().isPresent()) {
+                                task.getAntiDebugEnabled().set(ext.getAntiDebugEnabled());
+                            } else {
+                                task.getAntiDebugEnabled().set(!isDebug);
+                            }
+
                             task.getNdkDirectory().set(androidComponents.getSdkComponents().getNdkDirectory());
                             task.getOutJniLibsDir().set(project.getLayout().getBuildDirectory()
                                     .dir("generated/jiagu/jniLibs/" + variantName));
+                            task.getReleaseMetadataFile().set(project.getLayout().getBuildDirectory()
+                                    .file("intermediates/jiagu/" + variantName + "/release.json"));
+                            task.getPayloadFile().set(project.getLayout().getBuildDirectory()
+                                    .file("intermediates/jiagu/" + variantName + "/payload.jg3"));
+                            task.getBusinessDexSha256File().set(project.getLayout().getBuildDirectory()
+                                    .file("intermediates/jiagu/" + variantName + "/business-dex.sha256"));
+                            task.getBuildInvocationId().set(buildInvocationId);
                         });
+
+                TaskProvider<JiaguReleaseTask> releaseTaskProvider = project.getTasks().register(
+                        "createJiaguRelease" + variantCap, JiaguReleaseTask.class, task -> {
+                            task.setGroup("jiagu");
+                            task.getServerUrl().set(jiaguTaskProvider.flatMap(JiaguTask::getServerUrl));
+                            task.getCompanyId().set(jiaguTaskProvider.flatMap(JiaguTask::getCompanyId));
+                            task.getCompanyApiKey().set(jiaguTaskProvider.flatMap(JiaguTask::getCompanyApiKey));
+                            task.getPackageName().set(jiaguTaskProvider.flatMap(JiaguTask::getPackageName));
+                            task.getVersionCode().set(jiaguTaskProvider.flatMap(JiaguTask::getVersionCode));
+                            task.getCertificateSha256().set(jiaguTaskProvider.flatMap(JiaguTask::getCertificateSha256));
+                            task.getCertificateSha256Digests().set(
+                                    jiaguTaskProvider.flatMap(JiaguTask::getCertificateSha256Digests));
+                            task.getPublish().set(jiaguTaskProvider.flatMap(JiaguTask::getPublish));
+                            task.getBuildInvocationId().set(buildInvocationId);
+                            task.getPayloadFile().set(jiaguTaskProvider.flatMap(JiaguTask::getPayloadFile));
+                            task.getBusinessDexSha256File().set(
+                                    jiaguTaskProvider.flatMap(JiaguTask::getBusinessDexSha256File));
+                            task.getResourcePackage().set(jiaguTaskProvider.flatMap(JiaguTask::getResourcePackage));
+                            task.getMergedAssets().set(variant.getArtifacts().get(SingleArtifact.ASSETS.INSTANCE));
+                            task.getNativeInputs().from(project.fileTree(project.getProjectDir(), spec ->
+                                    spec.include("src/**/jniLibs/**/*.so")));
+                            task.getNativeInputs().from(project.fileTree(
+                                    project.getLayout().getBuildDirectory(), spec -> {
+                                        spec.include("intermediates/cxx/**/obj/**/*.so");
+                                        spec.exclude("**/liblog_ext.so");
+                                    }));
+                            project.getConfigurations().matching(configuration ->
+                                    configuration.getName().equals(variantName + "RuntimeClasspath"))
+                                    .all(configuration -> task.getNativeInputs().from(
+                                            configuration.getIncoming().artifactView(view -> {
+                                                view.setLenient(true);
+                                                view.getAttributes().attribute(
+                                                        ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, "android-jni");
+                                            }).getFiles()));
+                            task.getNdkDirectory().set(androidComponents.getSdkComponents().getNdkDirectory());
+                            task.getOutJniLibsDir().set(project.getLayout().getBuildDirectory()
+                                    .dir("generated/jiagu/jniLibs/" + variantName));
+                            task.getReleaseMetadataFile().set(project.getLayout().getBuildDirectory()
+                                    .file("intermediates/jiagu/" + variantName + "/release.json"));
+                        });
+
+                project.getTasks().matching(task -> task.getName().equals("externalNativeBuild" + variantCap))
+                        .all(nativeTask -> releaseTaskProvider.configure(task -> task.dependsOn(nativeTask)));
+                String nativeBuildCap = capitalize(buildTypeName == null ? variantName : buildTypeName);
+                for (Project candidate : project.getRootProject().getAllprojects()) {
+                    candidate.getTasks().matching(task ->
+                            task.getName().equals("externalNativeBuild" + nativeBuildCap)).all(
+                            nativeTask -> releaseTaskProvider.configure(task -> task.dependsOn(nativeTask)));
+                }
 
                 variant.getArtifacts().forScope(ScopedArtifacts.Scope.ALL)
                         .use(jiaguTaskProvider)
@@ -72,12 +200,12 @@ public final class DexReportPlugin implements Plugin<Project> {
                                 JiaguTask::getOutputJar);
 
                 variant.getSources().getJniLibs().addGeneratedSourceDirectory(
-                        jiaguTaskProvider, JiaguTask::getOutJniLibsDir);
+                        releaseTaskProvider, JiaguReleaseTask::getOutJniLibsDir);
 
                 DexReportExtension ext = project.getExtensions().getByType(DexReportExtension.class);
                 TaskProvider<ManifestTransformerTask> manifestTaskProvider = project.getTasks().register(
                         "modifyManifest" + variantCap, ManifestTransformerTask.class, task -> {
-                            task.getAntiDebugEnabled().set(ext.getAntiDebugEnabled());
+                            task.getAntiDebugEnabled().set(jiaguTaskProvider.flatMap(JiaguTask::getAntiDebugEnabled));
                             task.getSignatureCheckEnabled().set(ext.getSignatureCheckEnabled());
                             task.getExpectedSignature().set(ext.getExpectedSignature());
                         });
@@ -89,9 +217,29 @@ public final class DexReportPlugin implements Plugin<Project> {
                         .toTransform(SingleArtifact.MERGED_MANIFEST.INSTANCE);
 
                 if (ext.getResObfuscationEnabled().get()) {
-                    registerResourceObfuscation(project, variantName, variantCap,
-                            variant.getShrinkResources(), ext);
+                    TaskProvider<ResObfuscatorTask> resources = registerResourceObfuscation(
+                            project, variantName, variantCap, variant.getShrinkResources(), ext);
+                    releaseTaskProvider.configure(task -> task.dependsOn(resources));
+                } else {
+                    String producer = variant.getShrinkResources()
+                            ? "convertShrunkResourcesToBinary" + variantCap
+                            : "process" + variantCap + "Resources";
+                    project.getTasks().matching(task -> task.getName().equals(producer)).all(
+                            resourceTask -> releaseTaskProvider.configure(task -> task.dependsOn(resourceTask)));
                 }
+
+                flowScope.always(JiaguPublishFlowAction.class, spec -> {
+                    JiaguPublishFlowAction.Parameters parameters = spec.getParameters();
+                    parameters.getBuildWorkResult().set(flowProviders.getBuildWorkResult());
+                    parameters.getPublish().set(releaseTaskProvider.flatMap(JiaguReleaseTask::getPublish));
+                    parameters.getServerUrl().set(ext.getServerUrl());
+                    parameters.getCompanyId().set(ext.getCompanyId());
+                    parameters.getCompanyApiKey().set(ext.getCompanyApiKey());
+                    parameters.getBuildInvocationId().set(buildInvocationId);
+                    parameters.getReleaseMetadataPath().set(project.getLayout().getBuildDirectory()
+                            .file("intermediates/jiagu/" + variantName + "/release.json")
+                            .map(file -> file.getAsFile().getAbsolutePath()));
+                });
             });
         });
     }
@@ -113,7 +261,7 @@ public final class DexReportPlugin implements Plugin<Project> {
         return signingConfig;
     }
 
-    private void registerResourceObfuscation(
+    private TaskProvider<ResObfuscatorTask> registerResourceObfuscation(
             Project project,
             String variantName,
             String variantCap,
@@ -156,6 +304,7 @@ public final class DexReportPlugin implements Plugin<Project> {
                 task.getName().equals(optimizeTaskName)
                         || task.getName().equals(packageTaskName)
         ).all(consumer -> consumer.dependsOn(obfuscator));
+        return obfuscator;
     }
 
     private void addJiaguRuntimeDependency(Project project) {

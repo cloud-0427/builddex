@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -60,21 +61,28 @@ type CreateCompanyInput struct {
 }
 
 type Release struct {
-	ReleaseID              string `json:"releaseId"`
-	PayloadID              string `json:"payloadId"`
-	PayloadVersion         int64  `json:"payloadVersion"`
-	PackageName            string `json:"packageName"`
-	VersionCode            int64  `json:"versionCode"`
-	CertificateSHA256      string `json:"certificateSha256"`
-	PlaintextSHA256        string `json:"plaintextSha256"`
-	CanonicalCipherSHA256  string `json:"canonicalCiphertextSha256"`
-	CanonicalPayload       []byte `json:"-"`
-	CanonicalKeyCiphertext []byte `json:"-"`
-	PayloadKeyVersion      int64  `json:"payloadKeyVersion"`
-	Status                 string `json:"status"`
-	CreatedAt              int64  `json:"createdAt"`
-	PublishedAt            int64  `json:"publishedAt,omitempty"`
-	RevokedAt              int64  `json:"revokedAt,omitempty"`
+	ReleaseID                string   `json:"releaseId"`
+	PayloadID                string   `json:"payloadId"`
+	PayloadVersion           int64    `json:"payloadVersion"`
+	PackageName              string   `json:"packageName"`
+	VersionCode              int64    `json:"versionCode"`
+	CertificateSHA256Digests []string `json:"certificateSha256Digests"`
+	CertificateDigestsJSON   string   `json:"-"`
+	CertificateSetSHA256     string   `json:"certificateSetSha256"`
+	BusinessDexSHA256        string   `json:"businessDexSha256"`
+	ResourcesSHA256          string   `json:"resourcesSha256"`
+	NativeLibsSHA256         string   `json:"nativeLibsSha256"`
+	ReleaseBuildSHA256       string   `json:"releaseBuildSha256"`
+	PlaintextSHA256          string   `json:"plaintextSha256"`
+	CanonicalCipherSHA256    string   `json:"canonicalCiphertextSha256"`
+	CanonicalPayload         []byte   `json:"-"`
+	CanonicalKeyCiphertext   []byte   `json:"-"`
+	PayloadKeyVersion        int64    `json:"payloadKeyVersion"`
+	Status                   string   `json:"status"`
+	CreatedAt                int64    `json:"createdAt"`
+	UpdatedAt                int64    `json:"updatedAt"`
+	PublishedAt              int64    `json:"publishedAt,omitempty"`
+	RevokedAt                int64    `json:"revokedAt,omitempty"`
 }
 
 type NewRelease struct {
@@ -269,13 +277,17 @@ func CreateRelease(ctx context.Context, db *sql.DB, release NewRelease) error {
 		return ErrLimitExceeded
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO payload_releases
-		(release_id, payload_id, payload_version, package_name, version_code, certificate_sha256,
-		 plaintext_sha256, canonical_ciphertext_sha256, canonical_payload, canonical_key_ciphertext,
-		 payload_key_version, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)`, release.ReleaseID, release.PayloadID,
-		release.PayloadVersion, release.PackageName, release.VersionCode, release.CertificateSHA256,
-		release.PlaintextSHA256, release.CanonicalCipherSHA256, release.CanonicalPayload,
-		release.CanonicalKeyCiphertext, release.PayloadKeyVersion, now)
+		(release_id, payload_id, payload_version, package_name, version_code,
+		 certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
+		 resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
+		 canonical_ciphertext_sha256, canonical_payload, canonical_key_ciphertext,
+		 payload_key_version, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
+		release.ReleaseID, release.PayloadID, release.PayloadVersion, release.PackageName,
+		release.VersionCode, release.CertificateDigestsJSON, release.CertificateSetSHA256,
+		release.BusinessDexSHA256, release.ResourcesSHA256, release.NativeLibsSHA256,
+		release.ReleaseBuildSHA256, release.PlaintextSHA256, release.CanonicalCipherSHA256,
+		release.CanonicalPayload, release.CanonicalKeyCiphertext, release.PayloadKeyVersion, now, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrConflict
@@ -288,17 +300,20 @@ func CreateRelease(ctx context.Context, db *sql.DB, release NewRelease) error {
 	return tx.Commit()
 }
 
-func UpdateRelease(ctx context.Context, db *sql.DB, release NewRelease) error {
+func UpdateRelease(ctx context.Context, db *sql.DB, release NewRelease, expectedKeyVersion int64) error {
 	now := time.Now().Unix()
 	result, err := db.ExecContext(ctx, `UPDATE payload_releases SET
-		release_id=?, package_name=?, version_code=?, certificate_sha256=?,
-		plaintext_sha256=?, canonical_ciphertext_sha256=?, canonical_payload=?,
-		canonical_key_ciphertext=?, payload_key_version=?, status='DRAFT', created_at=?
-		WHERE payload_id=? AND payload_version=? AND status='DRAFT'`,
-		release.ReleaseID, release.PackageName, release.VersionCode, release.CertificateSHA256,
-		release.PlaintextSHA256, release.CanonicalCipherSHA256, release.CanonicalPayload,
-		release.CanonicalKeyCiphertext, release.PayloadKeyVersion, now,
-		release.PayloadID, release.PayloadVersion)
+		payload_id=?, payload_version=?, certificate_sha256_digests_json=?,
+		certificate_set_sha256=?, business_dex_sha256=?, resources_sha256=?,
+		native_libs_sha256=?, release_build_sha256=?, plaintext_sha256=?,
+		canonical_ciphertext_sha256=?, canonical_payload=?, canonical_key_ciphertext=?,
+		payload_key_version=?, updated_at=?
+		WHERE release_id=? AND status='DRAFT' AND payload_key_version=?`,
+		release.PayloadID, release.PayloadVersion, release.CertificateDigestsJSON,
+		release.CertificateSetSHA256, release.BusinessDexSHA256, release.ResourcesSHA256,
+		release.NativeLibsSHA256, release.ReleaseBuildSHA256, release.PlaintextSHA256,
+		release.CanonicalCipherSHA256, release.CanonicalPayload, release.CanonicalKeyCiphertext,
+		release.PayloadKeyVersion, now, release.ReleaseID, expectedKeyVersion)
 	if err != nil {
 		return err
 	}
@@ -340,9 +355,9 @@ func GetRelease(ctx context.Context, db *sql.DB, releaseID string, publishedOnly
 	return value, err
 }
 
-func GetReleaseByVersion(ctx context.Context, db *sql.DB, packageName, payloadID string, payloadVersion int64) (Release, error) {
-	value, err := scanRelease(db.QueryRowContext(ctx, releaseSelect+` WHERE package_name=? AND payload_id=? AND payload_version=?`,
-		packageName, payloadID, payloadVersion))
+func GetReleaseByVersion(ctx context.Context, db *sql.DB, packageName string, versionCode int64) (Release, error) {
+	value, err := scanRelease(db.QueryRowContext(ctx, releaseSelect+` WHERE package_name=? AND version_code=?`,
+		packageName, versionCode))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Release{}, ErrNotFound
 	}
@@ -356,11 +371,11 @@ func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string)
 	switch status {
 	case "PUBLISHED":
 		// 如果已经是 PUBLISHED，则直接返回成功（幂等）
-		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, published_at=?
-			WHERE release_id=? AND (status='DRAFT' OR status='PUBLISHED')`, status, now, releaseID)
+		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, published_at=?, updated_at=?
+			WHERE release_id=? AND (status='DRAFT' OR status='PUBLISHED')`, status, now, now, releaseID)
 	case "REVOKED":
-		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, revoked_at=?
-			WHERE release_id=? AND status!='REVOKED'`, status, now, releaseID)
+		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, revoked_at=?, updated_at=?
+			WHERE release_id=? AND status!='REVOKED'`, status, now, now, releaseID)
 	default:
 		return errors.New("invalid release status")
 	}
@@ -442,8 +457,10 @@ func AddOperationLog(ctx context.Context, db *sql.DB, operation, result, request
 }
 
 const releaseSelect = `SELECT release_id, payload_id, payload_version, package_name, version_code,
-	certificate_sha256, plaintext_sha256, canonical_ciphertext_sha256, canonical_payload,
-	canonical_key_ciphertext, payload_key_version, status, created_at, published_at, revoked_at
+	certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
+	resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
+	canonical_ciphertext_sha256, canonical_payload, canonical_key_ciphertext,
+	payload_key_version, status, created_at, updated_at, published_at, revoked_at
 	FROM payload_releases`
 
 type scanner interface{ Scan(...any) error }
@@ -451,9 +468,14 @@ type scanner interface{ Scan(...any) error }
 func scanRelease(row scanner) (Release, error) {
 	var value Release
 	err := row.Scan(&value.ReleaseID, &value.PayloadID, &value.PayloadVersion, &value.PackageName,
-		&value.VersionCode, &value.CertificateSHA256, &value.PlaintextSHA256,
-		&value.CanonicalCipherSHA256, &value.CanonicalPayload, &value.CanonicalKeyCiphertext,
-		&value.PayloadKeyVersion, &value.Status, &value.CreatedAt, &value.PublishedAt, &value.RevokedAt)
+		&value.VersionCode, &value.CertificateDigestsJSON, &value.CertificateSetSHA256,
+		&value.BusinessDexSHA256, &value.ResourcesSHA256, &value.NativeLibsSHA256,
+		&value.ReleaseBuildSHA256, &value.PlaintextSHA256, &value.CanonicalCipherSHA256,
+		&value.CanonicalPayload, &value.CanonicalKeyCiphertext, &value.PayloadKeyVersion,
+		&value.Status, &value.CreatedAt, &value.UpdatedAt, &value.PublishedAt, &value.RevokedAt)
+	if err == nil {
+		err = json.Unmarshal([]byte(value.CertificateDigestsJSON), &value.CertificateSHA256Digests)
+	}
 	return value, err
 }
 
@@ -483,54 +505,8 @@ func migrateSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 
-	if version < 2 {
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-
-		// Migration from 1 to 2: Update UNIQUE constraint in payload_releases
-		_, err = tx.ExecContext(ctx, `ALTER TABLE payload_releases RENAME TO payload_releases_old`)
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `CREATE TABLE payload_releases (
-			release_id TEXT PRIMARY KEY,
-			payload_id TEXT NOT NULL,
-			payload_version INTEGER NOT NULL,
-			package_name TEXT NOT NULL,
-			version_code INTEGER NOT NULL,
-			certificate_sha256 TEXT NOT NULL,
-			plaintext_sha256 TEXT NOT NULL,
-			canonical_ciphertext_sha256 TEXT NOT NULL,
-			canonical_payload BLOB NOT NULL,
-			canonical_key_ciphertext BLOB NOT NULL,
-			payload_key_version INTEGER NOT NULL DEFAULT 1,
-			status TEXT NOT NULL CHECK(status IN ('DRAFT','PUBLISHED','REVOKED')),
-			created_at INTEGER NOT NULL,
-			published_at INTEGER NOT NULL DEFAULT 0,
-			revoked_at INTEGER NOT NULL DEFAULT 0,
-			UNIQUE(package_name, payload_id, payload_version)
-		)`)
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO payload_releases SELECT * FROM payload_releases_old`)
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `DROP TABLE payload_releases_old`)
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE schema_meta SET schema_version=2, updated_at=unixepoch()`)
-		if err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+	if version != 3 {
+		return fmt.Errorf("unsupported company schema version %d; clear the company database and recreate it for schema version 3", version)
 	}
 	return nil
 }
@@ -541,7 +517,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     updated_at INTEGER NOT NULL
 );
 INSERT INTO schema_meta(schema_version, updated_at)
-SELECT 2, unixepoch() WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
+SELECT 3, unixepoch() WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
 
 CREATE TABLE IF NOT EXISTS schema_descriptions (
     table_name TEXT PRIMARY KEY,
@@ -578,7 +554,12 @@ CREATE TABLE IF NOT EXISTS payload_releases (
     payload_version INTEGER NOT NULL,
     package_name TEXT NOT NULL,
     version_code INTEGER NOT NULL,
-    certificate_sha256 TEXT NOT NULL,
+    certificate_sha256_digests_json TEXT NOT NULL,
+    certificate_set_sha256 TEXT NOT NULL,
+    business_dex_sha256 TEXT NOT NULL,
+    resources_sha256 TEXT NOT NULL,
+    native_libs_sha256 TEXT NOT NULL,
+    release_build_sha256 TEXT NOT NULL,
     plaintext_sha256 TEXT NOT NULL,
     canonical_ciphertext_sha256 TEXT NOT NULL,
     canonical_payload BLOB NOT NULL,
@@ -586,9 +567,10 @@ CREATE TABLE IF NOT EXISTS payload_releases (
     payload_key_version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL CHECK(status IN ('DRAFT','PUBLISHED','REVOKED')),
     created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
     published_at INTEGER NOT NULL DEFAULT 0,
     revoked_at INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(package_name, payload_id, payload_version)
+    UNIQUE(package_name, version_code)
 );
 CREATE INDEX IF NOT EXISTS idx_payload_release_status ON payload_releases(status, version_code);
 

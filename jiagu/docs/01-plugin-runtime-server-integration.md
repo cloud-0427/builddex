@@ -95,10 +95,12 @@ dexReport {
     serverUrl = "https://jiagu.example.com:8761"
     companyId = "acme"
     companyApiKey = "公司创建时返回的 Key"
+    // AAB 正式发布时配置 Play App Signing 证书；可同时配置轮换历史和侧载证书。
+    certificateSha256Digests = ["BASE64URL_SHA256"]
 }
 ```
 
-对外只保留三个配置，足够完成公司鉴权、打包计数和运行时绑定。
+前三项负责公司鉴权和服务端连接。证书列表为公开配置：APK/Debug 可以仅使用插件自动读取的 signingConfig 证书，AAB 正式发布必须显式加入 Play App Signing 证书。
 
 ### 4.2 必需配置
 
@@ -107,6 +109,7 @@ dexReport {
 | `serverUrl` | 是 | 否 | 8761 服务地址，正式环境必须使用 HTTPS |
 | `companyId` | 是 | 否 | 选择公司数据库并写入 RuntimeConfig |
 | `companyApiKey` | 是 | 是 | 构建期调用公司打包接口，绝不写入 APK |
+| `certificateSha256Digests` | AAB 正式发布必需 | 否 | Play App Signing、受控侧载和证书轮换允许集合；插件还会加入当前 signingConfig 证书 |
 
 `companyId` 与 `companyApiKey` 必须同时验证，不能只依赖 Key。服务端现有逻辑为：先用 URL 中的 `companyId` 打开公司 SQLite，再在该库验证 Key 摘要。
 
@@ -119,7 +122,7 @@ dexReport {
 | `payloadId` | 固定为 `app-main` |
 | `payloadVersion` | 使用当前 variant 的 Android `versionCode` |
 | `packageName` | 使用 AGP variant 的 `applicationId` |
-| `certificateSha256` | 从当前 variant 的实际签名证书自动计算 |
+| `certificateSha256Digests` | signingConfig 证书与显式允许证书合并、排序、去重 |
 | `serverKeyId` | 固定为协议当前值 `company-sign-v1` |
 | `serverPublicKey` | 构建时调用 `public-config` 获取，并固定写入当前 APK |
 | 自动发布 | 默认开启，最终产物构建成功后自动发布 release |
@@ -148,23 +151,34 @@ companyId=acme
 companyKeyFingerprint=SHA-256 前 8~12 字符
 ```
 
-Task 中公司 Key 应标记为内部敏感输入，不参与可远程共享的构建缓存；所有网络打包/发布 Task 默认禁用 Gradle Build Cache。
+Task/Flow 中公司 Key 是内部敏感配置，不得进入产物或日志；所有网络打包阶段默认禁用 Gradle Build Cache。
 
-## 5. 插件任务拆分
+## 5. 插件任务流水线
 
-不要继续把提取、上传、配置生成、发布全部放在一个 `JiaguTask` 中。建议拆成以下可验证阶段：
+当前实现由 `jiagu<Variant>`、`obfuscateRes<Variant>`、`createJiaguRelease<Variant>` 和构建结束发布 Flow 组成。`jiagu<Variant>` 只负责 Scoped Classes 变换以及业务 DEX/JG3 Payload；`createJiaguRelease<Variant>` 等待该 Variant 的最终资源包（开启资源收缩时位于 R8/资源收缩之后），再计算资源和 Native 摘要、创建 DRAFT 并生成 RuntimeConfig ELF。这样 R8 开启与关闭时都使用实际存在的资源生产任务，不会让 R8 反向依赖其下游资源任务。Flow 仅在本次 Gradle invocation 无任何失败、且 metadata 中的 invocation ID 匹配时发布。因此同时请求 APK 与 AAB 时，必须全部成功才会发布。
 
-| Task | 输入 | 输出 | 网络 |
+| 逻辑阶段 | 输入 | 输出 | 网络 |
 |---|---|---|---:|
-| `prepareJiaguPayload<Variant>` | 业务 class/jar | 标准明文 Payload 临时文件及摘要 | 否 |
-| `createJiaguRelease<Variant>` | Payload、应用身份、公司配置 | `release-metadata.json` | 是 |
-| `generateJiaguRuntimeConfig<Variant>` | release metadata、固定公钥 | 供壳编译读取的公开配置 | 否 |
-| `packageJiaguShell<Variant>` | 壳代码、RuntimeConfig | APK/AAB | 否 |
-| `publishJiaguRelease<Variant>` | releaseId、最终构建成功标记 | PUBLISHED 状态 | 是 |
+| `prepareJiaguBusinessDex<Variant>` | 业务 class/jar | JG3 Payload、business DEX 摘要 | 否 |
+| `obfuscateJiaguResources<Variant>` | 链接/收缩后的资源 | 确定性资源包 | 否 |
+| `hashJiaguResources<Variant>` | 最终 Manifest、资源、assets | resources 摘要 | 否 |
+| `hashJiaguNativeInputs<Variant>` | 合并并 Strip 后的 `.so` | native 摘要；排除 `liblog_ext.so` | 否 |
+| `createJiaguRelease<Variant>` | Payload、三类摘要、证书集合、公司配置 | `release-metadata.json` | 是 |
+| `generateJiaguRuntimeConfig<Variant>` | release metadata、固定公钥 | RuntimeConfig V2 | 否 |
+| `generateJiaguPayloadLibrary<Variant>` | RuntimeConfig | 各 ABI `liblog_ext.so` | 否 |
+| `verifyJiaguArtifact<Variant>` | APK/Split APK/AAB | 最终校验标记 | 否 |
+| 构建结束发布 Flow | releaseId、invocation ID、整体 BuildWorkResult | PUBLISHED 状态 | 是 |
 
 ### 5.1 创建 release
 
-插件上传：
+插件先执行轻量鉴权预检：
+
+```text
+GET {serverUrl}/api/v1/companies/{companyId}/pack/auth-check
+X-Company-Key: {companyApiKey}
+```
+
+预检成功后再上传：
 
 ```text
 POST {serverUrl}/api/v1/companies/{companyId}/pack/releases
@@ -180,27 +194,35 @@ Content-Type: multipart/form-data
 | `payloadVersion` | AGP variant `versionCode` |
 | `packageName` | AGP variant `applicationId` |
 | `versionCode` | AGP variant output |
-| `certificateSha256` | variant 实际签名证书 |
+| `certificateSha256Digest` | 可重复字段；有序允许证书集合 |
+| `businessDexSha256` | D8 最终业务 DEX canonical 摘要 |
+| `resourcesSha256` | 最终 Manifest/resources/res/assets canonical 摘要 |
+| `nativeLibsSha256` | 各 ABI 最终 `.so` canonical 摘要，不含 `liblog_ext.so` |
 | `payload` | 插件生成的标准 Payload 原文 |
 
 创建成功后将响应保存为敏感度为“公开元数据”的本地中间文件，其中至少包含：
 
 ```json
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "companyId": "acme",
   "releaseId": "...",
   "payloadId": "app-main",
   "payloadVersion": 5,
   "packageName": "com.example.app",
   "versionCode": 5,
-  "certificateSha256": "...",
-  "plaintextSha256": "...",
+  "certificateSha256Digests": ["..."],
+  "certificateSetSha256": "...",
+  "businessDexSha256": "...",
+  "resourcesSha256": "...",
+  "nativeLibsSha256": "...",
+  "releaseBuildSha256": "...",
+  "payloadPlaintextSha256": "...",
   "payloadKeyVersion": 1
 }
 ```
 
-插件必须自行计算 Payload SHA-256，并与响应中的 `plaintextSha256` 比较。任何字段不一致都终止构建。
+插件必须核对全部响应字段。服务端解析 JG3 复算 business DEX 摘要，并根据三类组件摘要复算 releaseBuildSha256；任何字段不一致都终止构建。
 
 ### 5.2 发布时机
 
@@ -214,12 +236,15 @@ POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish
 
 - 上传成功但后续构建失败：保留 DRAFT，记录 releaseId，不能自动发布；
 - APK/AAB 成功且 RuntimeConfig 校验通过：发布为 PUBLISHED；
+- 服务端确认发布成功后，构建结束 Flow 必须在默认 Gradle 日志中输出公司、包名、versionCode、releaseId 和 `PUBLISHED` 状态；
 - 发布失败：整个构建失败，不能交付一个运行时永远无法授权的 APK；
-- 相同 `payloadId + payloadVersion` 已存在：明确报冲突，不静默复用；
-- 重试只能复用本次构建已保存且字段完全一致的 DRAFT，不能重复消耗打包次数；这需要服务端后续增加幂等键后再启用；
-- 在幂等接口完成前，默认不自动重试 `pack/releases`。
+- 唯一身份为 `packageName + versionCode`；DRAFT 相同内容复用、变化内容原地更新并轮换 Key；
+- PUBLISHED 相同内容复用，任一绑定变化返回 `PUBLISHED_VERSION_MODIFIED`；
+- REVOKED 永久禁止复用相同 package/version；
+- APK、ABI Split、资源 Split 和 AAB 聚合同一 Variant 输入，所有 Output 必须使用相同 versionCode；
+- 同一次构建同时请求 APK 和 AAB 时，全部目标成功后才能发布。
 
-`pack_count` 在服务端成功创建 release 时增加，因此失败的 DRAFT 也会消耗一次打包额度。这是当前服务端语义，管理端应提供 DRAFT 查询和人工撤销能力。
+`pack_count` 只在首次创建新的 `packageName + versionCode` 时增加。DRAFT 更新、重试、PUBLISHED 复用和失败请求不增加。
 
 ## 6. RuntimeConfig 设计
 
@@ -227,7 +252,7 @@ POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish
 
 ```json
 {
-  "configVersion": 1,
+  "configVersion": 2,
   "serverUrl": "https://jiagu.example.com:8761",
   "companyId": "acme",
   "releaseId": "...",
@@ -235,11 +260,15 @@ POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish
   "payloadVersion": 5,
   "packageName": "com.example.app",
   "versionCode": 5,
-  "certificateSha256": "...",
+  "certificateSha256Digests": ["..."],
+  "certificateSetSha256": "...",
   "payloadPlaintextSha256": "...",
+  "releaseBuildSha256": "...",
+  "payloadKeyVersion": 1,
   "serverKeyId": "company-sign-v1",
   "serverPublicKey": "Base64URL Ed25519 public key",
-  "protocolVersion": 1
+  "wrapAlgorithm": "RSA-OAEP-SHA1",
+  "protocolVersion": 2
 }
 ```
 
@@ -258,7 +287,7 @@ POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish
 首次运行生成两个不可导出密钥对：
 
 - ECDSA P-256：签名 ENROLL/AUTHORIZE canonical message；
-- RSA-3072 OAEP SHA-256：解封服务端下发的设备专属 Payload Key。
+- RSA-3072 OAEP SHA-1：解封服务端下发的设备专属 Payload Key；MGF1 同样使用 SHA-1，Label 为空。
 
 Alias 必须至少绑定 `companyId + packageName`，避免同一设备上的不同壳应用误用：
 
@@ -272,7 +301,7 @@ jiagu.wrap.v1.{SHA-256(companyId|packageName)}
 ### 7.2 首次注册 ENROLL
 
 1. 请求 `purpose=ENROLL` 的 challenge；
-2. 按服务端文档构造 `ENROLL-V1` canonical message；
+2. 按服务端文档构造包含实际证书、certificateSetSha256 和 releaseBuildSha256 的 `ENROLL-V2` canonical message；
 3. `requestHash = Base64URL(SHA-256(message))`；
 4. 获取 Play Integrity Standard token；
 5. 使用 ECDSA Keystore 私钥签名 message；
@@ -286,13 +315,13 @@ Credential 过期或 Key 被系统清除时重新 ENROLL。不能在 Integrity �
 ### 7.3 每次授权 AUTHORIZE
 
 1. 请求 `purpose=AUTHORIZE` 的 challenge；
-2. 构造 `AUTHORIZE-V1` canonical message；
+2. 构造绑定 releaseBuildSha256 和 payloadKeyVersion 的 `AUTHORIZE-V2` canonical message；
 3. 获取绑定 requestHash 的 Integrity token；
 4. 使用同一 ECDSA 私钥签名；
 5. 调用 `/unpack/authorize`；
 6. 验证 Grant 的 Ed25519 签名和所有绑定字段；
 7. 验证 `wrappedPayloadKey` 摘要等于 Grant 中的摘要；
-8. 使用 RSA-OAEP-SHA256 和 `wrapLabel=grantId` 解封设备 Payload Key；
+8. 使用 RSA-OAEP-SHA1、MGF1-SHA1、`PSource.PSpecified.DEFAULT` 和空 Label 解封设备 Payload Key；
 9. 调用 `/unpack/download` 获取 JGPD。
 
 ### 7.4 下载、解密和加载
@@ -301,7 +330,7 @@ Native 必须执行：
 
 1. 再次验证 Grant 签名、有效期和 RuntimeConfig 绑定；
 2. 严格解析 JGPD Header、版本和长度；
-3. 构造 `DEVICE-PAYLOAD-V1` AAD；
+3. 构造包含实际证书、releaseBuildSha256 和 payloadKeyVersion 的 `DEVICE-PAYLOAD-V2` AAD；
 4. AES-256-GCM 解密；
 5. 验证明文 SHA-256；
 6. 使用 `InMemoryDexClassLoader` 加载；
@@ -342,7 +371,9 @@ Java 层必须先验签，但不能把 Java 验证当作唯一安全边界。Nat
 |---|---|
 | 401 `COMPANY_UNAUTHORIZED` | 停止；提示公司 Key 无效，不打印 Key |
 | 403 `COMPANY_NOT_AUTHORIZED` | 停止；提示公司状态或授权时间无效 |
-| 409 | 停止；提示 payload 版本冲突或状态错误 |
+| 409 `RELEASE_NOT_PUBLISHED` | 停止；提示当前 APK 对应 Release 仍为 DRAFT，需要启用发布或手动发布 |
+| 409 `PUBLISHED_VERSION_MODIFIED` | 停止；列出变化组件，提示提升 versionCode 或为 Debug 修改 applicationId |
+| 409 `REVOKED_VERSION_REUSE_FORBIDDEN` | 停止；提示被撤销版本永久不能复用，必须提升 versionCode |
 | 413 | 停止；提示 Payload 超过服务端限制 |
 | 429 | 停止；提示公司 `pack_limit` 已用尽 |
 | 5xx/网络超时 | 停止；创建接口不自动重试，查询接口可有限重试 |
@@ -356,6 +387,16 @@ Java 层必须先验签，但不能把 Java 验证当作唯一安全边界。Nat
 - 公司被暂停、过期或撤销：新 challenge/授权失败，从而停止新设备或新授权使用；
 - `delivery_limit` 在服务端成功生成设备 Payload 时计数。
 
+服务端所有 JSON 成功和失败响应统一为：
+
+```json
+{"code":"STABLE_CODE","message":"Human readable message.","details":{}}
+```
+
+Runtime HTTP 层必须保留非 2xx body 并解析该信封。服务端返回 expected 绑定，Runtime 使用本地 RuntimeConfig 和实际 APK 身份补充 actual 日志。不得打印完整 Credential、Grant、wrappedPayloadKey、Integrity Token 或 authorize 响应。
+
+Runtime 的 `minSdk` 为 29，而 Android 平台只从 API 33 起保证提供 Ed25519 `Signature`。因此 Credential/Grant 验签必须使用 Runtime 随包提供的兼容实现，不能直接依赖 `KeyFactory/Signature.getInstance("Ed25519")`。该兼容实现属于启动壳代码，必须在业务 Payload 解密前可用。
+
 ## 9. 服务端接口对应关系
 
 ### 构建期接口
@@ -364,6 +405,7 @@ Java 层必须先验签，但不能把 Java 验证当作唯一安全边界。Nat
 |---|---|---|
 | 健康检查 | `GET /healthz` | 插件，可选预检 |
 | 公钥配置 | `GET /api/v1/companies/{companyId}/public-config` | 插件，仅用于核对固定公钥 |
+| 公司鉴权预检 | `GET /api/v1/companies/{companyId}/pack/auth-check` | 插件，公司 Key；必须先于 Payload 上传 |
 | 创建版本 | `POST /api/v1/companies/{companyId}/pack/releases` | 插件，公司 Key |
 | 查询版本 | `GET /api/v1/companies/{companyId}/pack/releases` | 插件，公司 Key |
 | 发布版本 | `POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish` | 插件，公司 Key |
@@ -387,8 +429,8 @@ Java 层必须先验签，但不能把 Java 验证当作唯一安全边界。Nat
 1. 给 `company_api_keys` 增加 `company_id` 并在鉴权时同时匹配，保留文件级隔离的同时增加显式关联；
 2. 打开公司数据库时校验 `company_info.company_id` 与文件名/URL 参数一致；
 3. 增加 API Key 创建、轮换、撤销接口，明文只在创建时返回一次；
-4. `pack/releases` 支持 `Idempotency-Key`，避免网络结果不明确时重复计数；
-5. release 响应增加稳定的 `protocolVersion` 和必要绑定字段；
+4. `pack/releases` 通过 `packageName + versionCode` 唯一键和绑定摘要实现天然幂等，网络结果不明确时相同请求复用原 Release；
+5. 所有 JSON 响应统一 `code/message/details`，Release 返回稳定 protocolVersion 和全部绑定字段；
 6. 视部署需要增加 `Retry-After`、请求速率限制和最大并发限制；
 7. 为 public-config 的公钥轮换增加 `keyId` 列表和明确的过渡期策略。
 
@@ -429,7 +471,10 @@ Java 层必须先验签，但不能把 Java 验证当作唯一安全边界。Nat
 - 错误公司 Key返回 401，正确 Key 才能创建 release；
 - `pack_limit` 用尽返回 429，插件停止构建；
 - APK、AAB、Manifest、assets、strings、Native strings 和日志中搜索不到公司 Key；
-- Payload hash、包名、versionCode 和签名证书与服务端 release 完全一致；
+- 业务 DEX、Manifest/resources/assets、所有 ABI Native、包名、versionCode 和允许签名证书集合与服务端 Release 完全一致；
+- AAB 使用 Play App Signing 证书完成真实 Play 安装授权；
+- 正式版发布后同 package/version 的 Debug 构建收到明确 409 和升级提示；
+- ZIP/JAR 时间戳、压缩级别和 Entry 顺序变化不会导致摘要变化；
 - 构建失败不会发布 DRAFT，发布失败不会产出可交付成功状态。
 
 ### 壳
@@ -443,13 +488,26 @@ Java 层必须先验签，但不能把 Java 验证当作唯一安全边界。Nat
 
 ### 服务端
 
-- `pack_count` 只在 release 创建成功时增加；
+- `pack_count` 只在首次创建唯一 package/version 时增加，DRAFT 更新和复用不增加；
 - `delivery_count` 只在设备 Payload 成功生成时增加；
 - 公司暂停、过期、撤销和额度用尽能立即影响后续请求；
 - 操作日志可通过 requestId 关联构建、授权和下载失败；
 - 服务端、插件和壳共享的协议测试向量全部通过。
 
-## 13. 明确不提供的能力
+## 13. Release 构建一致性锁最终方案
+
+本设计的构建锁、证书集合、统一响应、OAEP-SHA1 和 Split/AAB 细节，以 [Release 构建一致性锁实施计划](02-release-build-lock-implementation-plan.md) 为准。关键结论：
+
+- 一个 `packageName + versionCode` 只有一个 Release 和一个 Payload；
+- DRAFT 原地修订并轮换 Key，PUBLISHED/REVOKED 不可替换；
+- 锁定最终业务 DEX、Manifest/resources/assets 和所有 ABI Native，排除 `liblog_ext.so`；
+- 构建锁不等于运行时扫描 Split APK；
+- AAB 必须配置 Play App Signing 证书，Release 支持有序允许证书集合；
+- 所有 Output versionCode 必须一致，APK/Split/AAB 使用 Variant 级聚合摘要；
+- RSA-OAEP 固定 SHA-1、MGF1-SHA1 和空 Label；
+- 所有 JSON 响应固定为 `code/message/details`，下载成功的二进制响应除外。
+
+## 14. 明确不提供的能力
 
 一机一码可以显著提高通用静态提取、密钥复制和批量破解成本，但无法保证在攻击者完全控制的设备上永远不出现明文。业务 DEX 在执行前必然需要在目标进程内成为明文。
 

@@ -35,7 +35,7 @@ ORDER BY table_name;
 
 用途：记录数据库 Schema 版本，为后续自动迁移保留入口。
 
-当前最新版本：**2**
+当前设计版本：**全新初始化版本**。本轮允许清空数据重新建库，不定义旧 Schema 自动迁移路径；代码实现时应将 `schema_version` 设置为新的明确整数，并与初始化 SQL 保持一致。
 
 | 字段 | 说明 |
 |---|---|
@@ -63,7 +63,7 @@ ORDER BY table_name;
 | authorized_until | 授权结束时间；0 表示不设置结束时间 |
 | pack_limit | 最大允许打包次数；0 表示不限 |
 | delivery_limit | 最大允许成功下发次数；0 表示不限 |
-| pack_count | 成功创建 Payload 版本的累计次数 |
+| pack_count | 首次成功创建唯一应用版本的累计次数 |
 | delivery_count | 成功生成并准备返回设备 Payload 的累计次数 |
 | status | ACTIVE、SUSPENDED、EXPIRED 或 REVOKED |
 | ext_json | 公司级扩展 JSON，用于联系人、渠道、合同号等后续字段 |
@@ -72,7 +72,8 @@ ORDER BY table_name;
 
 计数规则：
 
-- `pack_count` 只在加密 Payload 成功写入时增加。
+- `pack_count` 只在首次插入新的 `package_name + version_code` 且加密 Payload 成功写入时增加。
+- DRAFT 更新、幂等重试、PUBLISHED 复用和失败请求不增加 `pack_count`。
 - `delivery_count` 在设备 Payload 成功生成后、HTTP Body 写出前增加。
 - 客户端断开连接时，该次下发仍可能计数，因为服务端已经完成生成。
 
@@ -102,22 +103,39 @@ ORDER BY table_name;
 | payload_version | Payload 版本号 |
 | package_name | 允许使用该 Payload 的 Android 包名 |
 | version_code | 允许使用该 Payload 的 APK versionCode |
-| certificate_sha256 | Play Integrity 格式的签名证书 SHA-256 摘要 |
+| certificate_sha256_digests_json | 排序去重后的允许签名证书 SHA-256 Base64URL JSON 数组 |
+| certificate_set_sha256 | 允许证书集合的 canonical SHA-256 摘要 |
+| business_dex_sha256 | 最终业务 DEX 集合摘要 |
+| resources_sha256 | 最终 Manifest/resources.arsc/res/assets 摘要 |
+| native_libs_sha256 | 所有 ABI 最终 Native Library 集合摘要，不含 `liblog_ext.so` |
+| release_build_sha256 | 三个构建组件摘要的 canonical 总摘要 |
 | plaintext_sha256 | 原始 Payload SHA-256 Base64URL |
 | canonical_ciphertext_sha256 | 标准密文 SHA-256 Base64URL |
 | canonical_payload | AES-256-GCM 加密后的标准 Payload BLOB |
 | canonical_key_ciphertext | 使用公司 KEK 加密后的随机标准 Payload Key |
 | payload_key_version | 设备 Key 派生版本，用于轮换 |
 | status | DRAFT、PUBLISHED 或 REVOKED |
-| created_at | 打包时间 |
+| created_at | 首次创建时间；DRAFT 更新时保持不变 |
+| updated_at | 最近一次 DRAFT 更新或状态变更时间 |
 | published_at | 发布时间 |
 | revoked_at | 撤销时间 |
 
 唯一约束：
 
 ```text
-package_name + payload_id + payload_version
+package_name + version_code
 ```
+
+状态和更新规则：
+
+- 首次创建为 DRAFT，`payload_key_version=1`；
+- DRAFT 所有绑定字段相同时原样复用；
+- DRAFT 任一构建摘要、Payload 或证书集合变化时保留 `release_id`，重新加密并令 `payload_key_version+1`；
+- PUBLISHED 相同请求可以复用，任何绑定变化返回 409；
+- REVOKED 永久禁止复用该 package/version；
+- 读取、状态判断、KeyVersion 递增、Payload 更新和 `pack_count` 必须位于同一事务或等价 CAS 中。
+
+`certificate_sha256_digests_json` 只用于保存和展示有序集合。所有密码学绑定使用 `certificate_set_sha256`，设备 Credential/Grant 另外记录本次实际安装证书摘要。
 
 ## `challenges`
 
@@ -160,7 +178,7 @@ package_name + payload_id + payload_version
 | operation | PACK_CREATE、PACK_PUBLISH、PACK_REVOKE、UNPACK_DELIVERY 等 |
 | result | SUCCESS 或失败结果 |
 | request_id | HTTP 请求追踪 ID |
-| detail | releaseId、revocationId 等非敏感简要信息 |
+| detail | releaseId、revocationId、操作类型和变化组件等非敏感简要信息；不记录完整 Hash 或令牌 |
 | created_at | 操作时间 |
 
 建议定期清理超过 90～180 天的普通日志，重要管理审计可长期保留。

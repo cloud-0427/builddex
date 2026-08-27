@@ -23,6 +23,38 @@
     toastTimer = setTimeout(() => toast.classList.remove("show"), 2400);
   }
 
+  async function copyText(text) {
+    if (!text) throw new Error("empty clipboard text");
+
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch (_) {
+        // Continue with the compatibility path. Clipboard permission can still
+        // be denied in a secure context by browser or embedding policies.
+      }
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.setAttribute("aria-hidden", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+
+    try {
+      if (!document.execCommand("copy")) throw new Error("copy command rejected");
+    } finally {
+      textarea.remove();
+    }
+  }
+
   async function request(path, options = {}) {
     const headers = new Headers(options.headers || {});
     headers.set("Authorization", `Bearer ${token}`);
@@ -36,10 +68,15 @@
     }
     if (!response.ok) {
       let message = `请求失败（${response.status}）`;
-      try { message = (await response.json()).error?.message || message; } catch (_) { /* no JSON */ }
+      try { message = (await response.json()).message || message; } catch (_) { /* no JSON */ }
       throw new Error(message);
     }
-    return response.status === 204 ? null : response.json();
+    if (response.status === 204) return null;
+    const envelope = await response.json();
+    if (!envelope.code || typeof envelope.details !== "object" || envelope.details === null) {
+      throw new Error("服务端响应格式无效");
+    }
+    return envelope.details;
   }
 
   const formatDate = (seconds, forever = false) => {
@@ -441,7 +478,7 @@
   $("#confirmStatusButton").addEventListener("click", confirmStatusChange);
   $("#closeKeyButton").addEventListener("click", () => keyDialog.close());
   $("#copyKeyButton").addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText($("#apiKeyOutput").textContent); showToast("API Key 已复制"); }
+    try { await copyText($("#apiKeyOutput").textContent); showToast("API Key 已复制"); }
     catch (_) { showToast("复制失败，请手动选择复制"); }
   });
   form.addEventListener("submit", saveCompany);

@@ -180,9 +180,23 @@ requestId
 method
 path
 status
+code
 bytes
 duration
 ```
+
+Release 构建日志可以额外记录：
+
+```text
+releaseIdShort
+packageName
+versionCode
+operation=CREATED|REUSED|UPDATED|PUBLISHED|REVOKED
+payloadKeyVersion
+changedComponents
+```
+
+只记录变化组件名称，不记录完整旧/新 Hash。服务端 JSON 响应统一为 `code/message/details`，访问日志中的 `code` 使用同一稳定机器码。
 
 日志不记录：
 
@@ -191,6 +205,8 @@ duration
 - Master Key或 Payload Key；
 - Integrity token；
 - Device Credential 或 Grant 全文；
+- wrappedPayloadKey 和 authorize 完整响应；
+- 完整业务 DEX、资源、Native 或证书集合 Hash；
 - Payload 内容。
 
 ## 单实例约束

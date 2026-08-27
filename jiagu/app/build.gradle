@@ -4,14 +4,6 @@ plugins {
     id 'io.github.xjc.dex-report'
 }
 
-def jiaguDependencySource = providers.gradleProperty('jiagu.source')
-        .getOrElse('local')
-        .trim()
-        .toLowerCase(Locale.ROOT)
-
-// 两种来源使用独立的构建输出，防止切换后复用另一模式的 DEX/APK/加固中间文件。
-layout.buildDirectory = layout.projectDirectory.dir("build/${jiaguDependencySource}")
-
 // app/build.gradle
 dexReport {
     // 指定在哪些构建类型下自动运行。支持 "debug", "release" 等。
@@ -22,15 +14,27 @@ dexReport {
     attachToTask = "assemble"
 
     serverUrl = "http://192.168.111.115:8761"
-    companyId = "app-dev"
-    companyApiKey = "m-H03NqNlkdnU7yD75_j-nUKwkAhK_G5-bQLObstMQ4"
+    companyId = "acme"
+    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
     // 加固密钥是否发布，发布后此版本不能再修改
-    publish = false
+    publish = true
     // debug 检测，测试关闭，线上可以打开，默认是打开的
-    antiDebugEnabled = false
+    antiDebugEnabled = true
 
     // 只保留 中文 和 英文
     resConfigs = ["zh", "en"]
+
+    buildTypes {
+        release {
+            publish = true
+            antiDebugEnabled = false
+        }
+        debug {
+            // 这里可以单独覆盖 debug 的行为
+            publish = false
+            antiDebugEnabled = false
+        }
+    }
 }
 
 android {
@@ -42,8 +46,8 @@ android {
         applicationId "lows.dgeon.ightr.jiagu"
         minSdk 29
         targetSdk 36
-        versionCode 5
-        versionName "1.0.5"
+        versionCode 7
+        versionName "1.0.7"
 
         multiDexEnabled false
 

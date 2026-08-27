@@ -51,6 +51,8 @@ POST https://playintegrity.googleapis.com/v1/{packageName}:decodeIntegrityToken
 - certificateSha256Digest；
 - MEETS_DEVICE_INTEGRITY。
 
+Release 保存排序去重后的允许证书集合。APK/Debug 默认使用本地 signingConfig 证书；AAB 正式发布必须在插件配置中加入 Play App Signing 证书。Play Integrity 返回的实际证书必须命中该集合。证书轮换时可以同时保留当前证书和历史允许证书，但 PUBLISHED Release 的集合不可修改。
+
 `disabled` 只允许本地联调。该模式仍校验 challenge、设备签名、应用绑定和设备公钥封装，但不具备正版 Play 安装和设备完整性保证。生产环境必须使用 `google`。
 
 ## 主密钥
@@ -58,7 +60,7 @@ POST https://playintegrity.googleapis.com/v1/{packageName}:decodeIntegrityToken
 `JIAGU_MASTER_KEY_B64` 同时用于派生：
 
 - 公司标准 Key的 KEK；
-- 公司 Ed25519 服务端签名 Key；
+- 公司 Ed25519 服务端签名 Key；Android Runtime 使用随 AAR 提供的兼容验证实现，不能依赖仅在 API 33+ 保证存在的平台 Ed25519 Provider；
 - 每设备 Payload Key。
 
 因此：
@@ -84,6 +86,7 @@ POST https://playintegrity.googleapis.com/v1/{packageName}:decodeIntegrityToken
 - 公司 API Key只用于打包和版本管理，不放进 Android APK。
 - 建议在服务前增加 TLS 终止层；生产环境禁止明文 HTTP。
 - 服务不输出 Key、Payload 明文、Integrity token、设备签名或完整公钥到日志。
+- Runtime 和服务端不得输出完整 Credential、Grant、wrappedPayloadKey 或 authorize 响应；只允许记录 requestId、稳定错误 code、版本号、KeyVersion 和 Release 短指纹。
 
 ## SQLite 运维
 
@@ -122,6 +125,8 @@ delivery_limit == 0 || delivery_count < delivery_limit
 
 计数使用 SQLite 事务，避免并发请求越过限额。
 
+`pack_count` 采用唯一版本计数：仅首次成功插入 `packageName + versionCode` 时增加。DRAFT 更新、幂等重试、PUBLISHED 复用和失败请求不增加。
+
 ## 撤销
 
 当前支持的强制路径：
@@ -138,14 +143,17 @@ delivery_limit == 0 || delivery_count < delivery_limit
 - 业务 API 同时检查设备授权；
 - 将最高价值逻辑放在服务端。
 
-## Key 轮换
+## Payload Key 轮换
 
-Payload Key轮换最简单的方式：
+Release 状态规则：
 
-1. 创建新的 payloadVersion；
-2. 使用新的 payloadKeyVersion；
-3. 发布新版本；
-4. 灰度完成后撤销旧 release。
+1. 首次创建 DRAFT 时 `payloadKeyVersion=1`；
+2. DRAFT 的业务 DEX、资源、Native、Payload 或允许证书集合变化时，保留 releaseId 并令 KeyVersion+1；
+3. PUBLISHED 和 REVOKED 永不允许替换；
+4. 新正式内容必须提升 Android versionCode，创建新的唯一 Release；
+5. 灰度完成后可以撤销旧 Release，撤销后相同 package/version 永久禁止复用。
+
+BuildHash、实际设备证书、Payload 明文摘要和 KeyVersion 都参与设备 Key 派生和 Grant/AAD 绑定。资源/Native 锁属于构建期版本一致性机制，不在 Android 启动时扫描 Play 生成的 Split APK。
 
 主密钥轮换需要双主密钥读取、旧数据重封装和双公钥过渡，当前代码尚未实现，不能直接修改环境变量完成。
 
@@ -171,7 +179,10 @@ WHERE created_at < unixepoch() - 15552000;
 4. 主密钥和 Google 凭据不进入代码仓库。
 5. 公司 Ed25519 公钥已编译进 Native。
 6. Native 同时验证包名、版本、证书、Payload hash 和 deviceId。
-7. 明文 DEX 不落盘。
-8. SQLite 和主密钥分别备份。
-9. 对数据库目录启用最小文件权限。
-10. 定期执行恢复演练，而不只是备份。
+7. AAB 配置包含正确的 Play App Signing 证书摘要和允许轮换历史。
+8. RuntimeConfig/Grant 同时绑定 certificateSetSha256、releaseBuildSha256 和 payloadKeyVersion。
+9. RSA-OAEP 使用 SHA-1、MGF1-SHA1 和空 Label，服务端、Android 和测试一致。
+10. 明文 DEX 不落盘。
+11. SQLite 和主密钥分别备份。
+12. 对数据库目录启用最小文件权限。
+13. 定期执行恢复演练，而不只是备份。

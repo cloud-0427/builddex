@@ -68,4 +68,8 @@ afterEvaluate {
 dependencies {
     implementation libs.appcompat
     implementation 'com.google.android.play:integrity:1.6.0'
+    // Android only guarantees the platform Ed25519 provider from API 33.
+    // Tink supplies a verified implementation for the runtime's minSdk 29.
+    implementation 'com.google.crypto.tink:tink-android:1.23.0'
+    testImplementation libs.junit
 }

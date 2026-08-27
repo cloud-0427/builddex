@@ -24,6 +24,7 @@ import java.io.File;
  * 1. 替换 Application 入口。
  * 2. 注入原始 Application 类名到 meta-data。
  */
+@org.gradle.work.DisableCachingByDefault(because = "Transforms an AGP intermediate manifest in the variant pipeline")
 public abstract class ManifestTransformerTask extends DefaultTask {
 
     @Input
@@ -39,6 +40,7 @@ public abstract class ManifestTransformerTask extends DefaultTask {
     public abstract Property<String> getExpectedSignature();
 
     @InputFile
+    @org.gradle.api.tasks.PathSensitive(org.gradle.api.tasks.PathSensitivity.NONE)
     public abstract RegularFileProperty getMergedManifest();
 
     @OutputFile

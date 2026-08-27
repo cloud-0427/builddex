@@ -12,7 +12,10 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,16 +47,31 @@ final class JiaguServerClient {
         return result;
     }
 
+    void verifyCompanyAccess() throws IOException {
+        String response = request("GET", companyPath() + "/pack/auth-check", null, null, true);
+        String authorizedCompanyId = stringField(response, "companyId");
+        if (!companyId.equals(authorizedCompanyId)) {
+            throw new IOException("Jiagu company auth-check binding is invalid");
+        }
+    }
+
     Release createRelease(File payload, String payloadId, long payloadVersion,
                           String packageName, long versionCode,
-                          String certificateSha256) throws IOException {
+                          List<String> certificateSha256Digests,
+                          String businessDexSha256, String resourcesSha256,
+                          String nativeLibsSha256) throws IOException {
         String boundary = "----Jiagu" + System.nanoTime();
         ByteArrayOutputStream body = new ByteArrayOutputStream();
         textPart(body, boundary, "payloadId", payloadId);
         textPart(body, boundary, "payloadVersion", Long.toString(payloadVersion));
         textPart(body, boundary, "packageName", packageName);
         textPart(body, boundary, "versionCode", Long.toString(versionCode));
-        textPart(body, boundary, "certificateSha256", certificateSha256);
+        for (String digest : certificateSha256Digests) {
+            textPart(body, boundary, "certificateSha256Digest", digest);
+        }
+        textPart(body, boundary, "businessDexSha256", businessDexSha256);
+        textPart(body, boundary, "resourcesSha256", resourcesSha256);
+        textPart(body, boundary, "nativeLibsSha256", nativeLibsSha256);
         writeAscii(body, "--" + boundary + "\r\n");
         writeAscii(body, "Content-Disposition: form-data; name=\"payload\"; filename=\"payload.jg3\"\r\n");
         writeAscii(body, "Content-Type: application/octet-stream\r\n\r\n");
@@ -70,15 +88,25 @@ final class JiaguServerClient {
         release.payloadVersion = longField(response, "payloadVersion", -1);
         release.packageName = stringField(response, "packageName");
         release.versionCode = longField(response, "versionCode", -1);
-        release.certificateSha256 = stringField(response, "certificateSha256");
-        release.plaintextSha256 = stringField(response, "plaintextSha256");
+        release.certificateSha256Digests = stringArrayField(response, "certificateSha256Digests");
+        release.certificateSetSha256 = stringField(response, "certificateSetSha256");
+        release.businessDexSha256 = stringField(response, "businessDexSha256");
+        release.resourcesSha256 = stringField(response, "resourcesSha256");
+        release.nativeLibsSha256 = stringField(response, "nativeLibsSha256");
+        release.releaseBuildSha256 = stringField(response, "releaseBuildSha256");
+        release.plaintextSha256 = stringField(response, "payloadPlaintextSha256");
         release.payloadKeyVersion = longField(response, "payloadKeyVersion", -1);
         release.status = stringField(response, "status");
+        release.operation = stringField(response, "operation");
+        release.keyRotated = booleanField(response, "keyRotated", false);
         String localHash = sha256(Files.readAllBytes(payload.toPath()));
         boolean statusOk = "DRAFT".equals(release.status) || "PUBLISHED".equals(release.status);
         if (!payloadId.equals(release.payloadId) || payloadVersion != release.payloadVersion ||
                 !packageName.equals(release.packageName) || versionCode != release.versionCode ||
-                !certificateSha256.equals(release.certificateSha256) ||
+                !sortedCopy(certificateSha256Digests).equals(release.certificateSha256Digests) ||
+                !businessDexSha256.equals(release.businessDexSha256) ||
+                !resourcesSha256.equals(release.resourcesSha256) ||
+                !nativeLibsSha256.equals(release.nativeLibsSha256) ||
                 !localHash.equals(release.plaintextSha256) || !statusOk) {
             throw new IOException(String.format("Jiagu release response mismatch. " +
                     "Expected: [pkg=%s, ver=%d, hash=%s, status=DRAFT|PUBLISHED]. " +
@@ -114,15 +142,29 @@ final class JiaguServerClient {
         if (companyAuth) {
             connection.setRequestProperty("X-Company-Key", companyApiKey);
         }
+        IOException requestBodyError = null;
         if (body != null) {
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", contentType);
             connection.setFixedLengthStreamingMode(body.length);
             try (OutputStream output = connection.getOutputStream()) {
                 output.write(body);
+            } catch (IOException error) {
+                // The server may reject a streaming request before consuming
+                // its body. Still ask for the HTTP response below so a 4xx JSON
+                // envelope is preferred over the lower-level socket error.
+                requestBodyError = error;
             }
         }
-        int status = connection.getResponseCode();
+        int status;
+        try {
+            status = connection.getResponseCode();
+        } catch (IOException error) {
+            connection.disconnect();
+            throw new IOException("Jiagu server request failed before an HTTP response was received: "
+                    + method + " " + path + ": " + error.getMessage(),
+                    requestBodyError == null ? error : requestBodyError);
+        }
         InputStream stream = status >= 200 && status < 300
                 ? connection.getInputStream() : connection.getErrorStream();
         String response = stream == null ? "" : new String(readAll(stream), StandardCharsets.UTF_8);
@@ -136,9 +178,26 @@ final class JiaguServerClient {
                     message = message.substring(0, 1024) + "...";
                 }
             }
-            throw new IOException("Jiagu server returned HTTP " + status +
+            String diagnostic = "Jiagu server returned HTTP " + status +
                     (code.isEmpty() ? "" : " " + code) +
-                    (message.isEmpty() ? "" : ": " + message));
+                    (message.isEmpty() ? "" : ": " + message);
+            if ("PUBLISHED_VERSION_MODIFIED".equals(code)) {
+                diagnostic += ". This packageName/versionCode is already published; increase versionCode " +
+                        "or give debug builds a different applicationIdSuffix";
+                try {
+                    List<String> changed = stringArrayField(response, "changedComponents");
+                    if (!changed.isEmpty()) diagnostic += ". Changed components: " + changed;
+                } catch (IOException ignored) {
+                    // The stable code is sufficient when details are absent.
+                }
+            } else if ("REVOKED_VERSION_REUSE_FORBIDDEN".equals(code)) {
+                diagnostic += ". Increase versionCode before rebuilding";
+            }
+            throw new IOException(diagnostic);
+        }
+        if (requestBodyError != null) {
+            throw new IOException("Jiagu request body upload failed: " + method + " " + path
+                    + ": " + requestBodyError.getMessage(), requestBodyError);
         }
         return response;
     }
@@ -193,6 +252,33 @@ final class JiaguServerClient {
         return matcher.find() ? Long.parseLong(matcher.group(1)) : fallback;
     }
 
+    private static boolean booleanField(String json, String name, boolean fallback) {
+        Matcher matcher = Pattern.compile("\\\"" + Pattern.quote(name) +
+                "\\\"\\s*:\\s*(true|false)").matcher(json);
+        return matcher.find() ? Boolean.parseBoolean(matcher.group(1)) : fallback;
+    }
+
+    private static List<String> stringArrayField(String json, String name) throws IOException {
+        Matcher field = Pattern.compile("\\\"" + Pattern.quote(name) +
+                "\\\"\\s*:\\s*\\[([^]]*)]", Pattern.DOTALL).matcher(json);
+        if (!field.find()) {
+            throw new IOException("Jiagu server response is missing " + name + ". Response: " + json);
+        }
+        List<String> values = new ArrayList<>();
+        Matcher item = Pattern.compile("\\\"((?:\\\\.|[^\\\"])*)\\\"").matcher(field.group(1));
+        while (item.find()) {
+            values.add(item.group(1).replace("\\\"", "\"").replace("\\\\", "\\"));
+        }
+        Collections.sort(values);
+        return values;
+    }
+
+    private static List<String> sortedCopy(List<String> values) {
+        List<String> result = new ArrayList<>(values);
+        Collections.sort(result);
+        return result;
+    }
+
     static String sha256(byte[] data) throws IOException {
         try {
             return Base64.getUrlEncoder().withoutPadding().encodeToString(
@@ -243,9 +329,16 @@ final class JiaguServerClient {
         long payloadVersion;
         String packageName;
         long versionCode;
-        String certificateSha256;
+        List<String> certificateSha256Digests;
+        String certificateSetSha256;
+        String businessDexSha256;
+        String resourcesSha256;
+        String nativeLibsSha256;
+        String releaseBuildSha256;
         String plaintextSha256;
         long payloadKeyVersion;
         String status;
+        String operation;
+        boolean keyRotated;
     }
 }

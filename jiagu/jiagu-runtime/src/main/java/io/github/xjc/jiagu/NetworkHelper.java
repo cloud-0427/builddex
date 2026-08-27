@@ -16,6 +16,7 @@ import com.google.android.play.core.integrity.IntegrityManagerFactory;
 import com.google.android.play.core.integrity.StandardIntegrityManager;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -27,18 +28,18 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
-import java.security.PublicKey;
 import java.security.SignatureException;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
-import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import javax.crypto.Cipher;
@@ -76,8 +77,8 @@ public final class NetworkHelper {
             String credential = loadCredential(context, config, deviceId,
                     signPublicKey, wrapPublicKey);
             if (credential == null) {
-                credential = enroll(context, config, signing, signPublicKey,
-                        wrapPublicKey, deviceId);
+                credential = enroll(context, config, app.actualCertificateSha256,
+                        signing, signPublicKey, wrapPublicKey, deviceId);
                 saveCredential(context, config, credential);
             }
 
@@ -117,19 +118,22 @@ public final class NetworkHelper {
         }
     }
 
-    private static String enroll(Context context, Config config, KeyPair signing,
+    private static String enroll(Context context, Config config, String actualCertificateSha256,
+                                 KeyPair signing,
                                  String signPublicKey, String wrapPublicKey,
                                  String deviceId) throws Exception {
         JSONObject challenge = challenge(config, "ENROLL");
-        String message = canonical("ENROLL-V1", config.companyId,
+        String message = canonical("ENROLL-V2", config.companyId,
                 challenge.getString("challengeId"), challenge.getString("challenge"),
                 config.releaseId, config.packageName, Long.toString(config.versionCode),
-                config.certificateSha256, signPublicKey, wrapPublicKey);
+                actualCertificateSha256, config.certificateSetSha256,
+                config.releaseBuildSha256, signPublicKey, wrapPublicKey);
         String integrityToken = integrityToken(context, config, sha256(bytes(message)));
         JSONObject request = new JSONObject()
                 .put("challengeId", challenge.getString("challengeId"))
                 .put("challenge", challenge.getString("challenge"))
                 .put("releaseId", config.releaseId)
+                .put("actualCertificateSha256", actualCertificateSha256)
                 .put("signPublicKey", signPublicKey)
                 .put("wrapPublicKey", wrapPublicKey)
                 .put("integrityToken", integrityToken)
@@ -148,9 +152,10 @@ public final class NetworkHelper {
                                            KeyPair signing, PrivateKey wrapPrivate,
                                            String deviceId, String credential) throws Exception {
         JSONObject challenge = challenge(config, "AUTHORIZE");
-        String message = canonical("AUTHORIZE-V1", config.companyId,
+        String message = canonical("AUTHORIZE-V2", config.companyId,
                 challenge.getString("challengeId"), challenge.getString("challenge"),
-                config.releaseId, sha256(bytes(credential)), deviceId);
+                config.releaseId, sha256(bytes(credential)), deviceId,
+                config.releaseBuildSha256, Long.toString(config.payloadKeyVersion));
         String integrityToken = integrityToken(context, config, sha256(bytes(message)));
         JSONObject request = new JSONObject()
                 .put("challengeId", challenge.getString("challengeId"))
@@ -160,12 +165,12 @@ public final class NetworkHelper {
                 .put("integrityToken", integrityToken)
                 .put("deviceSignature", sign(signing.getPrivate(), bytes(message)));
         JSONObject response = postJson(config.basePath() + "/unpack/authorize", request);
-        Log.i(TAG, "Authorize response: " + response.toString());
+        Log.i(TAG, "Authorization accepted for release " + config.releaseId);
         String grant = response.getString("grant");
         String wrapped = response.getString("wrappedPayloadKey");
         JSONObject claims = verifyJws(config, grant);
         verifyGrant(config, claims, deviceId, wrapped);
-        if (!"RSA-OAEP".equals(response.getString("wrapAlgorithm"))) {
+        if (!"RSA-OAEP-SHA1".equals(response.getString("wrapAlgorithm"))) {
             throw new SecurityException("wrap algorithm mismatch");
         }
         byte[] key = decryptWrappedKey(wrapPrivate, wrapped);
@@ -209,10 +214,11 @@ public final class NetworkHelper {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(payloadKey, "AES"),
                     new GCMParameterSpec(128, nonce));
-            cipher.updateAAD(bytes(canonical("DEVICE-PAYLOAD-V1", config.companyId,
+            cipher.updateAAD(bytes(canonical("DEVICE-PAYLOAD-V2", config.companyId,
                     grant.getString("deviceId"), config.releaseId, config.payloadId,
                     Long.toString(config.payloadVersion), config.packageName,
-                    Long.toString(config.versionCode), config.certificateSha256,
+                    Long.toString(config.versionCode), grant.getString("certificateSha256"),
+                    config.releaseBuildSha256,
                     config.payloadPlaintextSha256, Long.toString(config.payloadKeyVersion))));
             byte[] plaintext = cipher.doFinal(ciphertext);
             if (!config.payloadPlaintextSha256.equals(sha256(plaintext))) {
@@ -270,16 +276,7 @@ public final class NetworkHelper {
         if (rawPublicKey.length != 32) {
             throw new SignatureException("invalid Ed25519 public key");
         }
-        byte[] prefix = new byte[]{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03,
-                0x2b, 0x65, 0x70, 0x03, 0x21, 0x00};
-        PublicKey publicKey = KeyFactory.getInstance("Ed25519").generatePublic(
-                new X509EncodedKeySpec(concat(prefix, rawPublicKey)));
-        java.security.Signature verifier = java.security.Signature.getInstance("Ed25519");
-        verifier.initVerify(publicKey);
-        verifier.update(bytes(parts[0] + "." + parts[1]));
-        if (!verifier.verify(b64decode(parts[2]))) {
-            throw new SignatureException("invalid JWS signature");
-        }
+        Ed25519Compat.verify(rawPublicKey, bytes(parts[0] + "." + parts[1]), b64decode(parts[2]));
         return new JSONObject(new String(b64decode(parts[1]), StandardCharsets.UTF_8));
     }
 
@@ -291,7 +288,7 @@ public final class NetworkHelper {
                 !signPublicKey.equals(claims.getString("signPublicKey")) ||
                 !wrapPublicKey.equals(claims.getString("wrapPublicKey")) ||
                 !config.packageName.equals(claims.getString("packageName")) ||
-                !config.certificateSha256.equals(claims.getString("certificateSha256")) ||
+                !config.certificateSha256Digests.contains(claims.getString("certificateSha256")) ||
                 claims.getLong("expiresAt") < System.currentTimeMillis() / 1000L) {
             throw new SecurityException("device credential binding mismatch");
         }
@@ -309,7 +306,9 @@ public final class NetworkHelper {
                 config.payloadVersion != claims.getLong("payloadVersion") ||
                 !config.packageName.equals(claims.getString("packageName")) ||
                 config.versionCode != claims.getLong("versionCode") ||
-                !config.certificateSha256.equals(claims.getString("certificateSha256")) ||
+                !config.certificateSha256Digests.contains(claims.getString("certificateSha256")) ||
+                !config.certificateSetSha256.equals(claims.getString("certificateSetSha256")) ||
+                !config.releaseBuildSha256.equals(claims.getString("releaseBuildSha256")) ||
                 !config.payloadPlaintextSha256.equals(claims.getString("payloadPlaintextSha256")) ||
                 config.payloadKeyVersion != claims.getLong("payloadKeyVersion") ||
                 !sha256(bytes(wrapped)).equals(claims.getString("wrappedPayloadKeySha256")) ||
@@ -431,7 +430,12 @@ public final class NetworkHelper {
     private static JSONObject postJson(String url, JSONObject body) throws Exception {
         byte[] response = request(url, body.toString().getBytes(StandardCharsets.UTF_8),
                 MAX_JSON_BYTES);
-        return new JSONObject(new String(response, StandardCharsets.UTF_8));
+        JSONObject envelope = new JSONObject(new String(response, StandardCharsets.UTF_8));
+        JSONObject details = envelope.optJSONObject("details");
+        if (details == null) {
+            throw new SecurityException("Jiagu server returned an invalid response envelope");
+        }
+        return details;
     }
 
     private static byte[] postBytes(String url, String json) throws Exception {
@@ -494,7 +498,16 @@ public final class NetworkHelper {
         byte[] response = readLimited(input, maxResponseBytes);
         connection.disconnect();
         if (status < 200 || status >= 300) {
-            throw new SecurityException("Jiagu server rejected request with HTTP " + status);
+            String code = "HTTP_" + status;
+            String message = "request rejected";
+            try {
+                JSONObject error = new JSONObject(new String(response, StandardCharsets.UTF_8));
+                code = error.optString("code", code);
+                message = error.optString("message", message);
+            } catch (Exception ignored) {
+                // Keep the bounded generic error; never log authorization tokens or bodies.
+            }
+            throw new SecurityException("Jiagu server rejected request: " + code + ": " + message);
         }
         return response;
     }
@@ -580,17 +593,23 @@ public final class NetworkHelper {
         long payloadVersion;
         String packageName;
         long versionCode;
-        String certificateSha256;
+        List<String> certificateSha256Digests;
+        String certificateSetSha256;
+        String businessDexSha256;
+        String resourcesSha256;
+        String nativeLibsSha256;
+        String releaseBuildSha256;
         String payloadPlaintextSha256;
         long payloadKeyVersion;
         String serverKeyId;
         String serverPublicKey;
+        String wrapAlgorithm;
         String integrityMode;
         long integrityCloudProjectNumber;
 
         static Config parse(String json) throws Exception {
             JSONObject value = new JSONObject(json);
-            if (value.getInt("configVersion") != 1) {
+            if (value.getInt("configVersion") != 2) {
                 throw new SecurityException("unsupported RuntimeConfig version");
             }
             Config config = new Config();
@@ -601,15 +620,28 @@ public final class NetworkHelper {
             config.payloadVersion = value.getLong("payloadVersion");
             config.packageName = value.getString("packageName");
             config.versionCode = value.getLong("versionCode");
-            config.certificateSha256 = value.getString("certificateSha256");
+            config.certificateSha256Digests = new ArrayList<>();
+            JSONArray certificates = value.getJSONArray("certificateSha256Digests");
+            for (int i = 0; i < certificates.length(); i++) {
+                config.certificateSha256Digests.add(certificates.getString(i));
+            }
+            Collections.sort(config.certificateSha256Digests);
+            config.certificateSetSha256 = value.getString("certificateSetSha256");
+            config.businessDexSha256 = value.getString("businessDexSha256");
+            config.resourcesSha256 = value.getString("resourcesSha256");
+            config.nativeLibsSha256 = value.getString("nativeLibsSha256");
+            config.releaseBuildSha256 = value.getString("releaseBuildSha256");
             config.payloadPlaintextSha256 = value.getString("payloadPlaintextSha256");
             config.payloadKeyVersion = value.getLong("payloadKeyVersion");
             config.serverKeyId = value.getString("serverKeyId");
             config.serverPublicKey = value.getString("serverPublicKey");
+            config.wrapAlgorithm = value.getString("wrapAlgorithm");
             config.integrityMode = value.getString("integrityMode");
             config.integrityCloudProjectNumber = value.optLong("integrityCloudProjectNumber", 0L);
             if (config.serverUrl.isEmpty() || config.companyId.isEmpty() ||
-                    config.releaseId.isEmpty() || config.serverPublicKey.isEmpty()) {
+                    config.releaseId.isEmpty() || config.serverPublicKey.isEmpty() ||
+                    config.certificateSha256Digests.isEmpty() || config.releaseBuildSha256.isEmpty() ||
+                    !"RSA-OAEP-SHA1".equals(config.wrapAlgorithm)) {
                 throw new SecurityException("incomplete RuntimeConfig");
             }
             return config;
@@ -624,10 +656,16 @@ public final class NetworkHelper {
         }
 
         void verifyApp(AppIdentity app) {
-            if (!packageName.equals(app.packageName) || versionCode != app.versionCode ||
-                    !certificateSha256.equals(app.certificateSha256)) {
+            if (!packageName.equals(app.packageName) || versionCode != app.versionCode) {
                 throw new SecurityException("installed application identity mismatch");
             }
+            for (String certificate : app.currentCertificateSha256Digests) {
+                if (certificateSha256Digests.contains(certificate)) {
+                    app.actualCertificateSha256 = certificate;
+                    return;
+                }
+            }
+            throw new SecurityException("installed signing certificate is not allowed");
         }
 
         private static String trimSlash(String value) {
@@ -641,7 +679,8 @@ public final class NetworkHelper {
     private static final class AppIdentity {
         String packageName;
         long versionCode;
-        String certificateSha256;
+        List<String> currentCertificateSha256Digests;
+        String actualCertificateSha256;
 
         static AppIdentity read(Context context) throws Exception {
             PackageManager manager = context.getPackageManager();
@@ -654,7 +693,11 @@ public final class NetworkHelper {
             AppIdentity identity = new AppIdentity();
             identity.packageName = context.getPackageName();
             identity.versionCode = info.getLongVersionCode();
-            identity.certificateSha256 = sha256(signatures[0].toByteArray());
+            identity.currentCertificateSha256Digests = new ArrayList<>();
+            for (Signature signature : signatures) {
+                identity.currentCertificateSha256Digests.add(sha256(signature.toByteArray()));
+            }
+            Collections.sort(identity.currentCertificateSha256Digests);
             return identity;
         }
     }

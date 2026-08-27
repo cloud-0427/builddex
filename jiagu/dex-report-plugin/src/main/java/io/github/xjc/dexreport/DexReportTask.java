@@ -23,6 +23,7 @@ import java.util.zip.ZipFile;
 /**
  * DEX 报告任务，适配 Java 1.8。
  */
+@org.gradle.work.DisableCachingByDefault(because = "Diagnostic report task writes invocation-specific output")
 public abstract class DexReportTask extends DefaultTask {
 
     @Input

@@ -24,5 +24,11 @@ func (a *API) routesAdmin() {
 	a.mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
 	})
-	a.mux.Handle("GET /admin/", http.StripPrefix("/admin/", http.FileServer(http.FS(assets))))
+	adminHandler := http.StripPrefix("/admin/", http.FileServer(http.FS(assets)))
+	a.mux.Handle("GET /admin/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Asset names are not content-hashed. Revalidate them after every server
+		// deployment so an old app.js cannot remain in the browser cache.
+		w.Header().Set("Cache-Control", "no-store")
+		adminHandler.ServeHTTP(w, r)
+	}))
 }

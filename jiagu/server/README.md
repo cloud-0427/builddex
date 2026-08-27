@@ -8,6 +8,8 @@
 - 每家公司一个 SQLite 文件，默认位于 `data/companies/{companyId}.db`。
 - 不建立全量设备表，不保存每设备 Payload 或每设备明文 Key。
 - 标准 Payload 加密后作为 BLOB 保存到公司 SQLite。
+- 同一 `packageName + versionCode` 只有一个 Release；DRAFT 可修订，PUBLISHED/REVOKED 不可替换。
+- Release 锁定最终业务 DEX、Manifest/resources/assets、Native Library 和允许签名证书集合。
 - 设备身份凭证保存在客户端，服务端通过签名验证。
 - 设备 Payload Key 由服务端主密钥和设备/版本上下文动态派生。
 
@@ -53,6 +55,7 @@ GET http://127.0.0.1:8761/healthz
 - [打包与解包流程](docs/04-pack-unpack-flow.md)
 - [安全、配置与运维](docs/05-security-operations.md)
 - [多环境配置与日志滚动](docs/06-environments-logging.md)
+- [Release 构建一致性锁实施计划](../docs/02-release-build-lock-implementation-plan.md)
 
 ## 验证
 
