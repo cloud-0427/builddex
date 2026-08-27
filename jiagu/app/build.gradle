@@ -27,7 +27,7 @@ dexReport {
     buildTypes {
         release {
             publish = true
-            antiDebugEnabled = false
+            antiDebugEnabled = true
         }
         debug {
             // 这里可以单独覆盖 debug 的行为
@@ -46,8 +46,8 @@ android {
         applicationId "lows.dgeon.ightr.jiagu"
         minSdk 29
         targetSdk 36
-        versionCode 7
-        versionName "1.0.7"
+        versionCode 9
+        versionName "1.0.9"
 
         multiDexEnabled false
 

@@ -5,7 +5,6 @@
 #include <cstring>
 #include <cstdint>
 #include <dlfcn.h>
-#include <sys/ptrace.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -31,13 +30,10 @@ static jobject gRealApp = nullptr;
 // --- 动态防护模块 ---
 
 static __attribute__((always_inline)) inline void die_if_debugged() {
-    // 1. Ptrace 占坑 (使用 raw syscall)
-    if (raw_syscall(SYS_ptrace, PTRACE_TRACEME, 0, 1, 0) < 0) {
-        _exit(0);
-    }
-    raw_syscall(SYS_ptrace, PTRACE_DETACH, 0, 1, 0);
-
-    // 2. TracerPid 检测 (使用 raw syscall)
+    // PTRACE_TRACEME must not be used here. A tracee cannot detach itself, so
+    // combining TRACEME with the TracerPid check below makes the app detect
+    // the tracing relationship that it just created and terminate itself.
+    // Read-only TracerPid inspection does not mutate process state.
     char buf[512];
     int fd = raw_syscall_open(X("/proc/self/status"), O_RDONLY, 0);
     if (fd >= 0) {
@@ -49,11 +45,14 @@ static __attribute__((always_inline)) inline void die_if_debugged() {
             if (tracer_pid_ptr) {
                 int tracer_pid = atoi(tracer_pid_ptr + 10);
                 if (tracer_pid != 0) {
+                    LOGE("[Jiagu][AntiDebug] blocked: native tracer detected (TracerPid=%d)",
+                         tracer_pid);
                     _exit(0);
                 }
             }
         }
     }
+    LOGD("[Jiagu][AntiDebug] debugger check passed");
 }
 
 static __attribute__((always_inline)) inline void die_if_hooked() {
@@ -65,14 +64,21 @@ static __attribute__((always_inline)) inline void die_if_hooked() {
     ssize_t len;
     while ((len = raw_syscall(SYS_read, fd, (long)buf, sizeof(buf) - 1)) > 0) {
         buf[len] = 0;
-        if (strstr(buf, X("frida")) || strstr(buf, X("xposed")) ||
-            strstr(buf, X("libdobby")) || strstr(buf, X("substitute")) ||
-            strstr(buf, X("substrate")) || strstr(buf, X("com.saurik.substrate"))) {
+        const char* detected = nullptr;
+        if (strstr(buf, X("frida"))) detected = X("frida");
+        else if (strstr(buf, X("xposed"))) detected = X("xposed");
+        else if (strstr(buf, X("libdobby"))) detected = X("libdobby");
+        else if (strstr(buf, X("substitute"))) detected = X("substitute");
+        else if (strstr(buf, X("substrate"))) detected = X("substrate");
+        else if (strstr(buf, X("com.saurik.substrate"))) detected = X("com.saurik.substrate");
+        if (detected) {
             raw_syscall(SYS_close, fd);
+            LOGE("[Jiagu][AntiDebug] blocked: hook framework mapping detected (%s)", detected);
             _exit(0);
         }
     }
     raw_syscall(SYS_close, fd);
+    LOGD("[Jiagu][AntiDebug] hook check passed");
 }
 
 static __attribute__((always_inline)) inline bool verify_signature(JNIEnv* env, jobject context, const std::string& expected_hash) {
@@ -228,6 +234,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     bool sig_check = env->CallBooleanMethod(meta_data, get_bool, env->NewStringUTF(X("ENABLE_SIGNATURE_CHECK")), true);
     jstring expected_sig_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF(X("EXPECTED_SIGNATURE")));
 
+    LOGD("[Jiagu] Protection config: antiDebug=%s, signatureCheck=%s",
+         anti_debug ? "enabled" : "disabled", sig_check ? "enabled" : "disabled");
     if (anti_debug) {
         die_if_debugged();
         die_if_hooked();
@@ -236,9 +244,11 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (sig_check && expected_sig_j) {
         const char* expected_sig = env->GetStringUTFChars(expected_sig_j, nullptr);
         if (!verify_signature(env, context, expected_sig)) {
+            LOGE("[Jiagu][Signature] blocked: APK signing certificate verification failed");
             _exit(0);
         }
         env->ReleaseStringUTFChars(expected_sig_j, expected_sig);
+        LOGD("[Jiagu][Signature] APK signing certificate check passed");
     }
 
     const char *real_app_name = env->GetStringUTFChars(real_app_name_j, nullptr);
