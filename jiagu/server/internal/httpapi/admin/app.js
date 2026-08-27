@@ -3,7 +3,7 @@
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-  const state = { companies: [], selected: null, filter: "ALL", query: "", mode: "create", logs: [], logPage: 1, logTotal: 0, currentCompany: null };
+  const state = { companies: [], selected: null, filter: "ALL", query: "", mode: "create" };
   const statusText = { ACTIVE: "正常", SUSPENDED: "已暂停", EXPIRED: "已过期", REVOKED: "已删除", DRAFT: "草稿", PUBLISHED: "已发布" };
   let token = sessionStorage.getItem("jiagu.adminToken") || "";
   let toastTimer;
@@ -216,7 +216,7 @@
       wrap.title = "点击查看详细打包与下发统计";
       wrap.addEventListener("click", (e) => {
         e.stopPropagation();
-        openPackLogs(companyId);
+        window.open(`logs.html?companyId=${encodeURIComponent(companyId)}`, '_blank');
       });
     }
     const line = document.createElement("div");
@@ -459,128 +459,6 @@
     }
   }
 
-  async function openPackLogs(companyId) {
-    state.currentCompany = state.companies.find(c => c.companyId === companyId) || { companyId };
-    state.logPage = 1;
-    $("#mainView").classList.add("hidden");
-    $("#logsView").classList.remove("hidden");
-    $("#logsCompanyId").textContent = state.currentCompany.companyId;
-    $("#logsCompanyDesc").textContent = state.currentCompany.description || "暂无说明";
-    loadPackLogs();
-  }
-
-  async function loadPackLogs(page = 1) {
-    state.logPage = page;
-    const logsState = $("#logsState");
-    const container = $("#logsContainer");
-    logsState.classList.remove("hidden");
-    logsState.innerHTML = '<span class="spinner"></span><p>正在读取打包记录…</p>';
-    container.replaceChildren();
-
-    try {
-      const data = await request(`/api/v1/companies/${encodeURIComponent(state.currentCompany.companyId)}/pack-logs?page=${page}&pageSize=20`);
-      state.logs = data.items || [];
-      state.logTotal = data.total || 0;
-      renderPackLogs();
-      logsState.classList.add("hidden");
-    } catch (error) {
-      logsState.innerHTML = `<p style="color:var(--red)">${error.message}</p>`;
-    }
-  }
-
-  function renderPackLogs() {
-    const container = $("#logsContainer");
-    container.replaceChildren();
-
-    // Group by packageName
-    const groups = state.logs.reduce((acc, log) => {
-      if (!acc[log.packageName]) acc[log.packageName] = [];
-      acc[log.packageName].push(log);
-      return acc;
-    }, {});
-
-    Object.entries(groups).forEach(([packageName, releases]) => {
-      const groupHeader = document.createElement("div");
-      groupHeader.className = "group-header";
-      groupHeader.innerHTML = `<span class="group-icon">📦</span> <span>${packageName}</span> <small style="font-weight:normal;color:var(--muted);margin-left:auto">共 ${releases.length} 条记录</small>`;
-      container.append(groupHeader);
-
-      const table = document.createElement("table");
-      table.innerHTML = `
-        <thead>
-          <tr>
-            <th style="padding-left:48px">版本号</th>
-            <th>状态</th>
-            <th>打包时间</th>
-            <th>下发次数</th>
-            <th>Payload ID</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      `;
-      const tbody = table.querySelector("tbody");
-      releases.forEach(release => {
-        const tr = document.createElement("tr");
-        tr.style.cursor = "default";
-
-        const versionTd = document.createElement("td");
-        versionTd.style.paddingLeft = "48px";
-        versionTd.innerHTML = `<strong>${release.versionCode}</strong>`;
-
-        const statusTd = document.createElement("td");
-        const badge = document.createElement("span");
-        badge.className = `status status-${release.status.toLowerCase()}`;
-        badge.textContent = statusText[release.status] || release.status;
-        statusTd.append(badge);
-
-        const timeTd = document.createElement("td");
-        timeTd.textContent = formatDate(release.createdAt);
-
-        const deliveryTd = document.createElement("td");
-        deliveryTd.textContent = formatNumber(release.deliveryCount);
-
-        const payloadTd = document.createElement("td");
-        payloadTd.innerHTML = `<code style="font-size:11px">${release.payloadId}</code>`;
-
-        tr.append(versionTd, statusTd, timeTd, deliveryTd, payloadTd);
-        tbody.append(tr);
-      });
-      container.append(table);
-    });
-
-    $("#logsCount").textContent = `共 ${state.logTotal} 条记录`;
-    renderPagination();
-  }
-
-  function renderPagination() {
-    const el = $("#logsPagination");
-    el.replaceChildren();
-    const totalPages = Math.ceil(state.logTotal / 20);
-    if (totalPages <= 1) return;
-
-    const createBtn = (page, label, active = false, disabled = false) => {
-      const btn = document.createElement("button");
-      btn.className = "page-btn" + (active ? " active" : "");
-      btn.textContent = label;
-      btn.disabled = disabled || active;
-      btn.type = "button";
-      btn.addEventListener("click", () => loadPackLogs(page));
-      return btn;
-    };
-
-    el.append(createBtn(state.logPage - 1, "‹", false, state.logPage === 1));
-
-    let start = Math.max(1, state.logPage - 2);
-    let end = Math.min(totalPages, start + 4);
-    if (end - start < 4) start = Math.max(1, end - 4);
-
-    for (let i = start; i <= end; i++) {
-      el.append(createBtn(i, i, i === state.logPage));
-    }
-
-    el.append(createBtn(state.logPage + 1, "›", false, state.logPage === totalPages));
-  }
-
   $("#serviceAddress").textContent = location.host;
   $("#createButton").addEventListener("click", openCreate);
   $("#refreshButton").addEventListener("click", () => loadCompanies());
@@ -605,10 +483,6 @@
   $("#confirmDeleteButton").addEventListener("click", confirmDelete);
   $("#cancelStatusButton").addEventListener("click", () => statusDialog.close());
   $("#confirmStatusButton").addEventListener("click", confirmStatusChange);
-  $("#backToCompanies").addEventListener("click", () => {
-    $("#logsView").classList.add("hidden");
-    $("#mainView").classList.remove("hidden");
-  });
   $("#closeKeyButton").addEventListener("click", () => keyDialog.close());
   $("#copyKeyButton").addEventListener("click", async () => {
     try { await copyText($("#apiKeyOutput").textContent); showToast("API Key 已复制"); }

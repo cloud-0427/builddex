@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -26,11 +27,13 @@ final class JiaguServerClient {
     private final String serverUrl;
     private final String companyId;
     private final String companyApiKey;
+    private final String packer;
 
     JiaguServerClient(String serverUrl, String companyId, String companyApiKey) {
         this.serverUrl = trimSlash(required(serverUrl, "serverUrl"));
         this.companyId = required(companyId, "companyId");
         this.companyApiKey = required(companyApiKey, "companyApiKey");
+        this.packer = localMachineName();
     }
 
     PublicConfig getPublicConfig() throws IOException {
@@ -66,6 +69,7 @@ final class JiaguServerClient {
         textPart(body, boundary, "payloadVersion", Long.toString(payloadVersion));
         textPart(body, boundary, "packageName", packageName);
         textPart(body, boundary, "versionCode", Long.toString(versionCode));
+        textPart(body, boundary, "packer", packer);
         for (String digest : certificateSha256Digests) {
             textPart(body, boundary, "certificateSha256Digest", digest);
         }
@@ -124,6 +128,19 @@ final class JiaguServerClient {
                 !"PUBLISHED".equals(stringField(response, "status"))) {
             throw new IOException("Jiagu release publish response is invalid");
         }
+    }
+
+    static String localMachineName() {
+        String value = "";
+        try {
+            value = InetAddress.getLocalHost().getHostName();
+        } catch (Exception ignored) {
+            // Fall back to the conventional environment variables below.
+        }
+        if (value == null || value.trim().isEmpty()) value = System.getenv("COMPUTERNAME");
+        if (value == null || value.trim().isEmpty()) value = System.getenv("HOSTNAME");
+        value = value == null ? "unknown" : value.trim();
+        return value.length() <= 64 ? value : value.substring(0, 64);
     }
 
     private String companyPath() {

@@ -122,6 +122,7 @@ dexReport {
 | `payloadId` | 固定为 `app-main` |
 | `payloadVersion` | 使用当前 variant 的 Android `versionCode` |
 | `packageName` | 使用 AGP variant 的 `applicationId` |
+| `packer` | 插件在编译时读取的本机机器名，超过 64 个字符时截断；不参与 Payload 绑定 |
 | `certificateSha256Digests` | signingConfig 证书与显式允许证书合并、排序、去重 |
 | `serverKeyId` | 固定为协议当前值 `company-sign-v1` |
 | `serverPublicKey` | 构建时调用 `public-config` 获取，并固定写入当前 APK |
@@ -349,7 +350,7 @@ Native 必须执行：
 - 首次安装、releaseId 变化、缓存丢失或 JGPD 校验失败时才下载；
 - 普通启动可以刷新短期 AUTHORIZE，以执行撤销检查并取得同一设备 Payload Key，然后直接解密本地 JGPD；
 - Grant 尚未过期时，可以直接复用 Grant、wrapped Key和 JGPD；
-- 只有真正重新下载设备 Payload 时才增加 `delivery_count`。
+- 只有真正重新下载设备 Payload 时才增加 Release 的实际 `delivery_count`；DRAFT 同一 Release 只在首次下发时消耗公司额度。
 
 ### 7.5 Java 与 Native 职责
 
@@ -491,7 +492,7 @@ Runtime 的 `minSdk` 为 29，而 Android 平台只从 API 33 起保证提供 Ed
 ### 服务端
 
 - `pack_count` 只在首次创建唯一 package/version 时增加，DRAFT 更新和复用不增加；
-- `delivery_count` 只在设备 Payload 成功生成时增加；
+- Release 的 `delivery_count` 在设备 Payload 成功生成时增加；公司额度对 DRAFT 同一 Release 只扣一次，对 PUBLISHED 每次扣除；
 - 公司暂停、过期、撤销和额度用尽能立即影响后续请求；
 - 操作日志可通过 requestId 关联构建、授权和下载失败；
 - 服务端、插件和壳共享的协议测试向量全部通过。

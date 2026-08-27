@@ -15,9 +15,10 @@ journal_mode = WAL
 synchronous = NORMAL
 foreign_keys = ON
 busy_timeout = 5000 ms
+transaction lock = IMMEDIATE
 ```
 
-同一公司最多保留 4 个数据库连接，适合单实例、小规模并发。不要让多个服务实例同时通过网络共享盘写同一个 SQLite 文件。
+同一公司最多保留 4 个数据库连接，适合单实例、小规模并发。写事务从开始时取得保留锁，配合 `busy_timeout` 排队等待，避免并发请求从读事务升级为写事务时直接产生 `SQLITE_BUSY`。不要让多个服务实例同时通过网络共享盘写同一个 SQLite 文件。
 
 ## 表说明机制
 
@@ -35,7 +36,7 @@ ORDER BY table_name;
 
 用途：记录数据库 Schema 版本，为后续自动迁移保留入口。
 
-当前设计版本：**全新初始化版本**。本轮允许清空数据重新建库，不定义旧 Schema 自动迁移路径；代码实现时应将 `schema_version` 设置为新的明确整数，并与初始化 SQL 保持一致。
+当前设计版本：**5**。不定义运行时旧 Schema 自动迁移路径；现有 `acme` 数据库直接升级并回填为版本 5，全新数据库直接使用版本 5。
 
 | 字段 | 说明 |
 |---|---|
@@ -64,7 +65,7 @@ ORDER BY table_name;
 | pack_limit | 最大允许打包次数；0 表示不限 |
 | delivery_limit | 最大允许成功下发次数；0 表示不限 |
 | pack_count | 首次成功创建唯一应用版本的累计次数 |
-| delivery_count | 成功生成并准备返回设备 Payload 的累计次数 |
+| delivery_count | 已消耗的公司下发额度；DRAFT 的同一 Release 最多计入一次 |
 | status | ACTIVE、SUSPENDED、EXPIRED 或 REVOKED |
 | ext_json | 公司级扩展 JSON，用于联系人、渠道、合同号等后续字段 |
 | created_at | 创建时间 |
@@ -74,7 +75,8 @@ ORDER BY table_name;
 
 - `pack_count` 只在首次插入新的 `package_name + version_code` 且加密 Payload 成功写入时增加。
 - DRAFT 更新、幂等重试、PUBLISHED 复用和失败请求不增加 `pack_count`。
-- `delivery_count` 在设备 Payload 成功生成后、HTTP Body 写出前增加。
+- DRAFT 的同一 `release_id` 第一次成功生成设备 Payload 时增加公司 `delivery_count`，后续草稿更新和再次下发不重复消耗公司额度。
+- PUBLISHED 每次成功生成设备 Payload 都增加公司 `delivery_count`。
 - 客户端断开连接时，该次下发仍可能计数，因为服务端已经完成生成。
 
 ## `company_api_keys`
@@ -114,6 +116,9 @@ ORDER BY table_name;
 | canonical_payload | AES-256-GCM 加密后的标准 Payload BLOB |
 | canonical_key_ciphertext | 使用公司 KEK 加密后的随机标准 Payload Key |
 | payload_key_version | 设备 Key 派生版本，用于轮换 |
+| packer | 编译插件获取的本机机器名，最多 64 个字符；不属于 Payload 绑定字段 |
+| delivery_count | 该 Release 实际成功生成设备 Payload 的累计次数 |
+| draft_delivery_charged | DRAFT 是否已经消耗过一次公司下发额度，0 否、1 是 |
 | status | DRAFT、PUBLISHED 或 REVOKED |
 | created_at | 首次创建时间；DRAFT 更新时保持不变 |
 | updated_at | 最近一次 DRAFT 更新或状态变更时间 |
@@ -170,18 +175,30 @@ package_name + version_code
 
 ## `operation_logs`
 
-用途：保存轻量关键审计，不保存完整请求、设备公钥、Integrity token 或任何 Key。
+用途：只保存 Release 和公司的关键生命周期审计，不保存每次草稿更新或下发事件，也不保存完整请求、设备公钥、Integrity token 或任何 Key。
 
 | 字段 | 说明 |
 |---|---|
 | id | 自增主键 |
-| operation | PACK_CREATE、PACK_PUBLISH、PACK_REVOKE、UNPACK_DELIVERY 等 |
-| result | SUCCESS 或失败结果 |
+| operation | 仅允许 PACK_CREATE、PACK_PUBLISH、PACK_REVOKE、COMPANY_REVOKE |
+| result | 固定为 SUCCESS |
 | request_id | HTTP 请求追踪 ID |
-| detail | releaseId、revocationId、操作类型和变化组件等非敏感简要信息；不记录完整 Hash 或令牌 |
+| detail | Release 操作保存 releaseId，公司撤销保存 companyId |
+| packer | Release 操作发生时记录的最近打包机器名；公司撤销为空 |
 | created_at | 操作时间 |
 
-建议定期清理超过 90～180 天的普通日志，重要管理审计可长期保留。
+`PACK_UPDATE`、`UNPACK_DELIVERY` 和 `REVOCATION_CREATE` 不写入该表。下发次数直接累计在 `payload_releases.delivery_count`，避免按下发次数持续增长日志数据。
+
+## 查询和索引策略
+
+- `payload_releases` 的 `UNIQUE(package_name, version_code)` 同时服务版本复用查询和唯一性校验。
+- `idx_payload_release_created(created_at DESC)` 服务 Release 列表和统计分页，避免排序临时表。
+- Release ID、challenge ID 和 revocation ID 均由主键索引查询。
+- `company_api_keys.key_hash` 的唯一索引服务 API Key 鉴权。
+- `idx_challenge_expiry(expires_at)` 服务过期 challenge 清理。
+- `idx_revocation_target(target_type, target_hash, effective_at)` 服务撤销检查。
+- `idx_operation_created(created_at)` 服务生命周期审计的时间查询和清理。
+- Release 列表只读取元数据，不加载 `canonical_payload` 和 `canonical_key_ciphertext` 大 BLOB。
 
 ## 备份
 

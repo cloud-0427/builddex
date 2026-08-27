@@ -178,6 +178,7 @@ packageName + versionCode
 | payloadVersion | integer | 必须等于 versionCode |
 | packageName | text | 最终 Android applicationId |
 | versionCode | integer | Variant 所有 Output 的统一 versionCode |
+| packer | text | 编译插件自动获取的本机机器名，最多 64 个字符，不参与 Payload 绑定 |
 | certificateSha256Digest | repeated text | 一个或多个允许证书 SHA-256 Base64URL 摘要 |
 | businessDexSha256 | text | 最终业务 DEX 集合摘要 |
 | resourcesSha256 | text | 最终 Manifest/resources/res/assets 摘要 |
@@ -199,6 +200,7 @@ curl -X POST http://127.0.0.1:8761/api/v1/companies/acme/pack/releases \
   -F "payloadVersion=105" \
   -F "packageName=com.example.app" \
   -F "versionCode=105" \
+  -F "packer=build-host-01" \
   -F "certificateSha256Digest=PLAY_APP_SIGNING_CERT" \
   -F "certificateSha256Digest=OPTIONAL_SIDELOAD_CERT" \
   -F "businessDexSha256=..." \
@@ -227,6 +229,7 @@ curl -X POST http://127.0.0.1:8761/api/v1/companies/acme/pack/releases \
   "payloadVersion": 105,
   "packageName": "com.example.app",
   "versionCode": 105,
+  "packer": "build-host-01",
   "certificateSha256Digests": ["..."],
   "certificateSetSha256": "...",
   "businessDexSha256": "...",
@@ -251,11 +254,11 @@ curl -X POST http://127.0.0.1:8761/api/v1/companies/acme/pack/releases \
 
 ### `POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish`
 
-权限：公司 API Key。只有最终 APK/Split APK/AAB 已生成并通过插件校验后才能调用。重复发布幂等成功，响应 code 为 `RELEASE_PUBLISHED`。
+权限：公司 API Key。只有最终 APK/Split APK/AAB 已生成并通过插件校验后才能调用。DRAFT 发布成功时响应 code 为 `RELEASE_PUBLISHED`；重复发布返回 409 `RELEASE_ALREADY_PUBLISHED`；REVOKED 重新发布返回 409 `INVALID_RELEASE_STATUS_TRANSITION`。
 
 ### `POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/revoke`
 
-权限：公司 API Key。REVOKED 永久禁止以相同 package/version 重新创建，响应 code 为 `RELEASE_REVOKED`。
+权限：公司 API Key。DRAFT 或 PUBLISHED 可撤销，响应 code 为 `RELEASE_REVOKED`；重复撤销返回 409 `RELEASE_ALREADY_REVOKED`。REVOKED 永久禁止以相同 package/version 重新创建。
 
 ## D. 解包和设备授权接口
 
@@ -328,7 +331,7 @@ empty label
 
 ### `POST /api/v1/companies/{companyId}/unpack/download`
 
-功能：验证 Grant，重新派生设备 Key，将标准 Payload 转换为设备专属 AES-GCM 密文，并增加 `delivery_count`。
+功能：验证 Grant，重新派生设备 Key，将标准 Payload 转换为设备专属 AES-GCM 密文，并增加 Release 的实际下发次数。DRAFT 的同一 Release 只在首次下发时消耗一次公司额度；PUBLISHED 每次下发都消耗公司额度。
 
 ```json
 {

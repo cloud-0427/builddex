@@ -198,20 +198,37 @@ func (a *API) listCompanies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listPackLogs(w http.ResponseWriter, r *http.Request) {
-	if !a.requireAdmin(w, r) {
-		return
-	}
 	db, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	// companyID := r.PathValue("companyId")
+	// Dual authentication: Admin or Company API Key
+	isAdmin := r.Header.Get("Authorization") == "Bearer "+a.cfg.AdminToken
+	isAuthorized := false
+	if isAdmin {
+		isAuthorized = true
+	} else {
+		key := r.Header.Get("X-Company-Key")
+		if key != "" {
+			if err := store.AuthenticateCompany(r.Context(), db, secure.SHA256URL([]byte(key))); err == nil {
+				isAuthorized = true
+			}
+		}
+	}
+
+	if !isAuthorized {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid admin token or company API key")
+		return
+	}
+
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
 	if page < 1 {
 		page = 1
 	}
 	if pageSize < 1 {
-		pageSize = 20
+		pageSize = 5 // Changed from 20 to 5 for testing
 	}
 	logs, total, err := store.ListPackLogs(r.Context(), db, page, pageSize)
 	if err != nil {
@@ -326,7 +343,7 @@ func (a *API) deleteCompany(w http.ResponseWriter, r *http.Request) {
 			writeStoreError(w, err)
 			return
 		}
-		store.AddOperationLog(r.Context(), db, "COMPANY_REVOKE", "SUCCESS", requestID(r.Context()), current.CompanyID)
+		store.AddOperationLog(r.Context(), db, "COMPANY_REVOKE", requestID(r.Context()), current.CompanyID, "")
 	}
 	writeResponse(w, http.StatusOK, "COMPANY_REVOKED", "Company revoked.", map[string]any{"companyId": current.CompanyID})
 }
@@ -377,6 +394,7 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 	payloadVersion, err2 := strconv.ParseInt(r.FormValue("payloadVersion"), 10, 64)
 	payloadID := strings.TrimSpace(r.FormValue("payloadId"))
 	packageName := strings.TrimSpace(r.FormValue("packageName"))
+	packer := truncateRunes(strings.TrimSpace(r.FormValue("packer")), 64)
 	certificates, certificateJSON, certificateSetHash, certErr := normalizeCertificateDigests(r.MultipartForm.Value["certificateSha256Digest"])
 	if len(plaintext) == 0 || err1 != nil || err2 != nil || versionCode <= 0 || payloadVersion != versionCode ||
 		payloadID != "app-main" || packageName == "" || certErr != nil {
@@ -414,7 +432,7 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 		CertificateSHA256Digests: certificates, CertificateDigestsJSON: certificateJSON,
 		CertificateSetSHA256: certificateSetHash, BusinessDexSHA256: businessHash,
 		ResourcesSHA256: resourcesHash, NativeLibsSHA256: nativeHash, ReleaseBuildSHA256: releaseBuildHash,
-		PlaintextSHA256: secure.SHA256URL(plaintext),
+		PlaintextSHA256: secure.SHA256URL(plaintext), Packer: packer,
 	}
 	companyID := r.PathValue("companyId")
 	for attempt := 0; attempt < 4; attempt++ {
@@ -434,7 +452,7 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 			}
 			now := time.Now().Unix()
 			requested.Status, requested.CreatedAt, requested.UpdatedAt = "DRAFT", now, now
-			store.AddOperationLog(r.Context(), db, "PACK_CREATE", "SUCCESS", requestID(r.Context()), requested.ReleaseID)
+			store.AddOperationLog(r.Context(), db, "PACK_CREATE", requestID(r.Context()), requested.ReleaseID, requested.Packer)
 			writeResponse(w, http.StatusCreated, "RELEASE_CREATED", "Draft release created.", releaseDetails(requested, "CREATED", false))
 			return
 		}
@@ -451,6 +469,14 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 		}
 		changed := changedReleaseComponents(existing, requested)
 		if len(changed) == 0 {
+			if requested.Packer != "" && requested.Packer != existing.Packer {
+				if err := store.UpdateReleasePacker(r.Context(), db, existing.ReleaseID, requested.Packer); err != nil {
+					writeStoreError(w, err)
+					return
+				}
+				existing.Packer = requested.Packer
+				existing.UpdatedAt = time.Now().Unix()
+			}
 			writeResponse(w, http.StatusOK, "RELEASE_REUSED", "Existing release reused.", releaseDetails(existing, "REUSED", false))
 			return
 		}
@@ -477,7 +503,6 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updated.Status, updated.UpdatedAt = "DRAFT", time.Now().Unix()
-			store.AddOperationLog(r.Context(), db, "PACK_UPDATE", "SUCCESS", requestID(r.Context()), updated.ReleaseID)
 			writeResponse(w, http.StatusOK, "RELEASE_UPDATED", "Draft release updated.", releaseDetails(updated, "UPDATED", true))
 			return
 		default:
@@ -517,11 +542,12 @@ func (a *API) changeReleaseStatus(w http.ResponseWriter, r *http.Request, status
 	if !ok {
 		return
 	}
-	if err := store.SetReleaseStatus(r.Context(), db, r.PathValue("releaseId"), status); err != nil {
+	packer, err := store.SetReleaseStatus(r.Context(), db, r.PathValue("releaseId"), status)
+	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	store.AddOperationLog(r.Context(), db, operation, "SUCCESS", requestID(r.Context()), r.PathValue("releaseId"))
+	store.AddOperationLog(r.Context(), db, operation, requestID(r.Context()), r.PathValue("releaseId"), packer)
 	code, message := "RELEASE_REVOKED", "Release revoked."
 	if status == "PUBLISHED" {
 		code, message = "RELEASE_PUBLISHED", "Release published."
@@ -583,7 +609,7 @@ func (a *API) enrollDevice(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input, 2<<20) {
 		return
 	}
-	release, ok := publishedRelease(w, r, db, input.ReleaseID)
+	release, ok := publishedReleaseMetadata(w, r, db, input.ReleaseID)
 	if !ok {
 		return
 	}
@@ -676,7 +702,7 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "DEVICE_REVOKED", "device is revoked")
 		return
 	}
-	release, ok := publishedRelease(w, r, db, input.ReleaseID)
+	release, ok := publishedReleaseMetadata(w, r, db, input.ReleaseID)
 	if !ok {
 		return
 	}
@@ -804,12 +830,11 @@ func (a *API) downloadPayload(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, err)
 		return
 	}
-	if err := store.IncrementDelivery(r.Context(), db); err != nil {
+	if err := store.IncrementDelivery(r.Context(), db, release.ReleaseID); err != nil {
 		clear(devicePayload)
 		writeStoreError(w, err)
 		return
 	}
-	store.AddOperationLog(r.Context(), db, "UNPACK_DELIVERY", "SUCCESS", requestID(r.Context()), grant.ReleaseID)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="payload.jgpd"`)
 	w.Header().Set("X-Jiagu-Grant-Id", grant.GrantID)
@@ -846,7 +871,6 @@ func (a *API) addRevocation(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, err)
 		return
 	}
-	store.AddOperationLog(r.Context(), db, "REVOCATION_CREATE", "SUCCESS", requestID(r.Context()), id)
 	writeResponse(w, http.StatusCreated, "REVOCATION_CREATED", "Revocation created.", map[string]any{"revocationId": id})
 }
 
@@ -872,6 +896,15 @@ func (a *API) requireCompany(w http.ResponseWriter, r *http.Request) (*sql.DB, b
 
 func publishedRelease(w http.ResponseWriter, r *http.Request, db *sql.DB, releaseID string) (store.Release, bool) {
 	release, err := store.GetRelease(r.Context(), db, releaseID, false)
+	return availableRelease(w, release, err)
+}
+
+func publishedReleaseMetadata(w http.ResponseWriter, r *http.Request, db *sql.DB, releaseID string) (store.Release, bool) {
+	release, err := store.GetReleaseMetadata(r.Context(), db, releaseID)
+	return availableRelease(w, release, err)
+}
+
+func availableRelease(w http.ResponseWriter, release store.Release, err error) (store.Release, bool) {
 	if err != nil {
 		writeStoreError(w, err)
 		return store.Release{}, false
@@ -1013,15 +1046,24 @@ func changedReleaseComponents(existing, requested store.Release) []string {
 	return changed
 }
 
+func truncateRunes(value string, max int) string {
+	values := []rune(value)
+	if len(values) <= max {
+		return value
+	}
+	return string(values[:max])
+}
+
 func releaseDetails(release store.Release, operation string, keyRotated bool) map[string]any {
 	return map[string]any{
 		"releaseId": release.ReleaseID, "payloadId": release.PayloadID, "payloadVersion": release.PayloadVersion,
 		"packageName": release.PackageName, "versionCode": release.VersionCode,
+		"packer":                   release.Packer,
 		"certificateSha256Digests": release.CertificateSHA256Digests,
 		"certificateSetSha256":     release.CertificateSetSHA256, "businessDexSha256": release.BusinessDexSHA256,
 		"resourcesSha256": release.ResourcesSHA256, "nativeLibsSha256": release.NativeLibsSHA256,
 		"releaseBuildSha256": release.ReleaseBuildSHA256, "payloadPlaintextSha256": release.PlaintextSHA256,
-		"payloadKeyVersion": release.PayloadKeyVersion, "status": release.Status,
+		"payloadKeyVersion": release.PayloadKeyVersion, "deliveryCount": release.DeliveryCount, "status": release.Status,
 		"createdAt": release.CreatedAt, "updatedAt": release.UpdatedAt,
 		"publishedAt": release.PublishedAt, "revokedAt": release.RevokedAt,
 		"operation": operation, "keyRotated": keyRotated,
@@ -1173,6 +1215,12 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "CONFLICT", err.Error())
+	case errors.Is(err, store.ErrAlreadyPublished):
+		writeError(w, http.StatusConflict, "RELEASE_ALREADY_PUBLISHED", err.Error())
+	case errors.Is(err, store.ErrAlreadyRevoked):
+		writeError(w, http.StatusConflict, "RELEASE_ALREADY_REVOKED", err.Error())
+	case errors.Is(err, store.ErrInvalidTransition):
+		writeError(w, http.StatusConflict, "INVALID_RELEASE_STATUS_TRANSITION", err.Error())
 	case errors.Is(err, store.ErrUnauthorized):
 		writeError(w, http.StatusUnauthorized, "COMPANY_UNAUTHORIZED", err.Error())
 	case errors.Is(err, store.ErrLimitExceeded):

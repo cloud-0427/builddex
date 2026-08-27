@@ -15,6 +15,13 @@ import static org.junit.Assert.fail;
 
 public class JiaguServerClientTest {
     @Test
+    public void localMachineNameIsPresentAndLimitedToSixtyFourCharacters() {
+        String machineName = JiaguServerClient.localMachineName();
+        assertTrue(!machineName.isEmpty());
+        assertTrue(machineName.length() <= 64);
+    }
+
+    @Test
     public void authCheckPreservesFourHundredResponseBody() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/api/v1/companies/acme/pack/auth-check", exchange -> {

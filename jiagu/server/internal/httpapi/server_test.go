@@ -79,6 +79,16 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	if publish.Code != http.StatusOK {
 		t.Fatalf("publish: %d %s", publish.Code, publish.Body.String())
 	}
+	republish := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/pack/releases/"+release.ReleaseID+"/publish", "", companyCreated.CompanyAPIKey, map[string]any{})
+	if republish.Code != http.StatusConflict || !bytes.Contains(republish.Body.Bytes(), []byte("RELEASE_ALREADY_PUBLISHED")) {
+		t.Fatalf("republish must fail with the published state: %d %s", republish.Code, republish.Body.String())
+	}
+	missingPublish := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/pack/releases/missing/publish", "", companyCreated.CompanyAPIKey, map[string]any{})
+	if missingPublish.Code != http.StatusNotFound {
+		t.Fatalf("missing release publish must fail: %d %s", missingPublish.Code, missingPublish.Body.String())
+	}
 
 	signPrivate, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	signDER, _ := x509.MarshalPKIXPublicKey(&signPrivate.PublicKey)
@@ -291,6 +301,16 @@ func TestReleaseIdempotency(t *testing.T) {
 		"/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/revoke", "", companyCreated.CompanyAPIKey, map[string]any{})
 	if revoked.Code != http.StatusOK {
 		t.Fatalf("revoke release: %d %s", revoked.Code, revoked.Body.String())
+	}
+	revokeAgain := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/revoke", "", companyCreated.CompanyAPIKey, map[string]any{})
+	if revokeAgain.Code != http.StatusConflict || !bytes.Contains(revokeAgain.Body.Bytes(), []byte("RELEASE_ALREADY_REVOKED")) {
+		t.Fatalf("repeated revoke must fail with the revoked state: %d %s", revokeAgain.Code, revokeAgain.Body.String())
+	}
+	publishRevoked := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/publish", "", companyCreated.CompanyAPIKey, map[string]any{})
+	if publishRevoked.Code != http.StatusConflict || !bytes.Contains(publishRevoked.Body.Bytes(), []byte("INVALID_RELEASE_STATUS_TRANSITION")) {
+		t.Fatalf("revoked release cannot be published: %d %s", publishRevoked.Code, publishRevoked.Body.String())
 	}
 	res5 := createDraft("1", []byte("v1 updated content"))
 	if res5.Code != http.StatusConflict || !bytes.Contains(res5.Body.Bytes(), []byte("REVOKED_VERSION_REUSE_FORBIDDEN")) {

@@ -117,7 +117,7 @@ authorized_until == 0 || now <= authorized_until
 pack_limit == 0 || pack_count < pack_limit
 ```
 
-下发前检查相同授权状态以及：
+需要消耗公司下发额度时额外检查：
 
 ```text
 delivery_limit == 0 || delivery_count < delivery_limit
@@ -126,6 +126,8 @@ delivery_limit == 0 || delivery_count < delivery_limit
 计数使用 SQLite 事务，避免并发请求越过限额。
 
 `pack_count` 采用唯一版本计数：仅首次成功插入 `packageName + versionCode` 时增加。DRAFT 更新、幂等重试、PUBLISHED 复用和失败请求不增加。
+
+DRAFT 同一 `release_id` 只在首次下发时消耗一次公司额度；PUBLISHED 每次下发都消耗公司额度。Release 自身的 `delivery_count` 始终累计实际下发次数。
 
 ## 撤销
 

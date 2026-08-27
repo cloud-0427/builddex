@@ -265,7 +265,7 @@ Grant 使用 Ed25519 JWS，算法标识 `EdDSA`。Runtime 必须使用构建期�
 6. 使用 V2 AAD 解密标准 Payload并验证明文摘要；
 7. 重新派生 DevicePayloadKey；
 8. 使用 DevicePayloadKey 加密设备 Payload；
-9. 事务增加 delivery_count；
+9. 事务增加 Release 的实际下发次数；DRAFT 同一 Release 仅首次下发增加公司额度，PUBLISHED 每次增加；
 10. 返回 JGPD 容器。
 
 Device Payload AAD：

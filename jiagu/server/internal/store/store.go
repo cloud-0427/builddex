@@ -20,12 +20,15 @@ import (
 var companyIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
 
 var (
-	ErrNotFound      = errors.New("not found")
-	ErrConflict      = errors.New("conflict")
-	ErrUnauthorized  = errors.New("unauthorized")
-	ErrLimitExceeded = errors.New("limit exceeded")
-	ErrAuthorization = errors.New("company authorization is inactive")
-	ErrChallengeUsed = errors.New("challenge is invalid, expired, or already used")
+	ErrNotFound          = errors.New("not found")
+	ErrConflict          = errors.New("conflict")
+	ErrUnauthorized      = errors.New("unauthorized")
+	ErrLimitExceeded     = errors.New("limit exceeded")
+	ErrAuthorization     = errors.New("company authorization is inactive")
+	ErrChallengeUsed     = errors.New("challenge is invalid, expired, or already used")
+	ErrAlreadyPublished  = errors.New("release is already published")
+	ErrAlreadyRevoked    = errors.New("release is already revoked")
+	ErrInvalidTransition = errors.New("invalid release status transition")
 )
 
 type Manager struct {
@@ -78,6 +81,9 @@ type Release struct {
 	CanonicalPayload         []byte   `json:"-"`
 	CanonicalKeyCiphertext   []byte   `json:"-"`
 	PayloadKeyVersion        int64    `json:"payloadKeyVersion"`
+	Packer                   string   `json:"packer"`
+	DeliveryCount            int64    `json:"deliveryCount"`
+	DraftDeliveryCharged     bool     `json:"-"`
 	Status                   string   `json:"status"`
 	CreatedAt                int64    `json:"createdAt"`
 	UpdatedAt                int64    `json:"updatedAt"`
@@ -87,11 +93,6 @@ type Release struct {
 
 type NewRelease struct {
 	Release
-}
-
-type ReleaseLog struct {
-	Release
-	DeliveryCount int64 `json:"deliveryCount"`
 }
 
 func NewManager(dir string) (*Manager, error) {
@@ -209,7 +210,7 @@ func (m *Manager) Close() {
 }
 
 func openSQLite(path string) (*sql.DB, error) {
-	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)"
+	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -251,13 +252,13 @@ func UpdateCompany(ctx context.Context, db *sql.DB, description string, authoriz
 }
 
 func AuthenticateCompany(ctx context.Context, db *sql.DB, keyHash string) error {
-	var count int
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM company_api_keys WHERE key_hash=? AND status='ACTIVE'`, keyHash).Scan(&count)
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM company_api_keys WHERE key_hash=? AND status='ACTIVE' LIMIT 1`, keyHash).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrUnauthorized
+	}
 	if err != nil {
 		return err
-	}
-	if count != 1 {
-		return ErrUnauthorized
 	}
 	return nil
 }
@@ -286,13 +287,14 @@ func CreateRelease(ctx context.Context, db *sql.DB, release NewRelease) error {
 		 certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
 		 resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
 		 canonical_ciphertext_sha256, canonical_payload, canonical_key_ciphertext,
-		 payload_key_version, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
+		 payload_key_version, packer, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
 		release.ReleaseID, release.PayloadID, release.PayloadVersion, release.PackageName,
 		release.VersionCode, release.CertificateDigestsJSON, release.CertificateSetSHA256,
 		release.BusinessDexSHA256, release.ResourcesSHA256, release.NativeLibsSHA256,
 		release.ReleaseBuildSHA256, release.PlaintextSHA256, release.CanonicalCipherSHA256,
-		release.CanonicalPayload, release.CanonicalKeyCiphertext, release.PayloadKeyVersion, now, now)
+		release.CanonicalPayload, release.CanonicalKeyCiphertext, release.PayloadKeyVersion,
+		release.Packer, now, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrConflict
@@ -312,13 +314,13 @@ func UpdateRelease(ctx context.Context, db *sql.DB, release NewRelease, expected
 		certificate_set_sha256=?, business_dex_sha256=?, resources_sha256=?,
 		native_libs_sha256=?, release_build_sha256=?, plaintext_sha256=?,
 		canonical_ciphertext_sha256=?, canonical_payload=?, canonical_key_ciphertext=?,
-		payload_key_version=?, updated_at=?
+		payload_key_version=?, packer=?, updated_at=?
 		WHERE release_id=? AND status='DRAFT' AND payload_key_version=?`,
 		release.PayloadID, release.PayloadVersion, release.CertificateDigestsJSON,
 		release.CertificateSetSHA256, release.BusinessDexSHA256, release.ResourcesSHA256,
 		release.NativeLibsSHA256, release.ReleaseBuildSHA256, release.PlaintextSHA256,
 		release.CanonicalCipherSHA256, release.CanonicalPayload, release.CanonicalKeyCiphertext,
-		release.PayloadKeyVersion, now, release.ReleaseID, expectedKeyVersion)
+		release.PayloadKeyVersion, release.Packer, now, release.ReleaseID, expectedKeyVersion)
 	if err != nil {
 		return err
 	}
@@ -330,30 +332,28 @@ func UpdateRelease(ctx context.Context, db *sql.DB, release NewRelease, expected
 }
 
 func ListReleases(ctx context.Context, db *sql.DB) ([]Release, error) {
-	rows, err := db.QueryContext(ctx, releaseSelect+` ORDER BY created_at DESC`)
+	rows, err := db.QueryContext(ctx, releaseMetadataSelect+` ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var values []Release
 	for rows.Next() {
-		value, err := scanRelease(rows)
+		value, err := scanReleaseMetadata(rows)
 		if err != nil {
 			return nil, err
 		}
-		value.CanonicalPayload = nil
-		value.CanonicalKeyCiphertext = nil
 		values = append(values, value)
 	}
 	return values, rows.Err()
 }
 
-func ListPackLogs(ctx context.Context, db *sql.DB, page, pageSize int) ([]ReleaseLog, int, error) {
+func ListPackLogs(ctx context.Context, db *sql.DB, page, pageSize int) ([]Release, int, error) {
 	if page < 1 {
 		page = 1
 	}
 	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
+		pageSize = 5
 	}
 	offset := (page - 1) * pageSize
 
@@ -365,9 +365,8 @@ func ListPackLogs(ctx context.Context, db *sql.DB, page, pageSize int) ([]Releas
 	query := `SELECT release_id, payload_id, payload_version, package_name, version_code,
 		certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
 		resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
-		canonical_ciphertext_sha256, payload_key_version, status, created_at, updated_at,
-		published_at, revoked_at,
-		(SELECT COUNT(*) FROM operation_logs WHERE operation='UNPACK_DELIVERY' AND detail=release_id) as delivery_count
+		canonical_ciphertext_sha256, payload_key_version, packer, delivery_count,
+		status, created_at, updated_at, published_at, revoked_at
 		FROM payload_releases
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`
@@ -378,16 +377,16 @@ func ListPackLogs(ctx context.Context, db *sql.DB, page, pageSize int) ([]Releas
 	}
 	defer rows.Close()
 
-	var logs []ReleaseLog
+	var logs []Release
 	for rows.Next() {
-		var log ReleaseLog
+		var log Release
 		var certsJSON string
 		err := rows.Scan(&log.ReleaseID, &log.PayloadID, &log.PayloadVersion, &log.PackageName,
 			&log.VersionCode, &certsJSON, &log.CertificateSetSHA256,
 			&log.BusinessDexSHA256, &log.ResourcesSHA256, &log.NativeLibsSHA256,
 			&log.ReleaseBuildSHA256, &log.PlaintextSHA256, &log.CanonicalCipherSHA256,
-			&log.PayloadKeyVersion, &log.Status, &log.CreatedAt, &log.UpdatedAt,
-			&log.PublishedAt, &log.RevokedAt, &log.DeliveryCount)
+			&log.PayloadKeyVersion, &log.Packer, &log.DeliveryCount, &log.Status,
+			&log.CreatedAt, &log.UpdatedAt, &log.PublishedAt, &log.RevokedAt)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -409,8 +408,16 @@ func GetRelease(ctx context.Context, db *sql.DB, releaseID string, publishedOnly
 	return value, err
 }
 
+func GetReleaseMetadata(ctx context.Context, db *sql.DB, releaseID string) (Release, error) {
+	value, err := scanReleaseMetadata(db.QueryRowContext(ctx, releaseMetadataSelect+` WHERE release_id=?`, releaseID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Release{}, ErrNotFound
+	}
+	return value, err
+}
+
 func GetReleaseByVersion(ctx context.Context, db *sql.DB, packageName string, versionCode int64) (Release, error) {
-	value, err := scanRelease(db.QueryRowContext(ctx, releaseSelect+` WHERE package_name=? AND version_code=?`,
+	value, err := scanReleaseMetadata(db.QueryRowContext(ctx, releaseMetadataSelect+` WHERE package_name=? AND version_code=?`,
 		packageName, versionCode))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Release{}, ErrNotFound
@@ -418,29 +425,62 @@ func GetReleaseByVersion(ctx context.Context, db *sql.DB, packageName string, ve
 	return value, err
 }
 
-func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string) error {
-	now := time.Now().Unix()
-	var result sql.Result
-	var err error
-	switch status {
-	case "PUBLISHED":
-		// 如果已经是 PUBLISHED，则直接返回成功（幂等）
-		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, published_at=?, updated_at=?
-			WHERE release_id=? AND (status='DRAFT' OR status='PUBLISHED')`, status, now, now, releaseID)
-	case "REVOKED":
-		result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, revoked_at=?, updated_at=?
-			WHERE release_id=? AND status!='REVOKED'`, status, now, now, releaseID)
-	default:
-		return errors.New("invalid release status")
+func UpdateReleasePacker(ctx context.Context, db *sql.DB, releaseID, packer string) error {
+	if packer == "" {
+		return nil
 	}
+	result, err := db.ExecContext(ctx, `UPDATE payload_releases SET packer=?, updated_at=?
+		WHERE release_id=? AND status IN ('DRAFT','PUBLISHED') AND packer<>?`,
+		packer, time.Now().Unix(), releaseID, packer)
 	if err != nil {
 		return err
 	}
+	_, _ = result.RowsAffected()
+	return nil
+}
+
+func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string) (string, error) {
+	release, err := GetReleaseMetadata(ctx, db, releaseID)
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now().Unix()
+	var result sql.Result
+	switch status {
+	case "PUBLISHED":
+		switch release.Status {
+		case "DRAFT":
+			result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, published_at=?, updated_at=?
+				WHERE release_id=? AND status='DRAFT'`, status, now, now, releaseID)
+		case "PUBLISHED":
+			return "", ErrAlreadyPublished
+		case "REVOKED":
+			return "", fmt.Errorf("%w: REVOKED to PUBLISHED", ErrInvalidTransition)
+		default:
+			return "", fmt.Errorf("%w: unsupported current status %q", ErrInvalidTransition, release.Status)
+		}
+	case "REVOKED":
+		switch release.Status {
+		case "DRAFT", "PUBLISHED":
+			result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, revoked_at=?, updated_at=?
+				WHERE release_id=? AND status=?`, status, now, now, releaseID, release.Status)
+		case "REVOKED":
+			return "", ErrAlreadyRevoked
+		default:
+			return "", fmt.Errorf("%w: unsupported current status %q", ErrInvalidTransition, release.Status)
+		}
+	default:
+		return "", fmt.Errorf("%w: unsupported target status %q", ErrInvalidTransition, status)
+	}
+	if err != nil {
+		return "", err
+	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return ErrConflict
+		return "", ErrConflict
 	}
-	return nil
+	return release.Packer, nil
 }
 
 func CreateChallenge(ctx context.Context, db *sql.DB, id, challenge, purpose string, expiresAt int64) error {
@@ -467,10 +507,13 @@ func ConsumeChallenge(ctx context.Context, db *sql.DB, id, challenge, purpose st
 
 func IsRevoked(ctx context.Context, db *sql.DB, targetType, targetHash string) (bool, error) {
 	now := time.Now().Unix()
-	var count int
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM revocations WHERE target_type=? AND target_hash=?
-		AND effective_at<=? AND (expires_at=0 OR expires_at>?)`, targetType, targetHash, now, now).Scan(&count)
-	return count > 0, err
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM revocations WHERE target_type=? AND target_hash=?
+		AND effective_at<=? AND (expires_at=0 OR expires_at>?) LIMIT 1`, targetType, targetHash, now, now).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func AddRevocation(ctx context.Context, db *sql.DB, id, targetType, targetHash, reason string, expiresAt int64) error {
@@ -480,7 +523,7 @@ func AddRevocation(ctx context.Context, db *sql.DB, id, targetType, targetHash, 
 	return err
 }
 
-func IncrementDelivery(ctx context.Context, db *sql.DB) error {
+func IncrementDelivery(ctx context.Context, db *sql.DB, releaseID string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -496,25 +539,54 @@ func IncrementDelivery(ctx context.Context, db *sql.DB) error {
 	if status != "ACTIVE" || now < authorizedFrom || (authorizedUntil > 0 && now > authorizedUntil) {
 		return ErrAuthorization
 	}
-	if limit > 0 && count >= limit {
+	var releaseStatus string
+	var draftCharged bool
+	if err := tx.QueryRowContext(ctx, `SELECT status, draft_delivery_charged FROM payload_releases WHERE release_id=?`, releaseID).
+		Scan(&releaseStatus, &draftCharged); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	chargeQuota := releaseStatus != "DRAFT" || !draftCharged
+	if chargeQuota && limit > 0 && count >= limit {
 		return ErrLimitExceeded
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE company_info SET delivery_count=delivery_count+1, updated_at=?`, now); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE payload_releases SET
+		delivery_count=delivery_count+1,
+		draft_delivery_charged=CASE WHEN status='DRAFT' THEN 1 ELSE draft_delivery_charged END
+		WHERE release_id=? AND status=? AND draft_delivery_charged=?`, releaseID, releaseStatus, draftCharged)
+	if err != nil {
 		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return ErrConflict
+	}
+	if chargeQuota {
+		if _, err := tx.ExecContext(ctx, `UPDATE company_info SET delivery_count=delivery_count+1, updated_at=?`, now); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
 
-func AddOperationLog(ctx context.Context, db *sql.DB, operation, result, requestID, detail string) {
-	_, _ = db.ExecContext(ctx, `INSERT INTO operation_logs (operation, result, request_id, detail, created_at)
-		VALUES (?, ?, ?, ?, ?)`, operation, result, requestID, detail, time.Now().Unix())
+func AddOperationLog(ctx context.Context, db *sql.DB, operation, requestID, detail, packer string) {
+	_, _ = db.ExecContext(ctx, `INSERT INTO operation_logs (operation, result, request_id, detail, packer, created_at)
+		VALUES (?, 'SUCCESS', ?, ?, ?, ?)`, operation, requestID, detail, packer, time.Now().Unix())
 }
 
 const releaseSelect = `SELECT release_id, payload_id, payload_version, package_name, version_code,
 	certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
 	resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
 	canonical_ciphertext_sha256, canonical_payload, canonical_key_ciphertext,
-	payload_key_version, status, created_at, updated_at, published_at, revoked_at
+	payload_key_version, packer, delivery_count, draft_delivery_charged,
+	status, created_at, updated_at, published_at, revoked_at
+	FROM payload_releases`
+
+const releaseMetadataSelect = `SELECT release_id, payload_id, payload_version, package_name, version_code,
+	certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
+	resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
+	canonical_ciphertext_sha256, payload_key_version, packer, delivery_count, draft_delivery_charged,
+	status, created_at, updated_at, published_at, revoked_at
 	FROM payload_releases`
 
 type scanner interface{ Scan(...any) error }
@@ -526,6 +598,21 @@ func scanRelease(row scanner) (Release, error) {
 		&value.BusinessDexSHA256, &value.ResourcesSHA256, &value.NativeLibsSHA256,
 		&value.ReleaseBuildSHA256, &value.PlaintextSHA256, &value.CanonicalCipherSHA256,
 		&value.CanonicalPayload, &value.CanonicalKeyCiphertext, &value.PayloadKeyVersion,
+		&value.Packer, &value.DeliveryCount, &value.DraftDeliveryCharged, &value.Status,
+		&value.CreatedAt, &value.UpdatedAt, &value.PublishedAt, &value.RevokedAt)
+	if err == nil {
+		err = json.Unmarshal([]byte(value.CertificateDigestsJSON), &value.CertificateSHA256Digests)
+	}
+	return value, err
+}
+
+func scanReleaseMetadata(row scanner) (Release, error) {
+	var value Release
+	err := row.Scan(&value.ReleaseID, &value.PayloadID, &value.PayloadVersion, &value.PackageName,
+		&value.VersionCode, &value.CertificateDigestsJSON, &value.CertificateSetSHA256,
+		&value.BusinessDexSHA256, &value.ResourcesSHA256, &value.NativeLibsSHA256,
+		&value.ReleaseBuildSHA256, &value.PlaintextSHA256, &value.CanonicalCipherSHA256,
+		&value.PayloadKeyVersion, &value.Packer, &value.DeliveryCount, &value.DraftDeliveryCharged,
 		&value.Status, &value.CreatedAt, &value.UpdatedAt, &value.PublishedAt, &value.RevokedAt)
 	if err == nil {
 		err = json.Unmarshal([]byte(value.CertificateDigestsJSON), &value.CertificateSHA256Digests)
@@ -534,9 +621,6 @@ func scanRelease(row scanner) (Release, error) {
 }
 
 func initializeSchema(ctx context.Context, db *sql.DB) error {
-	if err := migrateSchema(ctx, db); err != nil {
-		return fmt.Errorf("migrate company schema: %w", err)
-	}
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("initialize company schema: %w", err)
 	}
@@ -549,29 +633,13 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func migrateSchema(ctx context.Context, db *sql.DB) error {
-	var version int
-	err := db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta LIMIT 1`).Scan(&version)
-	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
-			return nil // New database, initializeSchema will handle it
-		}
-		return err
-	}
-
-	if version != 3 {
-		return fmt.Errorf("unsupported company schema version %d; clear the company database and recreate it for schema version 3", version)
-	}
-	return nil
-}
-
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
     schema_version INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 INSERT INTO schema_meta(schema_version, updated_at)
-SELECT 3, unixepoch() WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
+SELECT 5, unixepoch() WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
 
 CREATE TABLE IF NOT EXISTS schema_descriptions (
     table_name TEXT PRIMARY KEY,
@@ -619,6 +687,9 @@ CREATE TABLE IF NOT EXISTS payload_releases (
     canonical_payload BLOB NOT NULL,
     canonical_key_ciphertext BLOB NOT NULL,
     payload_key_version INTEGER NOT NULL DEFAULT 1,
+    packer TEXT NOT NULL DEFAULT '' CHECK(length(packer) <= 64),
+    delivery_count INTEGER NOT NULL DEFAULT 0 CHECK(delivery_count >= 0),
+    draft_delivery_charged INTEGER NOT NULL DEFAULT 0 CHECK(draft_delivery_charged IN (0,1)),
     status TEXT NOT NULL CHECK(status IN ('DRAFT','PUBLISHED','REVOKED')),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -626,7 +697,7 @@ CREATE TABLE IF NOT EXISTS payload_releases (
     revoked_at INTEGER NOT NULL DEFAULT 0,
     UNIQUE(package_name, version_code)
 );
-CREATE INDEX IF NOT EXISTS idx_payload_release_status ON payload_releases(status, version_code);
+CREATE INDEX IF NOT EXISTS idx_payload_release_created ON payload_releases(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS challenges (
     challenge_id TEXT PRIMARY KEY,
@@ -651,10 +722,11 @@ CREATE INDEX IF NOT EXISTS idx_revocation_target ON revocations(target_type, tar
 
 CREATE TABLE IF NOT EXISTS operation_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation TEXT NOT NULL,
-    result TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK(operation IN ('PACK_CREATE','PACK_PUBLISH','PACK_REVOKE','COMPANY_REVOKE')),
+    result TEXT NOT NULL DEFAULT 'SUCCESS' CHECK(result='SUCCESS'),
     request_id TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT '',
+    packer TEXT NOT NULL DEFAULT '' CHECK(length(packer) <= 64),
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_operation_created ON operation_logs(created_at);
@@ -668,5 +740,5 @@ var tableDescriptions = map[string]string{
 	"payload_releases":    "保存公司已打包的 Payload 版本、身份绑定信息、标准加密 Payload 和被主密钥封装的标准 Payload Key。",
 	"challenges":          "保存短期一次性挑战值，用于设备注册和解包授权的防重放校验；过期记录会自动清理。",
 	"revocations":         "只保存被撤销的设备、公钥、证书、应用版本或 Payload，正常设备不产生长期记录。",
-	"operation_logs":      "保存打包、发布、撤销和下发等关键操作的轻量审计记录，可按保留策略定期清理。",
+	"operation_logs":      "只保存打包创建、发布、撤销和公司撤销四类生命周期审计记录。",
 }
