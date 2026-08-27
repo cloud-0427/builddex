@@ -43,6 +43,9 @@ public final class DexReportPlugin implements Plugin<Project> {
         extension.getSignatureCheckEnabled().convention(true);
         extension.getResObfuscationEnabled().convention(true);
         extension.getCertificateSha256Digests().convention(java.util.Collections.emptySet());
+        extension.getAutoRunBuildTypes().convention(java.util.Collections.emptySet());
+        extension.getAttachToTask().convention("assemble");
+        extension.getPublish().convention(false);
 
         project.getPluginManager().withPlugin("com.android.application", plugin -> {
             addJiaguRuntimeDependency(project);
@@ -55,6 +58,17 @@ public final class DexReportPlugin implements Plugin<Project> {
             androidComponents.onVariants(androidComponents.selector().all(), variant -> {
                 String variantName = variant.getName();
                 String buildTypeName = variant.getBuildType();
+
+                // 检查是否在允许运行的 BuildType 列表中。
+                // 如果列表为空，则默认对所有 BuildType 运行（保持向后兼容）。
+                // 如果列表不为空，则只对列表中的类型运行。
+                if (buildTypeName != null && extension.getAutoRunBuildTypes().isPresent()) {
+                    java.util.Set<String> autoRunTypes = extension.getAutoRunBuildTypes().get();
+                    if (!autoRunTypes.isEmpty() && !autoRunTypes.contains(buildTypeName)) {
+                        return;
+                    }
+                }
+
                 String variantCap = capitalize(variantName);
                 String buildInvocationId = UUID.randomUUID().toString();
 
@@ -116,10 +130,8 @@ public final class DexReportPlugin implements Plugin<Project> {
 
                             if (specific != null && specific.getPublish().isPresent()) {
                                 task.getPublish().set(specific.getPublish());
-                            } else if (ext.getPublish().isPresent()) {
-                                task.getPublish().set(ext.getPublish());
                             } else {
-                                task.getPublish().set(!isDebug);
+                                task.getPublish().set(ext.getPublish());
                             }
 
                             if (specific != null && specific.getAntiDebugEnabled().isPresent()) {

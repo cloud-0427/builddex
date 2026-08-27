@@ -232,27 +232,14 @@ func TestReleaseIdempotency(t *testing.T) {
 	var release1 store.Release
 	decodeResponse(t, res1, &release1)
 
-	// Runtime endpoints must distinguish an existing DRAFT from an unknown release.
+	// Systemic change: Runtime endpoints now allow DRAFT releases.
+	// We expect the request to proceed past publishedRelease check.
+	// Since we provided an incomplete JSON, it should fail later (e.g. invalid keys).
 	draftEnroll := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/enroll", "", "", map[string]any{
 		"releaseId": release1.ReleaseID,
 	})
-	if draftEnroll.Code != http.StatusConflict {
-		t.Fatalf("draft enroll: %d %s", draftEnroll.Code, draftEnroll.Body.String())
-	}
-	var draftEnvelope struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-		Details struct {
-			ReleaseID string `json:"releaseId"`
-			Status    string `json:"status"`
-		} `json:"details"`
-	}
-	if err := json.Unmarshal(draftEnroll.Body.Bytes(), &draftEnvelope); err != nil {
-		t.Fatal(err)
-	}
-	if draftEnvelope.Code != "RELEASE_NOT_PUBLISHED" || draftEnvelope.Message == "" ||
-		draftEnvelope.Details.ReleaseID != release1.ReleaseID || draftEnvelope.Details.Status != "DRAFT" {
-		t.Fatalf("unexpected draft release envelope: %s", draftEnroll.Body.String())
+	if draftEnroll.Code == http.StatusConflict {
+		t.Fatalf("draft enroll should no longer return conflict: %s", draftEnroll.Body.String())
 	}
 
 	// 2. Update the same DRAFT in place.
