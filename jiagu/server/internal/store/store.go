@@ -80,7 +80,6 @@ type Release struct {
 	LocalCiphertextSHA256    string   `json:"localCiphertextSha256"`
 	LocalPayloadSize         int64    `json:"localPayloadSize"`
 	PayloadKeyCiphertext     []byte   `json:"-"`
-	PayloadKeyWrapVersion    int64    `json:"-"`
 	PayloadKeyVersion        int64    `json:"payloadKeyVersion"`
 	Packer                   string   `json:"packer"`
 	DeliveryCount            int64    `json:"deliveryCount"`
@@ -287,14 +286,14 @@ func CreateRelease(ctx context.Context, db *sql.DB, release NewRelease) error {
 		(release_id, payload_id, payload_version, package_name, version_code,
 		 certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
 		 resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
-		 local_ciphertext_sha256, local_payload_size, payload_key_ciphertext, payload_key_wrap_version,
+		 local_ciphertext_sha256, local_payload_size, payload_key_ciphertext,
 		 payload_key_version, packer, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
 		release.ReleaseID, release.PayloadID, release.PayloadVersion, release.PackageName,
 		release.VersionCode, release.CertificateDigestsJSON, release.CertificateSetSHA256,
 		release.BusinessDexSHA256, release.ResourcesSHA256, release.NativeLibsSHA256,
 		release.ReleaseBuildSHA256, release.PlaintextSHA256, release.LocalCiphertextSHA256,
-		release.LocalPayloadSize, release.PayloadKeyCiphertext, release.PayloadKeyWrapVersion, release.PayloadKeyVersion,
+		release.LocalPayloadSize, release.PayloadKeyCiphertext, release.PayloadKeyVersion,
 		release.Packer, now, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -314,14 +313,14 @@ func UpdateRelease(ctx context.Context, db *sql.DB, release NewRelease, expected
 		payload_id=?, payload_version=?, certificate_sha256_digests_json=?,
 		certificate_set_sha256=?, business_dex_sha256=?, resources_sha256=?,
 		native_libs_sha256=?, release_build_sha256=?, plaintext_sha256=?,
-		local_ciphertext_sha256=?, local_payload_size=?, payload_key_ciphertext=?, payload_key_wrap_version=?,
+		local_ciphertext_sha256=?, local_payload_size=?, payload_key_ciphertext=?,
 		payload_key_version=?, packer=?, updated_at=?
 		WHERE release_id=? AND status='DRAFT' AND payload_key_version=?`,
 		release.PayloadID, release.PayloadVersion, release.CertificateDigestsJSON,
 		release.CertificateSetSHA256, release.BusinessDexSHA256, release.ResourcesSHA256,
 		release.NativeLibsSHA256, release.ReleaseBuildSHA256, release.PlaintextSHA256,
 		release.LocalCiphertextSHA256, release.LocalPayloadSize, release.PayloadKeyCiphertext,
-		release.PayloadKeyWrapVersion, release.PayloadKeyVersion, release.Packer, now,
+		release.PayloadKeyVersion, release.Packer, now,
 		release.ReleaseID, expectedKeyVersion)
 	if err != nil {
 		return err
@@ -608,7 +607,7 @@ func AddOperationLog(ctx context.Context, db *sql.DB, operation, requestID, deta
 const releaseSelect = `SELECT release_id, payload_id, payload_version, package_name, version_code,
 	certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
 	resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
-	local_ciphertext_sha256, local_payload_size, payload_key_ciphertext, payload_key_wrap_version,
+	local_ciphertext_sha256, local_payload_size, payload_key_ciphertext,
 	payload_key_version, packer, delivery_count, draft_delivery_charged,
 	status, created_at, updated_at, published_at, revoked_at
 	FROM payload_releases`
@@ -628,7 +627,7 @@ func scanRelease(row scanner) (Release, error) {
 		&value.VersionCode, &value.CertificateDigestsJSON, &value.CertificateSetSHA256,
 		&value.BusinessDexSHA256, &value.ResourcesSHA256, &value.NativeLibsSHA256,
 		&value.ReleaseBuildSHA256, &value.PlaintextSHA256, &value.LocalCiphertextSHA256,
-		&value.LocalPayloadSize, &value.PayloadKeyCiphertext, &value.PayloadKeyWrapVersion, &value.PayloadKeyVersion,
+		&value.LocalPayloadSize, &value.PayloadKeyCiphertext, &value.PayloadKeyVersion,
 		&value.Packer, &value.DeliveryCount, &value.DraftDeliveryCharged, &value.Status,
 		&value.CreatedAt, &value.UpdatedAt, &value.PublishedAt, &value.RevokedAt)
 	if err == nil {
@@ -655,8 +654,8 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("initialize company schema: %w", err)
 	}
-	if err := migrateLocalPayloadSchema(ctx, db); err != nil {
-		return fmt.Errorf("migrate company schema: %w", err)
+	if err := validateSchemaV6(ctx, db); err != nil {
+		return fmt.Errorf("validate company schema: %w", err)
 	}
 	for table, description := range tableDescriptions {
 		if _, err := db.ExecContext(ctx, `INSERT INTO schema_descriptions(table_name, description)
@@ -667,91 +666,24 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func migrateLocalPayloadSchema(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(payload_releases)`)
-	if err != nil {
+func validateSchemaV6(ctx context.Context, db *sql.DB) error {
+	var version, requiredColumns int
+	if err := db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta LIMIT 1`).Scan(&version); err != nil {
 		return err
 	}
-	hasCanonicalPayload := false
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			rows.Close()
-			return err
-		}
-		hasCanonicalPayload = hasCanonicalPayload || name == "canonical_payload"
+	if version != 6 {
+		return fmt.Errorf("schema version %d is unsupported; version 6 is required", version)
 	}
-	if err := rows.Close(); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('payload_releases')
+		WHERE name IN ('local_ciphertext_sha256','local_payload_size','payload_key_ciphertext')`).
+		Scan(&requiredColumns); err != nil {
 		return err
 	}
-	if !hasCanonicalPayload {
-		_, err = db.ExecContext(ctx, `UPDATE schema_meta SET schema_version=6, updated_at=unixepoch()`)
-		return err
+	if requiredColumns != 3 {
+		return errors.New("schema version 6 payload_releases columns are incomplete")
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	statements := []string{
-		`DROP INDEX IF EXISTS idx_payload_release_created`,
-		`ALTER TABLE payload_releases RENAME TO payload_releases_v5`,
-		payloadReleasesSchema,
-		`INSERT INTO payload_releases
-			(release_id, payload_id, payload_version, package_name, version_code,
-			 certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
-			 resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
-			 local_ciphertext_sha256, local_payload_size, payload_key_ciphertext, payload_key_wrap_version,
-			 payload_key_version, packer, delivery_count, draft_delivery_charged, status,
-			 created_at, updated_at, published_at, revoked_at)
-		 SELECT release_id, payload_id, payload_version, package_name, version_code,
-			 certificate_sha256_digests_json, certificate_set_sha256, business_dex_sha256,
-			 resources_sha256, native_libs_sha256, release_build_sha256, plaintext_sha256,
-			 '', 0, canonical_key_ciphertext, 1, payload_key_version, packer,
-			 delivery_count, draft_delivery_charged, status, created_at, updated_at, published_at, revoked_at
-		 FROM payload_releases_v5`,
-		`DROP TABLE payload_releases_v5`,
-		`CREATE INDEX idx_payload_release_created ON payload_releases(created_at DESC)`,
-		`UPDATE schema_meta SET schema_version=6, updated_at=unixepoch()`,
-	}
-	for _, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return nil
 }
-
-const payloadReleasesSchema = `CREATE TABLE payload_releases (
-    release_id TEXT PRIMARY KEY,
-    payload_id TEXT NOT NULL,
-    payload_version INTEGER NOT NULL,
-    package_name TEXT NOT NULL,
-    version_code INTEGER NOT NULL,
-    certificate_sha256_digests_json TEXT NOT NULL,
-    certificate_set_sha256 TEXT NOT NULL,
-    business_dex_sha256 TEXT NOT NULL,
-    resources_sha256 TEXT NOT NULL,
-    native_libs_sha256 TEXT NOT NULL,
-    release_build_sha256 TEXT NOT NULL,
-    plaintext_sha256 TEXT NOT NULL,
-    local_ciphertext_sha256 TEXT NOT NULL DEFAULT '',
-    local_payload_size INTEGER NOT NULL DEFAULT 0 CHECK(local_payload_size >= 0),
-    payload_key_ciphertext BLOB NOT NULL,
-    payload_key_wrap_version INTEGER NOT NULL DEFAULT 3,
-    payload_key_version INTEGER NOT NULL DEFAULT 1,
-    packer TEXT NOT NULL DEFAULT '' CHECK(length(packer) <= 64),
-    delivery_count INTEGER NOT NULL DEFAULT 0 CHECK(delivery_count >= 0),
-    draft_delivery_charged INTEGER NOT NULL DEFAULT 0 CHECK(draft_delivery_charged IN (0,1)),
-    status TEXT NOT NULL CHECK(status IN ('DRAFT','PUBLISHED','REVOKED')),
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    published_at INTEGER NOT NULL DEFAULT 0,
-    revoked_at INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(package_name, version_code)
-)`
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -806,7 +738,6 @@ CREATE TABLE IF NOT EXISTS payload_releases (
     local_ciphertext_sha256 TEXT NOT NULL DEFAULT '',
     local_payload_size INTEGER NOT NULL DEFAULT 0 CHECK(local_payload_size >= 0),
     payload_key_ciphertext BLOB NOT NULL,
-    payload_key_wrap_version INTEGER NOT NULL DEFAULT 3,
     payload_key_version INTEGER NOT NULL DEFAULT 1,
     packer TEXT NOT NULL DEFAULT '' CHECK(length(packer) <= 64),
     delivery_count INTEGER NOT NULL DEFAULT 0 CHECK(delivery_count >= 0),

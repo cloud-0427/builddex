@@ -357,6 +357,7 @@ public abstract class JiaguTask extends DefaultTask {
     private List<String> pluginSafetyRules() {
         return Arrays.asList(
                 "-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault,Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable",
+                "-repackageclasses 'io.github.xjc.jiagu.payload.r8'",
                 "-keep class * extends android.app.Application { *; }",
                 "-keep class * extends android.app.Activity { *; }",
                 "-keep class * extends android.app.Service { *; }",

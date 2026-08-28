@@ -112,12 +112,13 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
                             task.getBootClasspath().from(androidComponents.getSdkComponents().getBootClasspath());
                             task.getProguardFiles().from(variant.getProguardFiles());
+                            task.dependsOn(project.getTasks().matching(t -> t.getName().equals("extractProguardFiles")));
                             task.getNativeInputs().from(project.fileTree(project.getProjectDir(), spec -> {
                                 spec.include("src/**/jniLibs/**/*.so");
                             }));
                             task.getNativeInputs().from(project.fileTree(
                                     project.getLayout().getBuildDirectory(), spec -> {
-                                        spec.include("intermediates/cxx/**/obj/**/*.so");
+                                        spec.include("intermediates/cmake/" + variantName + "/obj/**/*.so");
                                         spec.exclude("**/liblog_ext.so");
                                     }));
                             project.getConfigurations().matching(configuration ->
@@ -192,7 +193,7 @@ public final class DexReportPlugin implements Plugin<Project> {
                                     spec.include("src/**/jniLibs/**/*.so")));
                             task.getNativeInputs().from(project.fileTree(
                                     project.getLayout().getBuildDirectory(), spec -> {
-                                        spec.include("intermediates/cxx/**/obj/**/*.so");
+                                        spec.include("intermediates/cmake/" + variantName + "/obj/**/*.so");
                                         spec.exclude("**/liblog_ext.so");
                                     }));
                             project.getConfigurations().matching(configuration ->

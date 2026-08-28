@@ -44,6 +44,7 @@ R8 是 Variant 自身的可选能力，不由加固插件强制开启：
 - `minifyEnabled=false`：业务 JAR 走 D8；
 - `minifyEnabled=true`：使用目标 Variant 的 ProGuard/R8 文件、依赖 consumer rules、minSdk、debuggable 和 boot classpath；
 - 插件只追加壳运行所需的最小安全保留规则，不替换 App 配置；
+- 业务 R8 的重命名结果隔离到 `io.github.xjc.jiagu.payload.r8`，避免它与壳 APK 的独立 R8 输出产生同名类描述符；目标 App 的 keep、裁剪和优化规则仍然生效；
 - R8 输出业务 mapping 到 `build/intermediates/jiagu/<variant>/business-mapping.txt`。
 
 ## 3. 构建协议
@@ -119,7 +120,7 @@ AUTHORIZE 验证 Credential、设备签名、Release、撤销和可选 Integrity
 
 `payload_releases` 只保存 Release/构建身份字段、明文与本地密文摘要、JGLP 大小、受主密钥保护的 Payload Key、状态和计数。不保存 JG3、JGLP、DEX BLOB 或每设备 Payload 文件。
 
-Schema v6 会保留旧 Canonical Key 密文以支持重新构建同一 Release，并删除 `canonical_payload` 与 `canonical_ciphertext_sha256` 列。升级前必须备份数据库；旧协议 APK 因下载接口被移除而不再兼容，需要用新插件重新构建。
+服务端只接受已经升级完成的 Schema v6，不再包含运行时自动迁移代码。数据库中不得存在 `canonical_payload` 与 `canonical_ciphertext_sha256` 列。旧协议 APK 因下载接口被移除而不再兼容，需要用新插件重新构建。
 
 ## 7. 安全边界
 
@@ -131,7 +132,7 @@ Schema v6 会保留旧 Canonical Key 密文以支持重新构建同一 Release�
 
 ## 8. 验证要求
 
-- Go 全量测试覆盖 prepare、seal、enroll、authorize、Key RSA 解封、下载接口 404、配额和 schema v5→v6 迁移；
+- Go 全量测试覆盖 prepare、seal、enroll、authorize、Key RSA 解封、下载接口 404、配额和 schema 版本拒绝；
 - 插件单测和 Runtime 四 ABI 编译通过；
 - Debug/Release 实际构建应在 `liblog_ext.so` 中发现 JGRC 和 JGLP；
 - 服务端 Release 列表的 `localPayloadSize` 应与 JGLP 长度一致；

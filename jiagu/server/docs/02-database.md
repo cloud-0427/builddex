@@ -19,7 +19,6 @@
 | local_ciphertext_sha256 | APK 内 JGLP 完整容器摘要 |
 | local_payload_size | APK 内 JGLP 字节数 |
 | payload_key_ciphertext | 公司 KEK 保护后的 32 字节 Payload Key |
-| payload_key_wrap_version | Key 封装协议版本；新数据为 3，旧数据迁移后为 1 |
 | payload_key_version | DRAFT 内容变化时递增 |
 | status | DRAFT / PUBLISHED / REVOKED |
 | packer / delivery_count | 构建机器和 Key 下发计数 |
@@ -33,19 +32,9 @@
 - DEX 或 APK Payload BLOB；
 - 每设备 Payload 文件。
 
-## Schema v5 → v6
+## Schema 版本要求
 
-数据库打开时自动迁移：
-
-1. 重建 `payload_releases`；
-2. 保留 Release 元数据和 `canonical_key_ciphertext`；
-3. 把旧 Key 标记为 `payload_key_wrap_version=1`；
-4. 删除 `canonical_payload` 和 `canonical_ciphertext_sha256`；
-5. 将 `local_ciphertext_sha256` 和 `local_payload_size` 初始化为空，等待新版插件重新构建并 seal。
-
-迁移会永久移除服务端 Payload BLOB。生产升级前必须同时备份数据库和 `JIAGU_MASTER_KEY_B64`。
-
-旧 PUBLISHED Release 可以在构建摘要完全一致时由新版插件取回原 Key、生成本地 JGLP 并 seal；旧协议 APK 依赖已删除的下载接口，无法继续使用。
+服务端只接受已经升级完成的 Schema v6，不执行运行时结构迁移。Schema 不是 6，或者缺少本地 Payload/Key 字段时，数据库打开会明确失败。Payload Key 只支持 v3 封装域；历史 v1 Key 不再兼容。
 
 ## 其他表
 

@@ -958,23 +958,13 @@ func (a *API) protectPayloadKey(companyID string, release *store.Release, key []
 		return err
 	}
 	release.PayloadKeyCiphertext = wrapped
-	release.PayloadKeyWrapVersion = 3
 	return nil
 }
 
 func (a *API) unprotectPayloadKey(companyID string, release store.Release) ([]byte, error) {
-	var companyKEK, aad []byte
-	switch release.PayloadKeyWrapVersion {
-	case 1:
-		companyKEK = secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "canonical-key-wrap-v1")
-		aad = canonical("CANONICAL-KEY-V1", companyID, release.ReleaseID)
-	case 3:
-		companyKEK = secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "payload-key-wrap-v3")
-		aad = canonical("PAYLOAD-KEY-V3", companyID, release.ReleaseID)
-	default:
-		return nil, errors.New("unsupported payload key wrap version")
-	}
-	key, err := secure.DecryptAESGCM(companyKEK, release.PayloadKeyCiphertext, aad)
+	companyKEK := secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "payload-key-wrap-v3")
+	key, err := secure.DecryptAESGCM(companyKEK, release.PayloadKeyCiphertext,
+		canonical("PAYLOAD-KEY-V3", companyID, release.ReleaseID))
 	if err != nil || len(key) != 32 {
 		clear(key)
 		return nil, errors.New("payload key unwrap failed")
