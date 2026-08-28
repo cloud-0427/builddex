@@ -13,9 +13,11 @@ dexReport {
     // 支持 "assemble" (默认), "bundle" (生成AAB), "install" (安装) 等。
     attachToTask = "assemble"
 
-    serverUrl = "http://192.168.111.115:8761"
+//    serverUrl = "http://192.168.111.115:8761"
     companyId = "acme"
-    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
+//    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
+    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
+
     // 加固密钥是否发布，发布后此版本不能再修改
     publish = true
     // debug 检测，测试关闭，线上可以打开，默认是打开的
@@ -46,8 +48,8 @@ android {
         applicationId "lows.dgeon.ightr.jiagu"
         minSdk 29
         targetSdk 36
-        versionCode 14
-        versionName "1.0.14"
+        versionCode 15
+        versionName "1.0.15"
 
         multiDexEnabled false
 

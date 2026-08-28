@@ -450,17 +450,25 @@ public final class NetworkHelper {
         connection.setReadTimeout(HTTP_TIMEOUT_MS);
         connection.setDoOutput(true);
         connection.setUseCaches(false);
+        // Keep this local to Jiagu requests. Disabling JVM-wide keep-alive would
+        // affect every HTTP client in the host application.
+        disableConnectionReuse(connection);
         connection.setRequestProperty("Content-Type", "application/json");
         connection.setRequestProperty("Accept", "application/json, application/octet-stream");
         connection.setFixedLengthStreamingMode(body.length);
-        try (OutputStream output = connection.getOutputStream()) {
-            output.write(body);
+        int status;
+        byte[] response;
+        try {
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+            status = connection.getResponseCode();
+            InputStream input = status >= 200 && status < 300
+                    ? connection.getInputStream() : connection.getErrorStream();
+            response = readLimited(input, maxResponseBytes);
+        } finally {
+            connection.disconnect();
         }
-        int status = connection.getResponseCode();
-        InputStream input = status >= 200 && status < 300
-                ? connection.getInputStream() : connection.getErrorStream();
-        byte[] response = readLimited(input, maxResponseBytes);
-        connection.disconnect();
         if (status < 200 || status >= 300) {
             String code = "HTTP_" + status;
             String message = "request rejected";
@@ -474,6 +482,10 @@ public final class NetworkHelper {
             throw new SecurityException("Jiagu server rejected request: " + code + ": " + message);
         }
         return response;
+    }
+
+    static void disableConnectionReuse(HttpURLConnection connection) {
+        connection.setRequestProperty("Connection", "close");
     }
 
     private static byte[] readLimited(InputStream input, int limit) throws Exception {

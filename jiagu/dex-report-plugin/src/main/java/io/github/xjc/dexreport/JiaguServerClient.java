@@ -76,7 +76,7 @@ final class JiaguServerClient {
                 "\"nativeLibsSha256\":" + json(nativeLibsSha256) + "," +
                 "\"payloadPlaintextSha256\":" + json(localHash) + "}";
         String response = request("POST", companyPath() + "/pack/releases",
-                "application/json", requestJson.getBytes(StandardCharsets.UTF_8), true);
+                "application/json", requestJson.getBytes(StandardCharsets.UTF_8), true, true);
         Release release = new Release();
         release.releaseId = stringField(response, "releaseId");
         release.payloadId = stringField(response, "payloadId");
@@ -162,11 +162,38 @@ final class JiaguServerClient {
 
     private String request(String method, String path, String contentType,
                            byte[] body, boolean companyAuth) throws IOException {
+        return request(method, path, contentType, body, companyAuth, false);
+    }
+
+    private String request(String method, String path, String contentType,
+                           byte[] body, boolean companyAuth,
+                           boolean retryBeforeResponse) throws IOException {
+        try {
+            return requestOnce(method, path, contentType, body, companyAuth);
+        } catch (NoResponseException firstFailure) {
+            if (!retryBeforeResponse) {
+                throw firstFailure;
+            }
+            try {
+                return requestOnce(method, path, contentType, body, companyAuth);
+            } catch (IOException retryFailure) {
+                retryFailure.addSuppressed(firstFailure);
+                throw retryFailure;
+            }
+        }
+    }
+
+    private String requestOnce(String method, String path, String contentType,
+                               byte[] body, boolean companyAuth) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(serverUrl + path).openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
         connection.setReadTimeout(READ_TIMEOUT_MS);
         connection.setUseCaches(false);
+        // Some VPN/proxy gateways truncate later responses on a reused HTTPS
+        // connection. Scope the workaround to Jiagu traffic instead of disabling
+        // keep-alive for the entire Gradle daemon.
+        connection.setRequestProperty("Connection", "close");
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("User-Agent", "Jiagu-Gradle-Plugin/1");
         if (companyAuth) {
@@ -191,14 +218,18 @@ final class JiaguServerClient {
             status = connection.getResponseCode();
         } catch (IOException error) {
             connection.disconnect();
-            throw new IOException("Jiagu server request failed before an HTTP response was received: "
+            throw new NoResponseException("Jiagu server request failed before an HTTP response was received: "
                     + method + " " + path + ": " + error.getMessage(),
                     requestBodyError == null ? error : requestBodyError);
         }
-        InputStream stream = status >= 200 && status < 300
-                ? connection.getInputStream() : connection.getErrorStream();
-        String response = stream == null ? "" : new String(readAll(stream), StandardCharsets.UTF_8);
-        connection.disconnect();
+        String response;
+        try {
+            InputStream stream = status >= 200 && status < 300
+                    ? connection.getInputStream() : connection.getErrorStream();
+            response = stream == null ? "" : new String(readAll(stream), StandardCharsets.UTF_8);
+        } finally {
+            connection.disconnect();
+        }
         if (status < 200 || status >= 300) {
             String code = optionalStringField(response, "code");
             String message = optionalStringField(response, "message");
@@ -230,6 +261,12 @@ final class JiaguServerClient {
                     + ": " + requestBodyError.getMessage(), requestBodyError);
         }
         return response;
+    }
+
+    private static final class NoResponseException extends IOException {
+        NoResponseException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     private static void textPart(ByteArrayOutputStream output, String boundary,

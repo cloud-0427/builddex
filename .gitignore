@@ -38,3 +38,4 @@ jiagu/dex-report-plugin/bin/main/
 jiagu/server/cmd/jiagu-server/__debug_bin.exe
 jiagu/.vscode/launch.json
 jiagu/server/jiagu-server
+jiagu/dex-report-plugin/bin/test/
