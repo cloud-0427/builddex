@@ -56,9 +56,12 @@ public final class NetworkHelper {
 
     private NetworkHelper() {}
 
-    /** Authorizes the device, decrypts the APK-local payload and returns verified JG3 plaintext. */
-    public static byte[] getAuthorizedPayload(Context context, String runtimeConfigJson,
-                                              byte[] localPayload) {
+    /**
+     * Authorizes the device and decrypts the APK-local payload into one direct buffer.
+     * The native ELF mapping is consumed directly, avoiding whole-payload JNI byte[] copies.
+     */
+    public static ByteBuffer getAuthorizedPayload(Context context, String runtimeConfigJson,
+                                                  ByteBuffer localPayload) {
         StrictMode.ThreadPolicy previous = StrictMode.getThreadPolicy();
         StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().permitAll().build());
         try {
@@ -72,12 +75,12 @@ public final class NetworkHelper {
             String deviceId = sha256(concat(
                     signing.getPublic().getEncoded(), wrapping.getPublic().getEncoded()));
 
-            String credential = loadCredential(context, config, deviceId,
+            String credential = loadCredential(context, config, app.actualCertificateSha256, deviceId,
                     signPublicKey, wrapPublicKey);
             if (credential == null) {
                 credential = enroll(context, config, app.actualCertificateSha256,
                         signing, signPublicKey, wrapPublicKey, deviceId);
-                saveCredential(context, config, credential);
+                saveCredential(context, config, app.actualCertificateSha256, credential);
             }
 
             Authorization authorization = loadAuthorization(context, config, deviceId, wrapping.getPrivate());
@@ -171,26 +174,30 @@ public final class NetworkHelper {
         return key;
     }
 
-    private static byte[] decryptLocalPayload(Config config, byte[] payloadKey,
-                                              byte[] container) throws Exception {
+    private static ByteBuffer decryptLocalPayload(Config config, byte[] payloadKey,
+                                                  ByteBuffer localPayload) throws Exception {
+        ByteBuffer plaintext = null;
+        boolean succeeded = false;
         try {
-            if (container.length != config.localPayloadSize ||
-                    !config.localCiphertextSha256.equals(sha256(container)) ||
-                    container.length < 40 || container[0] != 'J' || container[1] != 'G' ||
-                    container[2] != 'L' || container[3] != 'P') {
+            if (localPayload == null || !localPayload.isDirect()) {
+                throw new SecurityException("local payload must use direct memory");
+            }
+            ByteBuffer container = localPayload.duplicate();
+            container.position(0);
+            if (container.remaining() != config.localPayloadSize ||
+                    !config.localCiphertextSha256.equals(sha256(container.duplicate())) ||
+                    container.remaining() < 40 || container.get(0) != 'J' || container.get(1) != 'G' ||
+                    container.get(2) != 'L' || container.get(3) != 'P') {
                 throw new SecurityException("invalid local payload binding");
             }
-            ByteBuffer buffer = ByteBuffer.wrap(container);
-            buffer.position(4);
-            int version = buffer.getInt();
-            int encryptedLength = buffer.getInt();
-            if (version != 1 || encryptedLength < 28 || encryptedLength != buffer.remaining()) {
+            container.position(4);
+            int version = container.getInt();
+            int encryptedLength = container.getInt();
+            if (version != 1 || encryptedLength < 28 || encryptedLength != container.remaining()) {
                 throw new SecurityException("invalid local payload header");
             }
             byte[] nonce = new byte[12];
-            buffer.get(nonce);
-            byte[] ciphertext = new byte[buffer.remaining()];
-            buffer.get(ciphertext);
+            container.get(nonce);
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(payloadKey, "AES"),
                     new GCMParameterSpec(128, nonce));
@@ -200,13 +207,23 @@ public final class NetworkHelper {
                     Long.toString(config.versionCode), config.certificateSetSha256,
                     config.releaseBuildSha256,
                     config.payloadPlaintextSha256, Long.toString(config.payloadKeyVersion))));
-            byte[] plaintext = cipher.doFinal(ciphertext);
-            if (!config.payloadPlaintextSha256.equals(sha256(plaintext))) {
-                Arrays.fill(plaintext, (byte) 0);
+            plaintext = ByteBuffer.allocateDirect(cipher.getOutputSize(container.remaining()));
+            cipher.doFinal(container, plaintext);
+            plaintext.flip();
+            ByteBuffer result = plaintext.slice();
+            if (!config.payloadPlaintextSha256.equals(sha256(result.duplicate()))) {
+                clear(result);
                 throw new SecurityException("payload plaintext hash mismatch");
             }
-            return plaintext;
+            succeeded = true;
+            return result;
         } finally {
+            if (!succeeded && plaintext != null) {
+                ByteBuffer sensitive = plaintext.duplicate();
+                sensitive.position(0);
+                sensitive.limit(sensitive.capacity());
+                clear(sensitive);
+            }
             Arrays.fill(payloadKey, (byte) 0);
         }
     }
@@ -299,9 +316,10 @@ public final class NetworkHelper {
         }
     }
 
-    private static String loadCredential(Context context, Config config, String deviceId,
+    private static String loadCredential(Context context, Config config, String actualCertificateSha256,
+                                         String deviceId,
                                          String signPublicKey, String wrapPublicKey) {
-        String key = sha256Unchecked(bytes(config.companyId + "|" + config.releaseId));
+        String key = credentialPreferenceKey(config, actualCertificateSha256);
         String token = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(key, null);
         if (token == null) {
@@ -317,10 +335,16 @@ public final class NetworkHelper {
         }
     }
 
-    private static void saveCredential(Context context, Config config, String token) {
-        String key = sha256Unchecked(bytes(config.companyId + "|" + config.releaseId));
+    private static void saveCredential(Context context, Config config,
+                                       String actualCertificateSha256, String token) {
+        String key = credentialPreferenceKey(config, actualCertificateSha256);
         SharedPreferences preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         preferences.edit().putString(key, token).apply();
+    }
+
+    private static String credentialPreferenceKey(Config config, String actualCertificateSha256) {
+        return sha256Unchecked(bytes(canonical("DEVICE-CREDENTIAL-CACHE-V2", config.companyId,
+                config.packageName, actualCertificateSha256)));
     }
 
     private static Authorization loadAuthorization(Context context, Config config,
@@ -493,6 +517,18 @@ public final class NetworkHelper {
 
     private static String sha256(byte[] value) throws Exception {
         return b64(MessageDigest.getInstance("SHA-256").digest(value));
+    }
+
+    private static String sha256(ByteBuffer value) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        digest.update(value);
+        return b64(digest.digest());
+    }
+
+    private static void clear(ByteBuffer value) {
+        for (int i = value.position(); i < value.limit(); i++) {
+            value.put(i, (byte) 0);
+        }
     }
 
     private static String sha256Unchecked(byte[] value) {

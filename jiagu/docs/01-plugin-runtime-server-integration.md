@@ -112,7 +112,11 @@ RuntimeConfig v3 新增 `localCiphertextSha256` 和 `localPayloadSize`，并固�
 
 ENROLL 保留一次性 challenge、ECDSA 设备签名、实际应用身份绑定和可选 Play Integrity，成功后返回签名 Device Credential。
 
+Device Credential 按 `companyId + packageName + 实际签名证书` 缓存，不绑定 `releaseId`。同一公司、包名和证书升级到新 Release 时复用有效 Credential，只重新执行 AUTHORIZE；证书变化、Credential 过期或校验失败时才重新 ENROLL。
+
 AUTHORIZE 验证 Credential、设备签名、Release、撤销和可选 Integrity；服务端解封 Release Payload Key，再用设备 RSA 公钥做 OAEP-SHA1 封装。Runtime 验证签名 Grant，用 Android Keystore RSA 私钥解封，然后校验本地 JGLP 摘要、AES-GCM tag 和 JG3 明文摘要。
+
+Runtime 将 ELF 只读映射中的 JGLP 直接暴露为 `DirectByteBuffer`，AES-GCM 明文也写入直接内存，再由 Native 原位解析 JG3 并解压到最终 DEX Buffer；不再为整个 Payload 创建 native vector、JNI `byte[]`、Java ciphertext 数组和回传副本。
 
 不存在 `/unpack/download`。AUTHORIZE 成功即视为一次 Key 下发并执行 delivery 计数；DRAFT 同一 Release 只首次消耗公司额度，PUBLISHED 每次新授权消耗额度。有效 Grant 与 wrapped Key 可以缓存，默认 7 天内普通启动无需访问网络。
 

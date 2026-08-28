@@ -1,7 +1,8 @@
 {
   "dataDir": "data/prod/companies",
-  "integrityMode": "google",
+  "integrityMode": "disabled",
   "logging": {
+    "console": false,
     "level": "info",
     "format": "json",
     "directory": "logs/prod"

@@ -301,54 +301,75 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         return;
     }
     std::string runtime_config(reinterpret_cast<const char*>(bundle_source + 16), config_length);
-    std::vector<uint8_t> local_payload(bundle_source + 16 + config_length,
-                                       bundle_source + bundle_length);
-    dlclose(payload_handle);
+    const uint8_t* local_payload_source = bundle_source + 16 + config_length;
 
-    // 3. Java 层完成 Keystore、Integrity、Credential/Grant 验证、设备 Key 解封和 JGPD 解密。
+    // 3. Java handles Keystore, authorization and AES-GCM from mapped direct memory.
     jclass network_helper = env->FindClass("io/github/xjc/jiagu/NetworkHelper");
-    JNI_CHECK_NULL(network_helper, "NetworkHelper class not found", );
+    if (!network_helper) {
+        LOGE("Jiagu_Native: NetworkHelper class not found");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        dlclose(payload_handle);
+        return;
+    }
     jmethodID get_payload_mid = env->GetStaticMethodID(
-            network_helper, "getAuthorizedPayload", "(Landroid/content/Context;Ljava/lang/String;[B)[B");
-    JNI_CHECK_NULL(get_payload_mid, "getAuthorizedPayload method not found", );
+            network_helper, "getAuthorizedPayload",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;");
+    if (!get_payload_mid) {
+        LOGE("Jiagu_Native: getAuthorizedPayload method not found");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        dlclose(payload_handle);
+        return;
+    }
     jstring runtime_config_j = env->NewStringUTF(runtime_config.c_str());
-    jbyteArray local_payload_j = env->NewByteArray(static_cast<jsize>(local_payload.size()));
-    JNI_CHECK_NULL(local_payload_j, "Failed to allocate local payload array", );
-    env->SetByteArrayRegion(local_payload_j, 0, static_cast<jsize>(local_payload.size()),
-                            reinterpret_cast<const jbyte*>(local_payload.data()));
-    jbyteArray payload_array = (jbyteArray)env->CallStaticObjectMethod(
-            network_helper, get_payload_mid, context, runtime_config_j, local_payload_j);
+    if (!runtime_config_j) {
+        LOGE("Jiagu_Native: Failed to allocate RuntimeConfig string");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        dlclose(payload_handle);
+        return;
+    }
+    jobject local_payload_buffer = env->NewDirectByteBuffer(
+            const_cast<uint8_t*>(local_payload_source), static_cast<jlong>(local_payload_length));
+    if (!local_payload_buffer) {
+        LOGE("Jiagu_Native: Failed to expose mapped local payload");
+        dlclose(payload_handle);
+        return;
+    }
+    jobject payload_buffer = env->CallStaticObjectMethod(
+            network_helper, get_payload_mid, context, runtime_config_j, local_payload_buffer);
     if (env->ExceptionCheck()) {
         env->ExceptionDescribe();
         env->ExceptionClear();
     }
-    JNI_CHECK_NULL(payload_array, "device authorization returned no payload", );
-    jsize payload_length = env->GetArrayLength(payload_array);
-    if (payload_length < 8 || payload_length > 128 * 1024 * 1024) {
-        LOGE("Jiagu_Native: Invalid authorized payload size: %d", payload_length);
+    // Java has finished consuming the mapped ciphertext; its plaintext buffer is independent.
+    dlclose(payload_handle);
+    JNI_CHECK_NULL(payload_buffer, "device authorization returned no payload", );
+    void* decrypted_payload_address = env->GetDirectBufferAddress(payload_buffer);
+    jlong payload_capacity = env->GetDirectBufferCapacity(payload_buffer);
+    if (!decrypted_payload_address || payload_capacity < 8 || payload_capacity > 128 * 1024 * 1024) {
+        LOGE("Jiagu_Native: Invalid authorized payload buffer: %lld",
+             static_cast<long long>(payload_capacity));
         return;
     }
-    std::vector<char> full_buffer(static_cast<size_t>(payload_length));
-    env->GetByteArrayRegion(payload_array, 0, payload_length,
-                            reinterpret_cast<jbyte*>(full_buffer.data()));
+    const char* full_buffer = static_cast<const char*>(decrypted_payload_address);
+    size_t full_buffer_size = static_cast<size_t>(payload_capacity);
 
-    if (std::memcmp(full_buffer.data(), "JG3\0", 4) != 0) {
+    if (std::memcmp(full_buffer, "JG3\0", 4) != 0) {
         LOGE("Jiagu_Native: Invalid payload magic");
         return;
     }
 
     size_t offset = 4;
-    int dex_count = read_int_be(full_buffer.data(), offset);
+    int dex_count = read_int_be(full_buffer, offset);
     if (dex_count <= 0 || dex_count > 128 ||
-            offset + static_cast<size_t>(dex_count) * 12 > full_buffer.size()) {
+            offset + static_cast<size_t>(dex_count) * 12 > full_buffer_size) {
         LOGE("Jiagu_Native: Invalid DEX count: %d", dex_count);
         return;
     }
 
-    unsigned char* meta_data_ptr = reinterpret_cast<unsigned char*>(full_buffer.data());
+    const unsigned char* meta_data_ptr = reinterpret_cast<const unsigned char*>(full_buffer);
     size_t meta_offset = offset;
     size_t body_start = offset + static_cast<size_t>(dex_count) * 12;
-    size_t body_size = full_buffer.size() - body_start;
+    size_t body_size = full_buffer_size - body_start;
 
     jclass byte_buffer_class = env->FindClass("java/nio/ByteBuffer");
     JNI_CHECK_NULL(byte_buffer_class, "ByteBuffer class not found", );
@@ -386,7 +407,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         }
 
         const unsigned char* dex_ptr = reinterpret_cast<const unsigned char*>(
-                full_buffer.data() + body_start + static_cast<size_t>(dex_offset));
+                full_buffer + body_start + static_cast<size_t>(dex_offset));
         jobject bb = env->CallStaticObjectMethod(
                 byte_buffer_class, allocate_direct, static_cast<jint>(dex_plain_size));
         JNI_CHECK_NULL(bb, "DEX buffer allocation failed", );

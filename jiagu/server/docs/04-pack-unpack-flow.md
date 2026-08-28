@@ -29,6 +29,8 @@ AAD = canonical("PAYLOAD-KEY-V3", companyId, releaseId)
 5. `integrityMode=google` 时获取 Play Integrity Standard token。
 6. 服务端验证 challenge、设备签名、Release、证书和可选 Integrity，返回 Ed25519 签名 Credential。
 
+Credential 客户端缓存作用域为公司、包名和实际签名证书，不包含 Release。后续版本只要上述身份不变且 Credential 有效，就跳过 ENROLL，直接为新 Release 执行 AUTHORIZE。
+
 ## Key 授权与本地解密
 
 1. 获取 AUTHORIZE challenge。
@@ -38,8 +40,8 @@ AAD = canonical("PAYLOAD-KEY-V3", companyId, releaseId)
 5. 服务端返回 Ed25519 签名 Grant 和 wrapped Key，同时增加 Key 下发计数。
 6. Runtime 验证 Grant 对 Release、JGLP 摘要和 wrapped Key 的绑定。
 7. Runtime 用 Android Keystore RSA 私钥解封 Payload Key。
-8. Runtime 校验 JGLP 完整容器摘要，使用 `LOCAL-PAYLOAD-V3` AAD 做 AES-GCM 解密。
-9. Runtime 校验 JG3 明文摘要，只在内存中解压并加载业务 DEX。
+8. Runtime 通过 ELF 映射对应的 `DirectByteBuffer` 校验 JGLP 完整容器摘要，使用 `LOCAL-PAYLOAD-V3` AAD 做 AES-GCM 解密，明文直接写入直接内存。
+9. Runtime 校验 JG3 明文摘要，Native 直接解析该 Buffer，并只在内存中解压和加载业务 DEX。
 
 有效 Grant 与 wrapped Key 缓存在私有 SharedPreferences。默认 Grant 为 7 天，因此普通启动可以直接解封本地 JGLP，不需要网络；Grant 过期、Release/KeyVersion 变化或缓存失效时才重新 AUTHORIZE。
 
