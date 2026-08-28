@@ -2,7 +2,7 @@
   "listenAddr": ":8761",
   "maxPayloadMB": 64,
   "challengeTTLSeconds": 180,
-  "grantTTLSeconds": 600,
+  "grantTTLSeconds": 604800,
   "deviceCredentialTTLSeconds": 2592000,
   "logging": {
     "console": true,

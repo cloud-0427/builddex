@@ -1,0 +1,44 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="200dp"
+    android:height="200dp"
+    android:viewportWidth="200"
+    android:viewportHeight="200">
+
+    <!-- 透明背景 (系统主题将提供黑色背景) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M0,0h200v200h-200z" />
+
+    <!-- 模拟的加粗文字路径 (改为白色以适应黑色背景) -->
+    <group
+        android:translateX="50"
+        android:translateY="70">
+        <!-- H 的左柱 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M10,0 h15 v60 h-15 Z" />
+        <!-- H 的右柱 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M45,0 h15 v60 h-15 Z" />
+        <!-- H 的横梁 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M25,22 h20 v15 h-20 Z" />
+
+        <!-- i 的主体 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M75,20 h15 v40 h-15 Z" />
+        <!-- i 的点 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M75,0 h15 v10 h-15 Z" />
+    </group>
+
+    <!-- 底部辅助线条 -->
+    <path
+        android:fillColor="#03DAC5"
+        android:pathData="M40,150 h120 v8 h-120 Z" />
+
+</vector>

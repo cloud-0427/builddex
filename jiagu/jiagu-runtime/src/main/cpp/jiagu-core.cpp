@@ -276,25 +276,48 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         return;
     }
 
-    const uint8_t* config_source = payload_address();
-    size_t config_length = payload_size();
-    if (!config_source || config_length < 32 || config_length > 64 * 1024) {
-        LOGE("Jiagu_Native: RuntimeConfig ELF returned invalid data");
+    const uint8_t* bundle_source = payload_address();
+    size_t bundle_length = payload_size();
+    if (!bundle_source || bundle_length < 56 || bundle_length > 129 * 1024 * 1024 ||
+            std::memcmp(bundle_source, "JGRC", 4) != 0) {
+		LOGE("Jiagu_Native: Runtime bundle ELF returned invalid data");
         dlclose(payload_handle);
         return;
     }
-    std::string runtime_config(reinterpret_cast<const char*>(config_source), config_length);
+    auto read_u32 = [bundle_source](size_t offset) -> uint32_t {
+        return (static_cast<uint32_t>(bundle_source[offset]) << 24) |
+               (static_cast<uint32_t>(bundle_source[offset + 1]) << 16) |
+               (static_cast<uint32_t>(bundle_source[offset + 2]) << 8) |
+               static_cast<uint32_t>(bundle_source[offset + 3]);
+    };
+    uint32_t bundle_version = read_u32(4);
+    uint32_t config_length = read_u32(8);
+    uint32_t local_payload_length = read_u32(12);
+    if (bundle_version != 1 || config_length < 32 || config_length > 256 * 1024 ||
+            local_payload_length < 40 || local_payload_length > 128 * 1024 * 1024 ||
+            16ULL + config_length + local_payload_length != bundle_length) {
+        LOGE("Jiagu_Native: Runtime bundle header is invalid");
+        dlclose(payload_handle);
+        return;
+    }
+    std::string runtime_config(reinterpret_cast<const char*>(bundle_source + 16), config_length);
+    std::vector<uint8_t> local_payload(bundle_source + 16 + config_length,
+                                       bundle_source + bundle_length);
     dlclose(payload_handle);
 
     // 3. Java 层完成 Keystore、Integrity、Credential/Grant 验证、设备 Key 解封和 JGPD 解密。
     jclass network_helper = env->FindClass("io/github/xjc/jiagu/NetworkHelper");
     JNI_CHECK_NULL(network_helper, "NetworkHelper class not found", );
     jmethodID get_payload_mid = env->GetStaticMethodID(
-            network_helper, "getAuthorizedPayload", "(Landroid/content/Context;Ljava/lang/String;)[B");
+            network_helper, "getAuthorizedPayload", "(Landroid/content/Context;Ljava/lang/String;[B)[B");
     JNI_CHECK_NULL(get_payload_mid, "getAuthorizedPayload method not found", );
     jstring runtime_config_j = env->NewStringUTF(runtime_config.c_str());
+    jbyteArray local_payload_j = env->NewByteArray(static_cast<jsize>(local_payload.size()));
+    JNI_CHECK_NULL(local_payload_j, "Failed to allocate local payload array", );
+    env->SetByteArrayRegion(local_payload_j, 0, static_cast<jsize>(local_payload.size()),
+                            reinterpret_cast<const jbyte*>(local_payload.data()));
     jbyteArray payload_array = (jbyteArray)env->CallStaticObjectMethod(
-            network_helper, get_payload_mid, context, runtime_config_j);
+            network_helper, get_payload_mid, context, runtime_config_j, local_payload_j);
     if (env->ExceptionCheck()) {
         env->ExceptionDescribe();
         env->ExceptionClear();

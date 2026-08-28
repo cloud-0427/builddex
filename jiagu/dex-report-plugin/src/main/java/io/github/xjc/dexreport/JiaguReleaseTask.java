@@ -24,6 +24,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -40,6 +41,11 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+
+import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 /** Creates/updates the server release only after final resources are available. */
 @DisableCachingByDefault(because = "Creates server-side state and embeds release identity")
@@ -106,18 +112,63 @@ public abstract class JiaguReleaseTask extends DefaultTask {
                 payload, "app-main", versionCode, getPackageName().get(), versionCode,
                 certificates, businessDexSha256, resourcesSha256, nativeLibsSha256);
 
-        File runtimeConfig = File.createTempFile("jiagu_runtime_config", ".json");
+        File runtimeBundle = File.createTempFile("jiagu_runtime_bundle", ".bin");
         try {
-            Files.write(runtimeConfig.toPath(), runtimeConfigJson(
-                    serverUrl, companyId, publicConfig, release).getBytes(StandardCharsets.UTF_8));
-            buildPayloadLibraries(runtimeConfig, getOutJniLibsDir().get().getAsFile());
+            byte[] localPayload = encryptLocalPayload(Files.readAllBytes(payload.toPath()), companyId, release);
+            String localCiphertextSha256 = JiaguServerClient.sha256(localPayload);
+            if (release.localCiphertextSha256 != null && !release.localCiphertextSha256.isEmpty() &&
+                    !release.localCiphertextSha256.equals(localCiphertextSha256)) {
+                throw new IOException("Existing release local payload digest mismatch; increase versionCode");
+            }
+            client.sealRelease(release, localCiphertextSha256, localPayload.length);
+            byte[] runtimeConfig = runtimeConfigJson(serverUrl, companyId, publicConfig, release)
+                    .getBytes(StandardCharsets.UTF_8);
+            Files.write(runtimeBundle.toPath(), runtimeBundle(runtimeConfig, localPayload));
+            Arrays.fill(localPayload, (byte) 0);
+            buildPayloadLibraries(runtimeBundle, getOutJniLibsDir().get().getAsFile());
         } finally {
-            Files.deleteIfExists(runtimeConfig.toPath());
+            if (release.payloadKey != null) Arrays.fill(release.payloadKey, (byte) 0);
+            Files.deleteIfExists(runtimeBundle.toPath());
         }
         writeReleaseMetadata(release);
         getLogger().lifecycle(getPublish().get()
                 ? "[Jiagu] Release {} 将在本次构建全部成功后发布"
                 : "[Jiagu] Release {} 保持 DRAFT 状态", release.releaseId);
+    }
+
+    private byte[] encryptLocalPayload(byte[] plaintext, String companyId,
+                                       JiaguServerClient.Release release) throws IOException {
+        try {
+            byte[] aad = canonical("LOCAL-PAYLOAD-V3", companyId, release.releaseId, release.payloadId,
+                    Long.toString(release.payloadVersion), release.packageName, Long.toString(release.versionCode),
+                    release.certificateSetSha256, release.releaseBuildSha256, release.plaintextSha256,
+                    Long.toString(release.payloadKeyVersion)).getBytes(StandardCharsets.UTF_8);
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(release.payloadKey, "HmacSHA256"));
+            byte[] nonceSource = mac.doFinal(aad);
+            byte[] nonce = Arrays.copyOf(nonceSource, 12);
+            Arrays.fill(nonceSource, (byte) 0);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(release.payloadKey, "AES"),
+                    new GCMParameterSpec(128, nonce));
+            cipher.updateAAD(aad);
+            byte[] ciphertext = cipher.doFinal(plaintext);
+            ByteBuffer result = ByteBuffer.allocate(24 + ciphertext.length);
+            result.put(new byte[]{'J', 'G', 'L', 'P'}).putInt(1).putInt(12 + ciphertext.length);
+            result.put(nonce).put(ciphertext);
+            Arrays.fill(ciphertext, (byte) 0);
+            return result.array();
+        } catch (Exception error) {
+            throw new IOException("Unable to encrypt local Jiagu payload", error);
+        } finally {
+            Arrays.fill(plaintext, (byte) 0);
+        }
+    }
+
+    private static byte[] runtimeBundle(byte[] config, byte[] localPayload) {
+        return ByteBuffer.allocate(16 + config.length + localPayload.length)
+                .put(new byte[]{'J', 'G', 'R', 'C'}).putInt(1).putInt(config.length).putInt(localPayload.length)
+                .put(config).put(localPayload).array();
     }
 
     private String hashResourcePackage() throws IOException {
@@ -331,7 +382,7 @@ public abstract class JiaguReleaseTask extends DefaultTask {
     private String runtimeConfigJson(String serverUrl, String companyId,
                                      JiaguServerClient.PublicConfig config, JiaguServerClient.Release release) {
         return "{" +
-                "\"configVersion\":2," +
+                "\"configVersion\":3," +
                 "\"serverUrl\":" + JiaguServerClient.json(serverUrl) + "," +
                 "\"companyId\":" + JiaguServerClient.json(companyId) + "," +
                 "\"releaseId\":" + JiaguServerClient.json(release.releaseId) + "," +
@@ -346,6 +397,8 @@ public abstract class JiaguReleaseTask extends DefaultTask {
                 "\"nativeLibsSha256\":" + JiaguServerClient.json(release.nativeLibsSha256) + "," +
                 "\"releaseBuildSha256\":" + JiaguServerClient.json(release.releaseBuildSha256) + "," +
                 "\"payloadPlaintextSha256\":" + JiaguServerClient.json(release.plaintextSha256) + "," +
+                "\"localCiphertextSha256\":" + JiaguServerClient.json(release.localCiphertextSha256) + "," +
+                "\"localPayloadSize\":" + release.localPayloadSize + "," +
                 "\"payloadKeyVersion\":" + release.payloadKeyVersion + "," +
                 "\"serverKeyId\":" + JiaguServerClient.json(config.serverKeyId) + "," +
                 "\"serverPublicKey\":" + JiaguServerClient.json(config.serverPublicKey) + "," +

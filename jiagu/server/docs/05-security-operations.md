@@ -10,7 +10,7 @@
 | JIAGU_MASTER_KEY_B64 | 见下文 | 至少 32 随机字节的 Base64；google 模式必填 |
 | JIAGU_MAX_PAYLOAD_MB | `64` | 单 Payload 最大 MB |
 | JIAGU_CHALLENGE_TTL_SECONDS | `180` | challenge 有效期 |
-| JIAGU_GRANT_TTL_SECONDS | `600` | 下载 Grant 有效期 |
+| JIAGU_GRANT_TTL_SECONDS | `604800` | Payload Key Grant 有效期，默认 7 天 |
 | JIAGU_DEVICE_CREDENTIAL_TTL_SECONDS | `2592000` | 设备 Credential 有效期，默认 30 天 |
 | JIAGU_INTEGRITY_MODE | `disabled` | `disabled` 或 `google` |
 | GOOGLE_APPLICATION_CREDENTIALS | 无 | Google 模式使用的服务账号 JSON 路径 |
@@ -94,13 +94,13 @@ Release 保存排序去重后的允许证书集合。APK/Debug 默认使用本�
 
 - 单实例；
 - 公司数量有限；
-- 同一公司打包和下载并发中低；
+- 同一公司构建和设备授权并发中低；
 - 核心 Payload 控制在几十 MB。
 
 不适合：
 
 - 多实例共同写网络共享盘；
-- 单公司数百到数千并发大文件下载；
+- 单公司数百到数千并发授权请求；
 - 超大 Payload 长期保存在数据库 BLOB；
 - 跨地域强一致部署。
 

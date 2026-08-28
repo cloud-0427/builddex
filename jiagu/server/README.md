@@ -1,6 +1,6 @@
 # Jiagu 单体授权服务
 
-这是 Jiagu 的服务端最小实现，默认监听 `8761` 端口。服务负责公司授权、Payload 打包、设备凭证、Play Integrity 校验、设备 Key 派生、密钥封装、设备专属 Payload 生成、撤销和计数。
+这是 Jiagu 的服务端实现，默认监听 `8761` 端口。服务负责公司授权、Release 元数据、Payload Key 托管、设备凭证、Play Integrity 校验、设备 Key 封装、撤销和计数。业务 Payload 加密后内置于 APK，服务端不接收、不保存也不提供下载。
 
 主要约束：
 

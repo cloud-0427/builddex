@@ -19,9 +19,6 @@ import org.json.JSONObject;
 import org.json.JSONArray;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -59,8 +56,9 @@ public final class NetworkHelper {
 
     private NetworkHelper() {}
 
-    /** Executes ENROLL/AUTHORIZE/download and returns verified JG3 plaintext only. */
-    public static byte[] getAuthorizedPayload(Context context, String runtimeConfigJson) {
+    /** Authorizes the device, decrypts the APK-local payload and returns verified JG3 plaintext. */
+    public static byte[] getAuthorizedPayload(Context context, String runtimeConfigJson,
+                                              byte[] localPayload) {
         StrictMode.ThreadPolicy previous = StrictMode.getThreadPolicy();
         StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().permitAll().build());
         try {
@@ -89,27 +87,7 @@ public final class NetworkHelper {
                 saveAuthorization(context, config, authorization);
             }
 
-            File cache = payloadCacheFile(context, config, deviceId);
-            byte[] container = readPayloadCache(cache);
-            if (container == null) {
-                container = downloadPayload(config, authorization.grant);
-                savePayloadCache(cache, container);
-            }
-            byte[] retryKey = Arrays.copyOf(authorization.payloadKey,
-                    authorization.payloadKey.length);
-            try {
-                return decryptContainer(config, authorization.grantClaims,
-                        authorization.payloadKey, container);
-            } catch (Exception invalidCache) {
-                if (!cache.delete()) {
-                    Log.w(TAG, "Unable to delete invalid payload cache");
-                }
-                byte[] fresh = downloadPayload(config, authorization.grant);
-                savePayloadCache(cache, fresh);
-                return decryptContainer(config, authorization.grantClaims, retryKey, fresh);
-            } finally {
-                Arrays.fill(retryKey, (byte) 0);
-            }
+            return decryptLocalPayload(config, authorization.payloadKey, localPayload);
         } catch (Throwable error) {
             Log.e(TAG, "Device authorization failed", error);
             return null;
@@ -193,19 +171,21 @@ public final class NetworkHelper {
         return key;
     }
 
-    private static byte[] decryptContainer(Config config, JSONObject grant,
-                                           byte[] payloadKey, byte[] container) throws Exception {
+    private static byte[] decryptLocalPayload(Config config, byte[] payloadKey,
+                                              byte[] container) throws Exception {
         try {
-            if (container.length < 12 || container[0] != 'J' || container[1] != 'G' ||
-                    container[2] != 'P' || container[3] != 'D') {
-                throw new SecurityException("invalid JGPD magic");
+            if (container.length != config.localPayloadSize ||
+                    !config.localCiphertextSha256.equals(sha256(container)) ||
+                    container.length < 40 || container[0] != 'J' || container[1] != 'G' ||
+                    container[2] != 'L' || container[3] != 'P') {
+                throw new SecurityException("invalid local payload binding");
             }
             ByteBuffer buffer = ByteBuffer.wrap(container);
             buffer.position(4);
             int version = buffer.getInt();
             int encryptedLength = buffer.getInt();
             if (version != 1 || encryptedLength < 28 || encryptedLength != buffer.remaining()) {
-                throw new SecurityException("invalid JGPD header");
+                throw new SecurityException("invalid local payload header");
             }
             byte[] nonce = new byte[12];
             buffer.get(nonce);
@@ -214,10 +194,10 @@ public final class NetworkHelper {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(payloadKey, "AES"),
                     new GCMParameterSpec(128, nonce));
-            cipher.updateAAD(bytes(canonical("DEVICE-PAYLOAD-V2", config.companyId,
-                    grant.getString("deviceId"), config.releaseId, config.payloadId,
+            cipher.updateAAD(bytes(canonical("LOCAL-PAYLOAD-V3", config.companyId,
+                    config.releaseId, config.payloadId,
                     Long.toString(config.payloadVersion), config.packageName,
-                    Long.toString(config.versionCode), grant.getString("certificateSha256"),
+                    Long.toString(config.versionCode), config.certificateSetSha256,
                     config.releaseBuildSha256,
                     config.payloadPlaintextSha256, Long.toString(config.payloadKeyVersion))));
             byte[] plaintext = cipher.doFinal(ciphertext);
@@ -310,6 +290,7 @@ public final class NetworkHelper {
                 !config.certificateSetSha256.equals(claims.getString("certificateSetSha256")) ||
                 !config.releaseBuildSha256.equals(claims.getString("releaseBuildSha256")) ||
                 !config.payloadPlaintextSha256.equals(claims.getString("payloadPlaintextSha256")) ||
+                !config.localCiphertextSha256.equals(claims.getString("localCiphertextSha256")) ||
                 config.payloadKeyVersion != claims.getLong("payloadKeyVersion") ||
                 !sha256(bytes(wrapped)).equals(claims.getString("wrappedPayloadKeySha256")) ||
                 claims.getLong("issuedAt") > System.currentTimeMillis() / 1000L + 60L ||
@@ -438,47 +419,6 @@ public final class NetworkHelper {
         return details;
     }
 
-    private static byte[] postBytes(String url, String json) throws Exception {
-        return request(url, json.getBytes(StandardCharsets.UTF_8), MAX_PAYLOAD_BYTES);
-    }
-
-    private static byte[] downloadPayload(Config config, String grant) throws Exception {
-        return postBytes(config.downloadUrl(), new JSONObject().put("grant", grant).toString());
-    }
-
-    private static File payloadCacheFile(Context context, Config config, String deviceId) {
-        File directory = new File(context.getNoBackupFilesDir(), "jiagu_payloads");
-        if (!directory.isDirectory() && !directory.mkdirs()) {
-            throw new IllegalStateException("cannot create Jiagu payload cache directory");
-        }
-        String name = sha256Unchecked(bytes(config.companyId + "|" + config.releaseId +
-                "|" + deviceId + "|" + config.payloadPlaintextSha256));
-        return new File(directory, name + ".jgpd");
-    }
-
-    private static byte[] readPayloadCache(File file) throws Exception {
-        if (!file.isFile() || file.length() < 40 || file.length() > MAX_PAYLOAD_BYTES) {
-            return null;
-        }
-        try (FileInputStream input = new FileInputStream(file)) {
-            return readLimited(input, MAX_PAYLOAD_BYTES);
-        }
-    }
-
-    private static void savePayloadCache(File target, byte[] value) throws Exception {
-        File temporary = new File(target.getParentFile(), target.getName() + ".tmp");
-        try (FileOutputStream output = new FileOutputStream(temporary)) {
-            output.write(value);
-            output.getFD().sync();
-        }
-        if (target.exists() && !target.delete()) {
-            throw new IllegalStateException("cannot replace Jiagu payload cache");
-        }
-        if (!temporary.renameTo(target)) {
-            throw new IllegalStateException("cannot commit Jiagu payload cache");
-        }
-    }
-
     private static byte[] request(String url, byte[] body, int maxResponseBytes) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         connection.setRequestMethod("POST");
@@ -600,6 +540,8 @@ public final class NetworkHelper {
         String nativeLibsSha256;
         String releaseBuildSha256;
         String payloadPlaintextSha256;
+        String localCiphertextSha256;
+        int localPayloadSize;
         long payloadKeyVersion;
         String serverKeyId;
         String serverPublicKey;
@@ -609,7 +551,7 @@ public final class NetworkHelper {
 
         static Config parse(String json) throws Exception {
             JSONObject value = new JSONObject(json);
-            if (value.getInt("configVersion") != 2) {
+            if (value.getInt("configVersion") != 3) {
                 throw new SecurityException("unsupported RuntimeConfig version");
             }
             Config config = new Config();
@@ -632,6 +574,8 @@ public final class NetworkHelper {
             config.nativeLibsSha256 = value.getString("nativeLibsSha256");
             config.releaseBuildSha256 = value.getString("releaseBuildSha256");
             config.payloadPlaintextSha256 = value.getString("payloadPlaintextSha256");
+            config.localCiphertextSha256 = value.getString("localCiphertextSha256");
+            config.localPayloadSize = value.getInt("localPayloadSize");
             config.payloadKeyVersion = value.getLong("payloadKeyVersion");
             config.serverKeyId = value.getString("serverKeyId");
             config.serverPublicKey = value.getString("serverPublicKey");
@@ -641,6 +585,7 @@ public final class NetworkHelper {
             if (config.serverUrl.isEmpty() || config.companyId.isEmpty() ||
                     config.releaseId.isEmpty() || config.serverPublicKey.isEmpty() ||
                     config.certificateSha256Digests.isEmpty() || config.releaseBuildSha256.isEmpty() ||
+                    config.localCiphertextSha256.isEmpty() || config.localPayloadSize < 40 ||
                     !"RSA-OAEP-SHA1".equals(config.wrapAlgorithm)) {
                 throw new SecurityException("incomplete RuntimeConfig");
             }
@@ -649,10 +594,6 @@ public final class NetworkHelper {
 
         String basePath() {
             return serverUrl + "/api/v1/companies/" + companyId;
-        }
-
-        String downloadUrl() {
-            return basePath() + "/unpack/download";
         }
 
         void verifyApp(AppIdentity app) {

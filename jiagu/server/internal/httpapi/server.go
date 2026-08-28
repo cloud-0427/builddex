@@ -1,17 +1,13 @@
 package httpapi
 
 import (
-	"bytes"
-	"compress/zlib"
 	"context"
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -59,6 +55,7 @@ type payloadGrant struct {
 	CertificateSetSHA256    string `json:"certificateSetSha256"`
 	ReleaseBuildSHA256      string `json:"releaseBuildSha256"`
 	PayloadPlaintextSHA256  string `json:"payloadPlaintextSha256"`
+	LocalCiphertextSHA256   string `json:"localCiphertextSha256"`
 	PayloadKeyVersion       int64  `json:"payloadKeyVersion"`
 	WrappedPayloadKeySHA256 string `json:"wrappedPayloadKeySha256"`
 	WrapLabel               string `json:"wrapLabel"`
@@ -95,13 +92,13 @@ func (a *API) routes() {
 	a.mux.HandleFunc("GET /api/v1/companies/{companyId}/pack/auth-check", a.checkCompanyAuth)
 	a.mux.HandleFunc("GET /api/v1/companies/{companyId}/pack/releases", a.listReleases)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/pack/releases", a.createRelease)
+	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/seal", a.sealRelease)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish", a.publishRelease)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/revoke", a.revokeRelease)
 
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/challenges", a.createChallenge)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/enroll", a.enrollDevice)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/authorize", a.authorizePayload)
-	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/download", a.downloadPayload)
 
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/admin/revocations", a.addRevocation)
 	apiNotFound := func(w http.ResponseWriter, r *http.Request) {
@@ -373,87 +370,84 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "COMPANY_NOT_AUTHORIZED", "company authorization is inactive")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, a.cfg.MaxPayloadBytes+(2<<20))
-	if err := r.ParseMultipartForm(2 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_MULTIPART", err.Error())
+	var input struct {
+		PayloadID                string   `json:"payloadId"`
+		PayloadVersion           int64    `json:"payloadVersion"`
+		PackageName              string   `json:"packageName"`
+		VersionCode              int64    `json:"versionCode"`
+		Packer                   string   `json:"packer"`
+		CertificateSHA256Digests []string `json:"certificateSha256Digests"`
+		BusinessDexSHA256        string   `json:"businessDexSha256"`
+		ResourcesSHA256          string   `json:"resourcesSha256"`
+		NativeLibsSHA256         string   `json:"nativeLibsSha256"`
+		PayloadPlaintextSHA256   string   `json:"payloadPlaintextSha256"`
+	}
+	if !decodeJSON(w, r, &input, 1<<20) {
 		return
 	}
-	file, _, err := r.FormFile("payload")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "PAYLOAD_REQUIRED", "multipart field payload is required")
-		return
-	}
-	defer file.Close()
-	plaintext, err := io.ReadAll(io.LimitReader(file, a.cfg.MaxPayloadBytes+1))
-	if err != nil || int64(len(plaintext)) > a.cfg.MaxPayloadBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "payload exceeds configured limit")
-		return
-	}
-	defer clear(plaintext)
-	versionCode, err1 := strconv.ParseInt(r.FormValue("versionCode"), 10, 64)
-	payloadVersion, err2 := strconv.ParseInt(r.FormValue("payloadVersion"), 10, 64)
-	payloadID := strings.TrimSpace(r.FormValue("payloadId"))
-	packageName := strings.TrimSpace(r.FormValue("packageName"))
-	packer := truncateRunes(strings.TrimSpace(r.FormValue("packer")), 64)
-	certificates, certificateJSON, certificateSetHash, certErr := normalizeCertificateDigests(r.MultipartForm.Value["certificateSha256Digest"])
-	if len(plaintext) == 0 || err1 != nil || err2 != nil || versionCode <= 0 || payloadVersion != versionCode ||
-		payloadID != "app-main" || packageName == "" || certErr != nil {
-		message := "payloadId=app-main, payloadVersion=versionCode, packageName, versionCode, certificateSha256Digest and payload are required"
+	input.PayloadID = strings.TrimSpace(input.PayloadID)
+	input.PackageName = strings.TrimSpace(input.PackageName)
+	input.Packer = truncateRunes(strings.TrimSpace(input.Packer), 64)
+	certificates, certificateJSON, certificateSetHash, certErr := normalizeCertificateDigests(input.CertificateSHA256Digests)
+	if input.VersionCode <= 0 || input.PayloadVersion != input.VersionCode || input.PayloadID != "app-main" ||
+		input.PackageName == "" || certErr != nil {
+		message := "payloadId=app-main, payloadVersion=versionCode, packageName, versionCode and certificateSha256Digests are required"
 		if certErr != nil {
 			message = certErr.Error()
 		}
 		writeError(w, http.StatusBadRequest, "INVALID_RELEASE", message)
 		return
 	}
-	businessHash := strings.TrimSpace(r.FormValue("businessDexSha256"))
-	resourcesHash := strings.TrimSpace(r.FormValue("resourcesSha256"))
-	nativeHash := strings.TrimSpace(r.FormValue("nativeLibsSha256"))
+	businessHash := strings.TrimSpace(input.BusinessDexSHA256)
+	resourcesHash := strings.TrimSpace(input.ResourcesSHA256)
+	nativeHash := strings.TrimSpace(input.NativeLibsSHA256)
+	plaintextHash := strings.TrimSpace(input.PayloadPlaintextSHA256)
 	for name, value := range map[string]string{
-		"businessDexSha256": businessHash, "resourcesSha256": resourcesHash, "nativeLibsSha256": nativeHash,
+		"businessDexSha256": businessHash, "resourcesSha256": resourcesHash,
+		"nativeLibsSha256": nativeHash, "payloadPlaintextSha256": plaintextHash,
 	} {
 		if !validSHA256URL(value) {
 			writeError(w, http.StatusBadRequest, "INVALID_DIGEST", name+" must be a 32-byte SHA-256 Base64URL value")
 			return
 		}
 	}
-	calculatedBusinessHash, err := businessDexHashFromJG3(plaintext)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_PAYLOAD", err.Error())
-		return
-	}
-	if calculatedBusinessHash != businessHash {
-		writeErrorDetails(w, http.StatusBadRequest, "BUSINESS_DEX_HASH_MISMATCH",
-			"businessDexSha256 does not match the uploaded JG3 payload", map[string]any{})
-		return
-	}
 	releaseBuildHash := secure.SHA256URL(canonical("JIAGU-RELEASE-BUILD-V1", businessHash, resourcesHash, nativeHash))
 	requested := store.Release{
-		PayloadID: payloadID, PayloadVersion: payloadVersion, PackageName: packageName, VersionCode: versionCode,
+		PayloadID: input.PayloadID, PayloadVersion: input.PayloadVersion, PackageName: input.PackageName, VersionCode: input.VersionCode,
 		CertificateSHA256Digests: certificates, CertificateDigestsJSON: certificateJSON,
 		CertificateSetSHA256: certificateSetHash, BusinessDexSHA256: businessHash,
 		ResourcesSHA256: resourcesHash, NativeLibsSHA256: nativeHash, ReleaseBuildSHA256: releaseBuildHash,
-		PlaintextSHA256: secure.SHA256URL(plaintext), Packer: packer,
+		PlaintextSHA256: plaintextHash, Packer: input.Packer,
 	}
 	companyID := r.PathValue("companyId")
 	for attempt := 0; attempt < 4; attempt++ {
-		existing, getErr := store.GetReleaseByVersion(r.Context(), db, packageName, versionCode)
+		existing, getErr := store.GetReleaseByVersion(r.Context(), db, input.PackageName, input.VersionCode)
 		if errors.Is(getErr, store.ErrNotFound) {
 			requested.ReleaseID, err = secure.RandomToken(18)
 			requested.PayloadKeyVersion = 1
-			if err = a.encryptCanonicalRelease(companyID, &requested, plaintext); err != nil {
+			key, keyErr := secure.RandomBytes(32)
+			if keyErr != nil {
+				writeInternal(w, keyErr)
+				return
+			}
+			if err = a.protectPayloadKey(companyID, &requested, key); err != nil {
+				clear(key)
 				writeInternal(w, err)
 				return
 			}
 			if err = store.CreateRelease(r.Context(), db, store.NewRelease{Release: requested}); errors.Is(err, store.ErrConflict) {
+				clear(key)
 				continue
 			} else if err != nil {
+				clear(key)
 				writeStoreError(w, err)
 				return
 			}
 			now := time.Now().Unix()
 			requested.Status, requested.CreatedAt, requested.UpdatedAt = "DRAFT", now, now
 			store.AddOperationLog(r.Context(), db, "PACK_CREATE", requestID(r.Context()), requested.ReleaseID, requested.Packer)
-			writeResponse(w, http.StatusCreated, "RELEASE_CREATED", "Draft release created.", releaseDetails(requested, "CREATED", false))
+			a.writePreparedRelease(w, http.StatusCreated, "RELEASE_CREATED", "Draft release prepared.", requested, "CREATED", false, key)
+			clear(key)
 			return
 		}
 		if getErr != nil {
@@ -463,7 +457,7 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 		if existing.Status == "REVOKED" {
 			writeErrorDetails(w, http.StatusConflict, "REVOKED_VERSION_REUSE_FORBIDDEN",
 				"A revoked application version cannot be reused. Increase versionCode.", map[string]any{
-					"packageName": packageName, "versionCode": versionCode,
+					"packageName": input.PackageName, "versionCode": input.VersionCode,
 				})
 			return
 		}
@@ -477,14 +471,20 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 				existing.Packer = requested.Packer
 				existing.UpdatedAt = time.Now().Unix()
 			}
-			writeResponse(w, http.StatusOK, "RELEASE_REUSED", "Existing release reused.", releaseDetails(existing, "REUSED", false))
+			key, unwrapErr := a.unprotectPayloadKey(companyID, existing)
+			if unwrapErr != nil {
+				writeInternal(w, unwrapErr)
+				return
+			}
+			a.writePreparedRelease(w, http.StatusOK, "RELEASE_REUSED", "Existing release prepared.", existing, "REUSED", false, key)
+			clear(key)
 			return
 		}
 		switch existing.Status {
 		case "PUBLISHED":
 			writeErrorDetails(w, http.StatusConflict, "PUBLISHED_VERSION_MODIFIED",
 				"Published application version cannot be modified. Increase versionCode.", map[string]any{
-					"packageName": packageName, "versionCode": versionCode, "changedComponents": changed,
+					"packageName": input.PackageName, "versionCode": input.VersionCode, "changedComponents": changed,
 				})
 			return
 		case "DRAFT":
@@ -492,18 +492,27 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 			updated.ReleaseID = existing.ReleaseID
 			updated.PayloadKeyVersion = existing.PayloadKeyVersion + 1
 			updated.CreatedAt = existing.CreatedAt
-			if err = a.encryptCanonicalRelease(companyID, &updated, plaintext); err != nil {
+			key, keyErr := secure.RandomBytes(32)
+			if keyErr != nil {
+				writeInternal(w, keyErr)
+				return
+			}
+			if err = a.protectPayloadKey(companyID, &updated, key); err != nil {
+				clear(key)
 				writeInternal(w, err)
 				return
 			}
 			if err = store.UpdateRelease(r.Context(), db, store.NewRelease{Release: updated}, existing.PayloadKeyVersion); errors.Is(err, store.ErrConflict) {
+				clear(key)
 				continue
 			} else if err != nil {
+				clear(key)
 				writeStoreError(w, err)
 				return
 			}
 			updated.Status, updated.UpdatedAt = "DRAFT", time.Now().Unix()
-			writeResponse(w, http.StatusOK, "RELEASE_UPDATED", "Draft release updated.", releaseDetails(updated, "UPDATED", true))
+			a.writePreparedRelease(w, http.StatusOK, "RELEASE_UPDATED", "Draft release prepared.", updated, "UPDATED", true, key)
+			clear(key)
 			return
 		default:
 			writeError(w, http.StatusConflict, "INVALID_RELEASE_STATUS", "release has an unsupported status")
@@ -511,6 +520,36 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeError(w, http.StatusConflict, "CONCURRENT_RELEASE_UPDATE", "release changed concurrently; retry the build")
+}
+
+func (a *API) sealRelease(w http.ResponseWriter, r *http.Request) {
+	db, ok := a.requireCompany(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		LocalCiphertextSHA256 string `json:"localCiphertextSha256"`
+		LocalPayloadSize      int64  `json:"localPayloadSize"`
+	}
+	if !decodeJSON(w, r, &input, 1<<20) {
+		return
+	}
+	if !validSHA256URL(input.LocalCiphertextSHA256) || input.LocalPayloadSize <= 40 ||
+		input.LocalPayloadSize > a.cfg.MaxPayloadBytes+64 {
+		writeError(w, http.StatusBadRequest, "INVALID_LOCAL_PAYLOAD", "local payload digest or size is invalid")
+		return
+	}
+	releaseID := r.PathValue("releaseId")
+	if err := store.SealLocalPayload(r.Context(), db, releaseID, input.LocalCiphertextSHA256, input.LocalPayloadSize); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	release, err := store.GetReleaseMetadata(r.Context(), db, releaseID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeResponse(w, http.StatusOK, "LOCAL_PAYLOAD_SEALED", "Local payload metadata sealed.", releaseDetails(release, "SEALED", false))
 }
 
 func (a *API) listReleases(w http.ResponseWriter, r *http.Request) {
@@ -609,7 +648,7 @@ func (a *API) enrollDevice(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input, 2<<20) {
 		return
 	}
-	release, ok := publishedReleaseMetadata(w, r, db, input.ReleaseID)
+	release, ok := publishedRelease(w, r, db, input.ReleaseID)
 	if !ok {
 		return
 	}
@@ -702,7 +741,7 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "DEVICE_REVOKED", "device is revoked")
 		return
 	}
-	release, ok := publishedReleaseMetadata(w, r, db, input.ReleaseID)
+	release, ok := publishedRelease(w, r, db, input.ReleaseID)
 	if !ok {
 		return
 	}
@@ -741,12 +780,16 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "INVALID_WRAP_KEY", err.Error())
 		return
 	}
-	deviceKey := deriveDeviceKeyForCertificate(a.cfg.MasterKey, companyID, credential.DeviceID, credential.CertificateSHA256, release)
+	payloadKey, err := a.unprotectPayloadKey(companyID, release)
+	if err != nil {
+		writeInternal(w, errors.New("cannot unwrap local payload key"))
+		return
+	}
 	grantID, _ := secure.RandomToken(18)
 	// Android KeyStore RSA-OAEP often does not support non-empty labels (P parameter).
 	// We use an empty label to ensure compatibility.
-	wrapped, err := secure.WrapRSAOAEP(wrapKey, deviceKey, nil)
-	clear(deviceKey)
+	wrapped, err := secure.WrapRSAOAEP(wrapKey, payloadKey, nil)
+	clear(payloadKey)
 	if err != nil {
 		writeInternal(w, err)
 		return
@@ -758,7 +801,8 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 		PayloadID: release.PayloadID, PayloadVersion: release.PayloadVersion, PackageName: release.PackageName,
 		VersionCode: release.VersionCode, CertificateSHA256: credential.CertificateSHA256,
 		CertificateSetSHA256: release.CertificateSetSHA256, ReleaseBuildSHA256: release.ReleaseBuildSHA256,
-		PayloadPlaintextSHA256: release.PlaintextSHA256, PayloadKeyVersion: release.PayloadKeyVersion,
+		PayloadPlaintextSHA256: release.PlaintextSHA256, LocalCiphertextSHA256: release.LocalCiphertextSHA256,
+		PayloadKeyVersion:       release.PayloadKeyVersion,
 		WrappedPayloadKeySHA256: secure.SHA256URL([]byte(wrapped)), WrapLabel: "",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(a.cfg.GrantTTL).Unix(),
 	}
@@ -767,81 +811,14 @@ func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, err)
 		return
 	}
-	writeResponse(w, http.StatusOK, "PAYLOAD_AUTHORIZED", "Payload access authorized.", map[string]any{
-		"grant": grantToken, "wrappedPayloadKey": wrapped, "wrapAlgorithm": "RSA-OAEP-SHA1",
-		"wrapLabel": "", "downloadPath": fmt.Sprintf("/api/v1/companies/%s/unpack/download", companyID),
-		"expiresAt": grant.ExpiresAt,
-	})
-}
-
-func (a *API) downloadPayload(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.openCompany(w, r)
-	if !ok {
-		return
-	}
-	var input struct {
-		Grant string `json:"grant"`
-	}
-	if !decodeJSON(w, r, &input, 1<<20) {
-		return
-	}
-	companyID := r.PathValue("companyId")
-	var grant payloadGrant
-	publicKey := secure.CompanySigningKey(a.cfg.MasterKey, companyID).Public().(ed25519.PublicKey)
-	if err := secure.VerifyJWS(publicKey, input.Grant, &grant); err != nil || grant.Type != "PAYLOAD_GRANT" ||
-		grant.CompanyID != companyID || grant.ExpiresAt < time.Now().Unix() {
-		writeError(w, http.StatusUnauthorized, "INVALID_GRANT", "payload grant is invalid or expired")
-		return
-	}
-	if revoked, err := store.IsRevoked(r.Context(), db, "DEVICE", grant.DeviceID); err != nil {
-		writeInternal(w, err)
-		return
-	} else if revoked {
-		writeError(w, http.StatusForbidden, "DEVICE_REVOKED", "device is revoked")
-		return
-	}
-	release, ok := publishedRelease(w, r, db, grant.ReleaseID)
-	if !ok {
-		return
-	}
-	if !grantMatchesRelease(grant, release) {
-		writeError(w, http.StatusForbidden, "GRANT_BINDING_MISMATCH", "grant does not match current release")
-		return
-	}
-	companyKEK := secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "canonical-key-wrap-v1")
-	canonicalKey, err := secure.DecryptAESGCM(companyKEK, release.CanonicalKeyCiphertext,
-		canonical("CANONICAL-KEY-V1", companyID, release.ReleaseID))
-	if err != nil {
-		writeInternal(w, errors.New("cannot unwrap canonical payload key"))
-		return
-	}
-	plaintext, err := secure.DecryptAESGCM(canonicalKey, release.CanonicalPayload, canonicalReleaseAAD(companyID, release))
-	clear(canonicalKey)
-	if err != nil || secure.SHA256URL(plaintext) != release.PlaintextSHA256 {
-		clear(plaintext)
-		writeInternal(w, errors.New("canonical payload verification failed"))
-		return
-	}
-	deviceKey := deriveDeviceKeyForCertificate(a.cfg.MasterKey, companyID, grant.DeviceID, grant.CertificateSHA256, release)
-	devicePayload, err := secure.EncryptAESGCM(deviceKey, plaintext, devicePayloadAAD(grant))
-	clear(deviceKey)
-	clear(plaintext)
-	if err != nil {
-		writeInternal(w, err)
-		return
-	}
 	if err := store.IncrementDelivery(r.Context(), db, release.ReleaseID); err != nil {
-		clear(devicePayload)
 		writeStoreError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", `attachment; filename="payload.jgpd"`)
-	w.Header().Set("X-Jiagu-Grant-Id", grant.GrantID)
-	w.Header().Set("X-Jiagu-Payload-SHA256", grant.PayloadPlaintextSHA256)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(deviceContainer(devicePayload))
-	clear(devicePayload)
+	writeResponse(w, http.StatusOK, "PAYLOAD_AUTHORIZED", "Payload access authorized.", map[string]any{
+		"grant": grantToken, "wrappedPayloadKey": wrapped, "wrapAlgorithm": "RSA-OAEP-SHA1",
+		"wrapLabel": "", "expiresAt": grant.ExpiresAt,
+	})
 }
 
 func (a *API) addRevocation(w http.ResponseWriter, r *http.Request) {
@@ -919,6 +896,10 @@ func availableRelease(w http.ResponseWriter, release store.Release, err error) (
 			})
 		return store.Release{}, false
 	}
+	if release.LocalCiphertextSHA256 == "" || release.LocalPayloadSize <= 0 {
+		writeError(w, http.StatusConflict, "LOCAL_PAYLOAD_NOT_SEALED", "release has no sealed local payload metadata")
+		return store.Release{}, false
+	}
 	return release, true
 }
 
@@ -970,59 +951,42 @@ func validSHA256URL(value string) bool {
 	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == value
 }
 
-func businessDexHashFromJG3(payload []byte) (string, error) {
-	if len(payload) < 8 || !bytes.Equal(payload[:4], []byte{'J', 'G', '3', 0}) {
-		return "", errors.New("payload is not a valid JG3 container")
+func (a *API) protectPayloadKey(companyID string, release *store.Release, key []byte) error {
+	companyKEK := secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "payload-key-wrap-v3")
+	wrapped, err := secure.EncryptAESGCM(companyKEK, key, canonical("PAYLOAD-KEY-V3", companyID, release.ReleaseID))
+	if err != nil {
+		return err
 	}
-	count := int(binary.BigEndian.Uint32(payload[4:8]))
-	if count <= 0 || count > 1024 || len(payload) < 8+count*12 {
-		return "", errors.New("JG3 dex table is invalid")
-	}
-	dataStart := 8 + count*12
-	values := []string{"JIAGU-BUSINESS-DEX-V1"}
-	for i := 0; i < count; i++ {
-		entry := 8 + i*12
-		offset := int(binary.BigEndian.Uint32(payload[entry : entry+4]))
-		compressedLength := int(binary.BigEndian.Uint32(payload[entry+4 : entry+8]))
-		plainLength := int(binary.BigEndian.Uint32(payload[entry+8 : entry+12]))
-		if offset < 0 || compressedLength <= 0 || plainLength <= 0 || dataStart+offset < dataStart ||
-			dataStart+offset+compressedLength > len(payload) {
-			return "", errors.New("JG3 dex entry bounds are invalid")
-		}
-		reader, err := zlib.NewReader(bytes.NewReader(payload[dataStart+offset : dataStart+offset+compressedLength]))
-		if err != nil {
-			return "", errors.New("JG3 dex entry compression is invalid")
-		}
-		dex, readErr := io.ReadAll(io.LimitReader(reader, int64(plainLength)+1))
-		closeErr := reader.Close()
-		if readErr != nil || closeErr != nil || len(dex) != plainLength {
-			return "", errors.New("JG3 dex entry length is invalid")
-		}
-		name := "classes.dex"
-		if i > 0 {
-			name = fmt.Sprintf("classes%d.dex", i+1)
-		}
-		values = append(values, name, strconv.Itoa(len(dex)), secure.SHA256URL(dex))
-		clear(dex)
-	}
-	return secure.SHA256URL(canonical(values...)), nil
+	release.PayloadKeyCiphertext = wrapped
+	release.PayloadKeyWrapVersion = 3
+	return nil
 }
 
-func (a *API) encryptCanonicalRelease(companyID string, release *store.Release, plaintext []byte) error {
-	key, err := secure.RandomBytes(32)
-	if err != nil {
-		return err
+func (a *API) unprotectPayloadKey(companyID string, release store.Release) ([]byte, error) {
+	var companyKEK, aad []byte
+	switch release.PayloadKeyWrapVersion {
+	case 1:
+		companyKEK = secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "canonical-key-wrap-v1")
+		aad = canonical("CANONICAL-KEY-V1", companyID, release.ReleaseID)
+	case 3:
+		companyKEK = secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "payload-key-wrap-v3")
+		aad = canonical("PAYLOAD-KEY-V3", companyID, release.ReleaseID)
+	default:
+		return nil, errors.New("unsupported payload key wrap version")
 	}
-	defer clear(key)
-	release.CanonicalPayload, err = secure.EncryptAESGCM(key, plaintext, canonicalReleaseAAD(companyID, *release))
-	if err != nil {
-		return err
+	key, err := secure.DecryptAESGCM(companyKEK, release.PayloadKeyCiphertext, aad)
+	if err != nil || len(key) != 32 {
+		clear(key)
+		return nil, errors.New("payload key unwrap failed")
 	}
-	release.CanonicalCipherSHA256 = secure.SHA256URL(release.CanonicalPayload)
-	companyKEK := secure.DeriveCompanyKey(a.cfg.MasterKey, companyID, "canonical-key-wrap-v1")
-	release.CanonicalKeyCiphertext, err = secure.EncryptAESGCM(companyKEK, key,
-		canonical("CANONICAL-KEY-V1", companyID, release.ReleaseID))
-	return err
+	return key, nil
+}
+
+func (a *API) writePreparedRelease(w http.ResponseWriter, status int, code, message string,
+	release store.Release, operation string, keyRotated bool, key []byte) {
+	details := releaseDetails(release, operation, keyRotated)
+	details["payloadKey"] = base64.StdEncoding.EncodeToString(key)
+	writeResponse(w, status, code, message, details)
 }
 
 func changedReleaseComponents(existing, requested store.Release) []string {
@@ -1063,6 +1027,7 @@ func releaseDetails(release store.Release, operation string, keyRotated bool) ma
 		"certificateSetSha256":     release.CertificateSetSHA256, "businessDexSha256": release.BusinessDexSHA256,
 		"resourcesSha256": release.ResourcesSHA256, "nativeLibsSha256": release.NativeLibsSHA256,
 		"releaseBuildSha256": release.ReleaseBuildSHA256, "payloadPlaintextSha256": release.PlaintextSHA256,
+		"localCiphertextSha256": release.LocalCiphertextSHA256, "localPayloadSize": release.LocalPayloadSize,
 		"payloadKeyVersion": release.PayloadKeyVersion, "deliveryCount": release.DeliveryCount, "status": release.Status,
 		"createdAt": release.CreatedAt, "updatedAt": release.UpdatedAt,
 		"publishedAt": release.PublishedAt, "revokedAt": release.RevokedAt,
@@ -1079,32 +1044,13 @@ func containsString(values []string, expected string) bool {
 	return false
 }
 
-func deriveDeviceKeyForCertificate(master []byte, companyID, deviceID, actualCertificate string, release store.Release) []byte {
-	return secure.DeriveDevicePayloadKeyV2(master, companyID, deviceID, release.ReleaseID, release.PayloadID,
-		strconv.FormatInt(release.PayloadVersion, 10), release.PackageName, strconv.FormatInt(release.VersionCode, 10),
-		actualCertificate, release.ReleaseBuildSHA256, release.PlaintextSHA256, strconv.FormatInt(release.PayloadKeyVersion, 10))
-}
-
-func canonicalReleaseAAD(companyID string, release store.Release) []byte {
-	return canonical("CANONICAL-PAYLOAD-V2", companyID, release.ReleaseID, release.PayloadID,
-		strconv.FormatInt(release.PayloadVersion, 10), release.PackageName, strconv.FormatInt(release.VersionCode, 10),
-		release.CertificateSetSHA256, release.ReleaseBuildSHA256, release.PlaintextSHA256,
-		strconv.FormatInt(release.PayloadKeyVersion, 10))
-}
-
-func devicePayloadAAD(grant payloadGrant) []byte {
-	return canonical("DEVICE-PAYLOAD-V2", grant.CompanyID, grant.DeviceID, grant.ReleaseID, grant.PayloadID,
-		strconv.FormatInt(grant.PayloadVersion, 10), grant.PackageName, strconv.FormatInt(grant.VersionCode, 10),
-		grant.CertificateSHA256, grant.ReleaseBuildSHA256, grant.PayloadPlaintextSHA256,
-		strconv.FormatInt(grant.PayloadKeyVersion, 10))
-}
-
 func grantMatchesRelease(grant payloadGrant, release store.Release) bool {
 	return grant.ReleaseID == release.ReleaseID && grant.PayloadID == release.PayloadID &&
 		grant.PayloadVersion == release.PayloadVersion && grant.PackageName == release.PackageName &&
 		grant.VersionCode == release.VersionCode && containsString(release.CertificateSHA256Digests, grant.CertificateSHA256) &&
 		grant.CertificateSetSHA256 == release.CertificateSetSHA256 && grant.ReleaseBuildSHA256 == release.ReleaseBuildSHA256 &&
-		grant.PayloadPlaintextSHA256 == release.PlaintextSHA256 && grant.PayloadKeyVersion == release.PayloadKeyVersion
+		grant.PayloadPlaintextSHA256 == release.PlaintextSHA256 && grant.LocalCiphertextSHA256 == release.LocalCiphertextSHA256 &&
+		grant.PayloadKeyVersion == release.PayloadKeyVersion
 }
 
 func canonical(values ...string) []byte {
@@ -1116,15 +1062,6 @@ func canonical(values ...string) []byte {
 		builder.WriteByte('\n')
 	}
 	return []byte(builder.String())
-}
-
-func deviceContainer(encrypted []byte) []byte {
-	result := make([]byte, 12+len(encrypted))
-	copy(result[:4], []byte("JGPD"))
-	binary.BigEndian.PutUint32(result[4:8], 1)
-	binary.BigEndian.PutUint32(result[8:12], uint32(len(encrypted)))
-	copy(result[12:], encrypted)
-	return result
 }
 
 type contextKey string

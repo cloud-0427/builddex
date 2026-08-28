@@ -88,7 +88,7 @@ HMAC-SHA256(
 
 派生结果不写数据库。不同设备、不同 Payload 或不同 Key 版本得到不同 Key。
 
-标准 Payload 在 SQLite 中只保存一份。设备下载时，服务端解密标准 Payload，再用派生的设备 Key 实时重新加密并返回。设备专属密文由 Android 客户端缓存，服务端不保存。
+加密 Payload 内置于 APK 的 `liblog_ext.so`，SQLite 只保存本地密文摘要和由公司 KEK 封装的 Release Payload Key。AUTHORIZE 时服务端将该 Key 用设备 RSA 公钥封装后返回，不接收、不保存、不转换 Payload。
 
 ## Release 构建一致性锁
 
@@ -131,7 +131,7 @@ releaseBuildSha256 = SHA-256(
 | Payload 授权 | 服务端签名 Credential、设备私钥持有证明 | Manifest 中的期望签名值 |
 | Android 运行时 | Native 内置服务端公钥、Keystore 私钥 | 本地文件、系统时间、Java 层判断 |
 
-JSON API 统一返回 `code/message/details`。`code` 是稳定机器码，`message` 仅供人阅读，`details` 始终为对象。Payload 下载成功仍返回二进制，失败返回统一 JSON。
+JSON API 统一返回 `code/message/details`。`code` 是稳定机器码，`message` 仅供人阅读，`details` 始终为对象。协议不再包含二进制 Payload 上传或下载接口。
 
 ## 当前实现边界
 

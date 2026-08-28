@@ -67,7 +67,7 @@ func LoadWithOptions(options Options) (Config, error) {
 		DataDir:             "data/companies",
 		MaxPayloadBytes:     64 << 20,
 		ChallengeTTL:        180 * time.Second,
-		GrantTTL:            600 * time.Second,
+		GrantTTL:            7 * 24 * time.Hour,
 		DeviceCredentialTTL: 30 * 24 * time.Hour,
 		IntegrityMode:       "disabled",
 		Logging: LoggingConfig{

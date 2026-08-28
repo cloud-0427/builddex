@@ -46,9 +46,13 @@ import java.util.concurrent.Future;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
 
+import com.android.tools.r8.CompilationMode;
 import com.android.tools.r8.D8;
 import com.android.tools.r8.D8Command;
 import com.android.tools.r8.OutputMode;
+import com.android.tools.r8.R8;
+import com.android.tools.r8.R8Command;
+import com.android.tools.r8.origin.Origin;
 
 import org.gradle.api.tasks.Internal;
 import java.nio.charset.StandardCharsets;
@@ -110,6 +114,27 @@ public abstract class JiaguTask extends DefaultTask {
     @PathSensitive(PathSensitivity.RELATIVE)
     public abstract ListProperty<Directory> getAllDirectories();
 
+    @InputFiles
+    @PathSensitive(PathSensitivity.NONE)
+    public abstract org.gradle.api.file.ConfigurableFileCollection getBootClasspath();
+
+    @Input
+    public abstract Property<Boolean> getMinifyEnabled();
+
+    @Input
+    public abstract Property<Boolean> getDebuggable();
+
+    @Input
+    public abstract Property<Integer> getMinApiLevel();
+
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    public abstract org.gradle.api.file.ConfigurableFileCollection getProguardFiles();
+
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    public abstract org.gradle.api.file.ConfigurableFileCollection getConsumerProguardFiles();
+
     @Internal
     public abstract DirectoryProperty getNdkDirectory();
 
@@ -127,6 +152,10 @@ public abstract class JiaguTask extends DefaultTask {
 
     @OutputFile
     public abstract RegularFileProperty getBusinessDexSha256File();
+
+    @Optional
+    @OutputFile
+    public abstract RegularFileProperty getBusinessMappingFile();
 
     @TaskAction
     public void execute() throws IOException {
@@ -203,13 +232,18 @@ public abstract class JiaguTask extends DefaultTask {
         Path tempDexDir = Files.createTempDirectory("jiagu_dex");
         try {
             stageStartedAt = System.nanoTime();
-            D8Command command = D8Command.builder()
-                    .addProgramFiles(tempBusinessJar.toPath())
-                    .setOutput(tempDexDir, OutputMode.DexIndexed)
-                    .setMinApiLevel(29)
-                    .build();
-            D8.run(command);
-            finishStage("D8 转换", stageStartedAt, stageTimes);
+            if (getMinifyEnabled().get()) {
+                runR8(tempBusinessJar, outputJarFile, tempDexDir);
+                finishStage("R8 业务代码裁剪", stageStartedAt, stageTimes);
+            } else {
+                D8Command command = D8Command.builder()
+                        .addProgramFiles(tempBusinessJar.toPath())
+                        .setOutput(tempDexDir, OutputMode.DexIndexed)
+                        .setMinApiLevel(getMinApiLevel().get())
+                        .build();
+                D8.run(command);
+                finishStage("D8 转换（App 未启用 minify）", stageStartedAt, stageTimes);
+            }
 
             File[] dexFiles = tempDexDir.toFile().listFiles((dir, name) -> name.endsWith(".dex"));
             if (dexFiles != null && dexFiles.length > 0) {
@@ -219,8 +253,8 @@ public abstract class JiaguTask extends DefaultTask {
                 // 按照文件名排序，确保 classes.dex, classes2.dex 等顺序一致
                 Arrays.sort(dexFiles, Comparator.comparing(File::getName));
                 
-                // 生成服务端标准明文 JG3 容器。服务端会使用随机 Canonical Key 加密保存，
-                // 设备下载时再转换为设备专属 JGPD 密文。
+                // 生成构建期 JG3 容器。后续 Release 任务在本地使用 Release Key 加密为 JGLP，
+                // 并把密文内置到 APK；服务端只保存摘要和受保护的 Key。
                 long rawDexBytes = 0;
                 long compressedDexBytes = 0;
                 long uncompressedPayloadBytes = 0;
@@ -273,6 +307,67 @@ public abstract class JiaguTask extends DefaultTask {
         getLogger().lifecycle("[Jiagu][计时] 总耗时: {}", formatDuration(totalMs));
     }
 
+    private void runR8(File businessJar, File shellJar, Path output) throws Exception {
+        R8Command.Builder commandBuilder = R8Command.builder()
+                .addProgramFiles(businessJar.toPath())
+                .addLibraryFiles(getBootClasspath().getFiles().stream()
+                        .map(File::toPath).collect(java.util.stream.Collectors.toList()))
+                .addLibraryFiles(shellJar.toPath())
+                .setOutput(output, OutputMode.DexIndexed)
+                .setMinApiLevel(getMinApiLevel().get())
+                .setMode(getDebuggable().get() ? CompilationMode.DEBUG : CompilationMode.RELEASE)
+                .setDisableTreeShaking(false)
+                .setDisableMinification(false)
+                .setProguardMapOutputPath(getBusinessMappingFile().get().getAsFile().toPath());
+        List<Path> configuredRules = getProguardFiles().getFiles().stream()
+                .filter(File::isFile).map(File::toPath)
+                .collect(java.util.stream.Collectors.toList());
+        if (!configuredRules.isEmpty()) {
+            commandBuilder.addProguardConfigurationFiles(configuredRules);
+        }
+        List<String> consumerRules = readConsumerProguardRules();
+        if (!consumerRules.isEmpty()) {
+            commandBuilder.addProguardConfiguration(consumerRules, Origin.unknown());
+        }
+        commandBuilder.addProguardConfiguration(pluginSafetyRules(), Origin.unknown());
+        R8.run(commandBuilder.build());
+    }
+
+    private List<String> readConsumerProguardRules() throws IOException {
+        List<File> artifacts = new ArrayList<>(getConsumerProguardFiles().getFiles());
+        artifacts.sort(Comparator.comparing(File::getAbsolutePath));
+        List<String> rules = new ArrayList<>();
+        for (File artifact : artifacts) {
+            if (artifact.isDirectory()) {
+                try (java.util.stream.Stream<Path> paths = Files.walk(artifact.toPath())) {
+                    for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile)
+                            .sorted()::iterator) {
+                        rules.add("# " + artifact.toPath().relativize(path).toString().replace('\\', '/'));
+                        rules.addAll(Files.readAllLines(path, StandardCharsets.UTF_8));
+                    }
+                }
+            } else if (artifact.isFile()) {
+                rules.add("# " + artifact.getName());
+                rules.addAll(Files.readAllLines(artifact.toPath(), StandardCharsets.UTF_8));
+            }
+        }
+        return rules;
+    }
+
+    private List<String> pluginSafetyRules() {
+        return Arrays.asList(
+                "-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault,Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable",
+                "-keep class * extends android.app.Application { *; }",
+                "-keep class * extends android.app.Activity { *; }",
+                "-keep class * extends android.app.Service { *; }",
+                "-keep class * extends android.content.BroadcastReceiver { *; }",
+                "-keep class * extends android.content.ContentProvider { *; }",
+                "-keep class * implements androidx.startup.Initializer { *; }",
+                "-keep class * extends android.view.View { public <init>(...); }",
+                "-keepclassmembers class * { native <methods>; }"
+        );
+    }
+
     private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos, String name, byte[] data, Set<String> processedNames) throws IOException {
         if (processedNames.contains(name)) {
             return;
@@ -281,8 +376,10 @@ public abstract class JiaguTask extends DefaultTask {
         // 适度回调：保留 R 类在壳中。
         // 完全移除 R 类可能导致某些系统资源（如图标、主题）在壳 Application 阶段解析失败。
         boolean shouldKeepInShell = name.startsWith("io/github/xjc/jiagu/") ||
-                                   name.startsWith("com/google/crypto/tink/") ||
-                                   name.contains("/R$") || name.endsWith("/R.class");
+                                    name.startsWith("com/google/crypto/tink/") ||
+                                    name.startsWith("com/google/android/play/") ||
+                                    name.startsWith("com/google/android/gms/") ||
+                                    name.contains("/R$") || name.endsWith("/R.class");
 
         if (shouldKeepInShell || !name.endsWith(".class")) {
             // 壳程序代码、白名单代码 或 非代码资源：透传到输出 JAR (壳 JAR)

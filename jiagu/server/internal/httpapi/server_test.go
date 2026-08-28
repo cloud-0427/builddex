@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"bytes"
-	"compress/zlib"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -12,9 +11,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -26,7 +23,7 @@ import (
 	"github.com/xjc/jiagu/server/internal/store"
 )
 
-func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
+func TestEndToEndPrepareSealEnrollAndAuthorizeLocalPayload(t *testing.T) {
 	master := bytes.Repeat([]byte{0x42}, 32)
 	dbs, err := store.NewManager(t.TempDir())
 	if err != nil {
@@ -50,29 +47,29 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 	}
 	decodeResponse(t, companyResponse, &companyCreated)
 
-	payload := testJG3(t, []byte("secret dex payload"))
-	var multipartBody bytes.Buffer
-	writer := multipart.NewWriter(&multipartBody)
-	_ = writer.WriteField("payloadId", "app-main")
-	_ = writer.WriteField("payloadVersion", "7")
-	_ = writer.WriteField("packageName", "com.example.app")
-	_ = writer.WriteField("versionCode", "7")
 	certificate := secure.SHA256URL([]byte("cert-digest"))
-	_ = writer.WriteField("certificateSha256Digest", certificate)
-	writeBuildHashes(t, writer, payload, "resources-v1", "native-v1")
-	file, _ := writer.CreateFormFile("payload", "payload.bin")
-	_, _ = file.Write(payload)
-	_ = writer.Close()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/companies/acme/pack/releases", &multipartBody)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-Company-Key", companyCreated.CompanyAPIKey)
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, req)
+	prepareBody := releaseRequest("com.example.app", 7, certificate, []byte("secret dex payload"), "resources-v1")
+	recorder := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/pack/releases", "", companyCreated.CompanyAPIKey, prepareBody)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("pack release: %d %s", recorder.Code, recorder.Body.String())
 	}
-	var release store.Release
-	decodeResponse(t, recorder, &release)
+	var prepared struct {
+		store.Release
+		PayloadKey string `json:"payloadKey"`
+	}
+	decodeResponse(t, recorder, &prepared)
+	release := prepared.Release
+	localCiphertext := []byte("APK-local AES-GCM payload container")
+	localCiphertextHash := secure.SHA256URL(localCiphertext)
+	seal := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/pack/releases/"+release.ReleaseID+"/seal", "", companyCreated.CompanyAPIKey, map[string]any{
+			"localCiphertextSha256": localCiphertextHash, "localPayloadSize": len(localCiphertext) + 40,
+		})
+	if seal.Code != http.StatusOK {
+		t.Fatalf("seal local payload: %d %s", seal.Code, seal.Body.String())
+	}
+	release.LocalCiphertextSHA256 = localCiphertextHash
+	release.LocalPayloadSize = int64(len(localCiphertext) + 40)
 
 	publish := doJSON(t, handler, http.MethodPost,
 		"/api/v1/companies/acme/pack/releases/"+release.ReleaseID+"/publish", "", companyCreated.CompanyAPIKey, map[string]any{})
@@ -169,27 +166,26 @@ func TestEndToEndPackEnrollAuthorizeAndDownload(t *testing.T) {
 		t.Fatalf("unexpected wrap parameters: %q label=%q", authorization.WrapAlgorithm, authorization.WrapLabel)
 	}
 
-	download := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/download", "", "", map[string]any{"grant": authorization.Grant})
-	if download.Code != http.StatusOK {
-		t.Fatalf("download: %d %s", download.Code, download.Body.String())
-	}
-	container := download.Body.Bytes()
-	if len(container) < 12 || string(container[:4]) != "JGPD" || binary.BigEndian.Uint32(container[4:8]) != 1 {
-		t.Fatal("invalid device payload container")
-	}
 	wrapped, _ := base64.RawURLEncoding.DecodeString(authorization.WrappedPayloadKey)
-	deviceKey, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, wrapPrivate, wrapped, []byte(authorization.WrapLabel))
+	payloadKey, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, wrapPrivate, wrapped, []byte(authorization.WrapLabel))
 	if err != nil {
 		t.Fatal(err)
+	}
+	expectedKey, err := base64.StdEncoding.DecodeString(prepared.PayloadKey)
+	if err != nil || !bytes.Equal(payloadKey, expectedKey) {
+		t.Fatal("authorize must return the prepared local payload key")
 	}
 	var grant payloadGrant
 	public := secure.CompanySigningKey(master, "acme").Public().(ed25519.PublicKey)
 	if err := secure.VerifyJWS(public, authorization.Grant, &grant); err != nil {
 		t.Fatal(err)
 	}
-	decrypted, err := secure.DecryptAESGCM(deviceKey, container[12:], devicePayloadAAD(grant))
-	if err != nil || !bytes.Equal(decrypted, payload) {
-		t.Fatalf("device payload decrypt failed: %v", err)
+	if grant.LocalCiphertextSHA256 != localCiphertextHash {
+		t.Fatal("grant is not bound to the APK-local payload")
+	}
+	download := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/download", "", "", map[string]any{"grant": authorization.Grant})
+	if download.Code != http.StatusNotFound {
+		t.Fatalf("download endpoint must be removed: %d %s", download.Code, download.Body.String())
 	}
 }
 
@@ -215,24 +211,10 @@ func TestReleaseIdempotency(t *testing.T) {
 
 	// 1. Create a DRAFT release
 	createDraft := func(version string, content []byte) *httptest.ResponseRecorder {
-		payload := testJG3(t, content)
-		var multipartBody bytes.Buffer
-		writer := multipart.NewWriter(&multipartBody)
-		_ = writer.WriteField("payloadId", "app-main")
-		_ = writer.WriteField("payloadVersion", version)
-		_ = writer.WriteField("packageName", "com.example.app")
-		_ = writer.WriteField("versionCode", version)
-		_ = writer.WriteField("certificateSha256Digest", secure.SHA256URL([]byte("cert")))
-		writeBuildHashes(t, writer, payload, "resources-"+string(content), "native-v1")
-		file, _ := writer.CreateFormFile("payload", "payload.bin")
-		_, _ = file.Write(payload)
-		_ = writer.Close()
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/companies/acme/pack/releases", &multipartBody)
-		req.Header.Set("Content-Type", writer.FormDataContentType())
-		req.Header.Set("X-Company-Key", companyCreated.CompanyAPIKey)
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, req)
-		return recorder
+		versionCode, _ := strconv.ParseInt(version, 10, 64)
+		return doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/pack/releases", "", companyCreated.CompanyAPIKey,
+			releaseRequest("com.example.app", versionCode, secure.SHA256URL([]byte("cert")), content,
+				"resources-"+string(content)))
 	}
 
 	res1 := createDraft("1", []byte("v1 content"))
@@ -242,14 +224,12 @@ func TestReleaseIdempotency(t *testing.T) {
 	var release1 store.Release
 	decodeResponse(t, res1, &release1)
 
-	// Systemic change: Runtime endpoints now allow DRAFT releases.
-	// We expect the request to proceed past publishedRelease check.
-	// Since we provided an incomplete JSON, it should fail later (e.g. invalid keys).
+	// A prepared release cannot authorize devices until its APK-local payload metadata is sealed.
 	draftEnroll := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/unpack/enroll", "", "", map[string]any{
 		"releaseId": release1.ReleaseID,
 	})
-	if draftEnroll.Code == http.StatusConflict {
-		t.Fatalf("draft enroll should no longer return conflict: %s", draftEnroll.Body.String())
+	if draftEnroll.Code != http.StatusConflict || !bytes.Contains(draftEnroll.Body.Bytes(), []byte("LOCAL_PAYLOAD_NOT_SEALED")) {
+		t.Fatalf("unsealed draft must be rejected: %d %s", draftEnroll.Code, draftEnroll.Body.String())
 	}
 
 	// 2. Update the same DRAFT in place.
@@ -261,6 +241,13 @@ func TestReleaseIdempotency(t *testing.T) {
 	decodeResponse(t, res2, &release2)
 	if release2.ReleaseID != release1.ReleaseID || release2.PayloadKeyVersion != release1.PayloadKeyVersion+1 {
 		t.Fatal("draft update must preserve releaseId and increment payloadKeyVersion")
+	}
+	seal := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/seal",
+		"", companyCreated.CompanyAPIKey, map[string]any{
+			"localCiphertextSha256": secure.SHA256URL([]byte("v1 local payload")), "localPayloadSize": 128,
+		})
+	if seal.Code != http.StatusOK {
+		t.Fatalf("seal draft: %d %s", seal.Code, seal.Body.String())
 	}
 
 	// 3. Publish and try same content (should return 200)
@@ -339,23 +326,9 @@ func TestMultiPackageSupport(t *testing.T) {
 	decodeResponse(t, companyResponse, &companyCreated)
 
 	createRelease := func(pkg, version string) int {
-		payload := testJG3(t, []byte("content"))
-		var multipartBody bytes.Buffer
-		writer := multipart.NewWriter(&multipartBody)
-		_ = writer.WriteField("payloadId", "app-main")
-		_ = writer.WriteField("payloadVersion", version)
-		_ = writer.WriteField("packageName", pkg)
-		_ = writer.WriteField("versionCode", version)
-		_ = writer.WriteField("certificateSha256Digest", secure.SHA256URL([]byte("cert")))
-		writeBuildHashes(t, writer, payload, "resources-v1", "native-v1")
-		file, _ := writer.CreateFormFile("payload", "payload.bin")
-		_, _ = file.Write(payload)
-		_ = writer.Close()
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/companies/acme/pack/releases", &multipartBody)
-		req.Header.Set("Content-Type", writer.FormDataContentType())
-		req.Header.Set("X-Company-Key", companyCreated.CompanyAPIKey)
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, req)
+		versionCode, _ := strconv.ParseInt(version, 10, 64)
+		recorder := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/pack/releases", "", companyCreated.CompanyAPIKey,
+			releaseRequest(pkg, versionCode, secure.SHA256URL([]byte("cert")), []byte("content"), "resources-v1"))
 		return recorder.Code
 	}
 
@@ -592,33 +565,15 @@ func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, target an
 	}
 }
 
-func testJG3(t *testing.T, dex []byte) []byte {
-	t.Helper()
-	var compressed bytes.Buffer
-	writer := zlib.NewWriter(&compressed)
-	if _, err := writer.Write(dex); err != nil {
-		t.Fatal(err)
+func releaseRequest(packageName string, versionCode int64, certificate string,
+	payload []byte, resourcesSeed string) map[string]any {
+	return map[string]any{
+		"payloadId": "app-main", "payloadVersion": versionCode,
+		"packageName": packageName, "versionCode": versionCode,
+		"certificateSha256Digests": []string{certificate},
+		"businessDexSha256":        secure.SHA256URL(append([]byte("business:"), payload...)),
+		"resourcesSha256":          secure.SHA256URL([]byte(resourcesSeed)),
+		"nativeLibsSha256":         secure.SHA256URL([]byte("native-v1")),
+		"payloadPlaintextSha256":   secure.SHA256URL(payload),
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	result := make([]byte, 20+compressed.Len())
-	copy(result[:4], []byte{'J', 'G', '3', 0})
-	binary.BigEndian.PutUint32(result[4:8], 1)
-	binary.BigEndian.PutUint32(result[8:12], 0)
-	binary.BigEndian.PutUint32(result[12:16], uint32(compressed.Len()))
-	binary.BigEndian.PutUint32(result[16:20], uint32(len(dex)))
-	copy(result[20:], compressed.Bytes())
-	return result
-}
-
-func writeBuildHashes(t *testing.T, writer *multipart.Writer, payload []byte, resourcesSeed, nativeSeed string) {
-	t.Helper()
-	businessHash, err := businessDexHashFromJG3(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = writer.WriteField("businessDexSha256", businessHash)
-	_ = writer.WriteField("resourcesSha256", secure.SHA256URL([]byte(resourcesSeed)))
-	_ = writer.WriteField("nativeLibsSha256", secure.SHA256URL([]byte(nativeSeed)))
 }

@@ -107,6 +107,11 @@ public final class DexReportPlugin implements Plugin<Project> {
                                             producerTaskName + "/linked-resources-binary-format-" + variantName + ".ap_";
                             task.getResourcePackage().set(project.getLayout().getBuildDirectory().file(resourcePackagePath));
                             task.getMergedAssets().set(variant.getArtifacts().get(SingleArtifact.ASSETS.INSTANCE));
+                            task.getMinifyEnabled().set(variant.isMinifyEnabled());
+                            task.getDebuggable().set(variant.getDebuggable());
+                            task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
+                            task.getBootClasspath().from(androidComponents.getSdkComponents().getBootClasspath());
+                            task.getProguardFiles().from(variant.getProguardFiles());
                             task.getNativeInputs().from(project.fileTree(project.getProjectDir(), spec -> {
                                 spec.include("src/**/jniLibs/**/*.so");
                             }));
@@ -117,12 +122,21 @@ public final class DexReportPlugin implements Plugin<Project> {
                                     }));
                             project.getConfigurations().matching(configuration ->
                                     configuration.getName().equals(variantName + "RuntimeClasspath"))
-                                    .all(configuration -> task.getNativeInputs().from(
-                                            configuration.getIncoming().artifactView(view -> {
-                                                view.setLenient(true);
-                                                view.getAttributes().attribute(
-                                                        ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, "android-jni");
-                                            }).getFiles()));
+                                    .all(configuration -> {
+                                        task.getConsumerProguardFiles().from(
+                                                configuration.getIncoming().artifactView(view -> {
+                                                    view.setLenient(true);
+                                                    view.getAttributes().attribute(
+                                                            ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE,
+                                                            "android-consumer-proguard-rules");
+                                                }).getFiles());
+                                        task.getNativeInputs().from(
+                                                configuration.getIncoming().artifactView(view -> {
+                                                    view.setLenient(true);
+                                                    view.getAttributes().attribute(
+                                                            ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE, "android-jni");
+                                                }).getFiles());
+                                    });
 
                             // 合并配置：BuildType Specific -> Global Default -> Auto Detection
                             boolean isDebug = buildTypeName != null && buildTypeName.toLowerCase().contains("debug");
@@ -151,6 +165,8 @@ public final class DexReportPlugin implements Plugin<Project> {
                                     .file("intermediates/jiagu/" + variantName + "/payload.jg3"));
                             task.getBusinessDexSha256File().set(project.getLayout().getBuildDirectory()
                                     .file("intermediates/jiagu/" + variantName + "/business-dex.sha256"));
+                            task.getBusinessMappingFile().set(project.getLayout().getBuildDirectory()
+                                    .file("intermediates/jiagu/" + variantName + "/business-mapping.txt"));
                             task.getBuildInvocationId().set(buildInvocationId);
                         });
 

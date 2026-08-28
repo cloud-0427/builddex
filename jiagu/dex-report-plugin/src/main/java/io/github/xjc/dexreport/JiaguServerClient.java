@@ -63,29 +63,20 @@ final class JiaguServerClient {
                           List<String> certificateSha256Digests,
                           String businessDexSha256, String resourcesSha256,
                           String nativeLibsSha256) throws IOException {
-        String boundary = "----Jiagu" + System.nanoTime();
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
-        textPart(body, boundary, "payloadId", payloadId);
-        textPart(body, boundary, "payloadVersion", Long.toString(payloadVersion));
-        textPart(body, boundary, "packageName", packageName);
-        textPart(body, boundary, "versionCode", Long.toString(versionCode));
-        textPart(body, boundary, "packer", packer);
-        for (String digest : certificateSha256Digests) {
-            textPart(body, boundary, "certificateSha256Digest", digest);
-        }
-        textPart(body, boundary, "businessDexSha256", businessDexSha256);
-        textPart(body, boundary, "resourcesSha256", resourcesSha256);
-        textPart(body, boundary, "nativeLibsSha256", nativeLibsSha256);
-        writeAscii(body, "--" + boundary + "\r\n");
-        writeAscii(body, "Content-Disposition: form-data; name=\"payload\"; filename=\"payload.jg3\"\r\n");
-        writeAscii(body, "Content-Type: application/octet-stream\r\n\r\n");
-        try (InputStream input = new FileInputStream(payload)) {
-            copy(input, body);
-        }
-        writeAscii(body, "\r\n--" + boundary + "--\r\n");
-
+        String localHash = sha256(Files.readAllBytes(payload.toPath()));
+        String requestJson = "{" +
+                "\"payloadId\":" + json(payloadId) + "," +
+                "\"payloadVersion\":" + payloadVersion + "," +
+                "\"packageName\":" + json(packageName) + "," +
+                "\"versionCode\":" + versionCode + "," +
+                "\"packer\":" + json(packer) + "," +
+                "\"certificateSha256Digests\":" + jsonArray(certificateSha256Digests) + "," +
+                "\"businessDexSha256\":" + json(businessDexSha256) + "," +
+                "\"resourcesSha256\":" + json(resourcesSha256) + "," +
+                "\"nativeLibsSha256\":" + json(nativeLibsSha256) + "," +
+                "\"payloadPlaintextSha256\":" + json(localHash) + "}";
         String response = request("POST", companyPath() + "/pack/releases",
-                "multipart/form-data; boundary=" + boundary, body.toByteArray(), true);
+                "application/json", requestJson.getBytes(StandardCharsets.UTF_8), true);
         Release release = new Release();
         release.releaseId = stringField(response, "releaseId");
         release.payloadId = stringField(response, "payloadId");
@@ -100,10 +91,17 @@ final class JiaguServerClient {
         release.releaseBuildSha256 = stringField(response, "releaseBuildSha256");
         release.plaintextSha256 = stringField(response, "payloadPlaintextSha256");
         release.payloadKeyVersion = longField(response, "payloadKeyVersion", -1);
+        release.localCiphertextSha256 = optionalStringField(response, "localCiphertextSha256");
+        release.localPayloadSize = longField(response, "localPayloadSize", 0);
+        try {
+            release.payloadKey = Base64.getDecoder().decode(stringField(response, "payloadKey"));
+        } catch (IllegalArgumentException error) {
+            throw new IOException("Jiagu payload key is not valid Base64", error);
+        }
+        if (release.payloadKey.length != 32) throw new IOException("Jiagu payload key must contain 32 bytes");
         release.status = stringField(response, "status");
         release.operation = stringField(response, "operation");
         release.keyRotated = booleanField(response, "keyRotated", false);
-        String localHash = sha256(Files.readAllBytes(payload.toPath()));
         boolean statusOk = "DRAFT".equals(release.status) || "PUBLISHED".equals(release.status);
         if (!payloadId.equals(release.payloadId) || payloadVersion != release.payloadVersion ||
                 !packageName.equals(release.packageName) || versionCode != release.versionCode ||
@@ -118,6 +116,21 @@ final class JiaguServerClient {
                     packageName, versionCode, localHash,
                     release.packageName, release.versionCode, release.plaintextSha256, release.status));
         }
+        return release;
+    }
+
+    Release sealRelease(Release release, String ciphertextSha256, long payloadSize) throws IOException {
+        String body = "{\"localCiphertextSha256\":" + json(ciphertextSha256) +
+                ",\"localPayloadSize\":" + payloadSize + "}";
+        String response = request("POST", companyPath() + "/pack/releases/" + encode(release.releaseId) + "/seal",
+                "application/json", body.getBytes(StandardCharsets.UTF_8), true);
+        if (!release.releaseId.equals(stringField(response, "releaseId")) ||
+                !ciphertextSha256.equals(stringField(response, "localCiphertextSha256")) ||
+                payloadSize != longField(response, "localPayloadSize", -1)) {
+            throw new IOException("Jiagu local payload seal response mismatch");
+        }
+        release.localCiphertextSha256 = ciphertextSha256;
+        release.localPayloadSize = payloadSize;
         return release;
     }
 
@@ -310,6 +323,15 @@ final class JiaguServerClient {
                 .replace("\n", "\\n").replace("\r", "\\r") + "\"";
     }
 
+    private static String jsonArray(List<String> values) {
+        StringBuilder result = new StringBuilder("[");
+        for (String value : values) {
+            if (result.length() > 1) result.append(',');
+            result.append(json(value));
+        }
+        return result.append(']').toString();
+    }
+
     private static String required(String value, String name) {
         if (value == null || value.trim().isEmpty()) {
             throw new IllegalArgumentException("Jiagu " + name + " is required");
@@ -353,6 +375,9 @@ final class JiaguServerClient {
         String nativeLibsSha256;
         String releaseBuildSha256;
         String plaintextSha256;
+        String localCiphertextSha256;
+        long localPayloadSize;
+        byte[] payloadKey;
         long payloadKeyVersion;
         String status;
         String operation;

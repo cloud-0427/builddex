@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDisabledModeUsesDevelopmentDefaults(t *testing.T) {
@@ -21,6 +22,9 @@ func TestDisabledModeUsesDevelopmentDefaults(t *testing.T) {
 	}
 	if cfg.AdminToken == "" || len(cfg.MasterKey) != 32 {
 		t.Fatal("development credentials were not initialized")
+	}
+	if cfg.GrantTTL != 7*24*time.Hour {
+		t.Fatalf("unexpected default grant TTL: %s", cfg.GrantTTL)
 	}
 }
 
