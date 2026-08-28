@@ -51,6 +51,14 @@
 - `POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/publish`
 - `POST /api/v1/companies/{companyId}/pack/releases/{releaseId}/revoke`
 
+`publish` 将 DRAFT 转为 PUBLISHED；对已经 PUBLISHED 的同一 Release 幂等返回 200 和 `changed=false`，不更新 Release 或审计记录。REVOKED 不能再次发布。`revoke` 保持严格状态转换，重复撤销仍返回冲突。
+
+| 当前状态 | prepare 内容相同 | prepare 内容变化 | seal | publish | revoke |
+| --- | --- | --- | --- | --- | --- |
+| DRAFT | 复用 Release/Key | 原 ReleaseID 更新并轮换 Key | 首次封存或相同封存幂等 | 已封存后转 PUBLISHED | 转 REVOKED |
+| PUBLISHED | 只读复用 | 409，要求增加 versionCode | 仅相同封存幂等 | 200，`changed=false` | 转 REVOKED |
+| REVOKED | 409 | 409 | 409 | 409 | 409，重复撤销 |
+
 ## Runtime 接口
 
 ### `GET /api/v1/companies/{companyId}/public-config`

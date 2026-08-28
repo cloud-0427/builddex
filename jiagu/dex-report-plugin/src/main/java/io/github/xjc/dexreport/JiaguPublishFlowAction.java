@@ -48,12 +48,23 @@ public abstract class JiaguPublishFlowAction implements FlowAction<JiaguPublishF
 
         String releaseId = optionalField(metadata, "releaseId");
         if (releaseId.isEmpty()) throw new IllegalStateException("Invalid Jiagu release metadata: missing releaseId");
+        if (!shouldPublish(metadata, true)) {
+            LOGGER.lifecycle("[Jiagu] Release 已发布且构建内容一致，跳过重复发布: " +
+                            "companyId={}, packageName={}, versionCode={}, releaseId={}",
+                    parameters.getCompanyId().get(), optionalField(metadata, "packageName"),
+                    optionalNumberField(metadata, "versionCode"), releaseId);
+            return;
+        }
         new JiaguServerClient(parameters.getServerUrl().get(), parameters.getCompanyId().get(),
                 parameters.getCompanyApiKey().get()).publish(releaseId);
         LOGGER.lifecycle("[Jiagu] Release 发布成功: companyId={}, packageName={}, versionCode={}, " +
                         "releaseId={}, status=PUBLISHED",
                 parameters.getCompanyId().get(), optionalField(metadata, "packageName"),
                 optionalNumberField(metadata, "versionCode"), releaseId);
+    }
+
+    static boolean shouldPublish(String metadata, boolean publishRequested) {
+        return publishRequested && !"PUBLISHED".equals(optionalField(metadata, "status"));
     }
 
     private static String optionalField(String json, String name) {

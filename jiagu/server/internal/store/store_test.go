@@ -88,8 +88,18 @@ func TestDraftDeliveryChargesQuotaOnlyOncePerRelease(t *testing.T) {
 		t.Fatalf("concurrent draft deliveries: company=%d release=%d", company.DeliveryCount, stored.DeliveryCount)
 	}
 
-	if _, err := SetReleaseStatus(ctx, db, release.ReleaseID, "PUBLISHED"); err != nil {
+	if _, changed, err := SetReleaseStatus(ctx, db, release.ReleaseID, "PUBLISHED"); err != nil || !changed {
+		t.Fatalf("first publish: changed=%v err=%v", changed, err)
+	}
+	if _, changed, err := SetReleaseStatus(ctx, db, release.ReleaseID, "PUBLISHED"); err != nil || changed {
+		t.Fatalf("repeated publish: changed=%v err=%v", changed, err)
+	}
+	if err := UpdateReleasePacker(ctx, db, release.ReleaseID, "different-host"); err != nil {
 		t.Fatal(err)
+	}
+	stored, _ = GetRelease(ctx, db, release.ReleaseID, false)
+	if stored.Packer != "build-host" {
+		t.Fatalf("published release packer changed: %q", stored.Packer)
 	}
 	if err := IncrementDelivery(ctx, db, release.ReleaseID); err != nil {
 		t.Fatal(err)

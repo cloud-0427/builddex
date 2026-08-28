@@ -96,6 +96,8 @@ public abstract class JiaguReleaseTask extends DefaultTask {
                 StandardCharsets.UTF_8).trim();
         String resourcesSha256 = hashResourcePackage();
         String nativeLibsSha256 = hashNativeInputs();
+        getLogger().lifecycle("[Jiagu] 构建身份摘要: businessDex={}, resources={}, nativeLibs={}",
+                businessDexSha256, resourcesSha256, nativeLibsSha256);
         List<String> certificates = new ArrayList<>(getCertificateSha256Digests().get());
         certificates.add(getCertificateSha256().get());
         certificates = sortedUnique(certificates);

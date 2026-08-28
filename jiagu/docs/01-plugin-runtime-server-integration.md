@@ -60,8 +60,10 @@ R8 是 Variant 自身的可选能力，不由加固插件强制开启：
 - 首次创建：生成 ReleaseID、Payload Key，KeyVersion=1；
 - DRAFT 内容变化：保留 ReleaseID，轮换 Key，KeyVersion+1；
 - DRAFT 内容不变：复用 Release 和 Key；
-- PUBLISHED 内容不变：复用 Release 和 Key，保证重复构建可重现；
+- PUBLISHED 内容不变：复用 Release 和 Key，且不修改 packer、时间戳或任何 Release 数据，保证重复构建可重现；
 - PUBLISHED 内容变化或 REVOKED 版本复用：拒绝，必须增加 versionCode。
+
+构建完成后的 publish 是幂等状态设置：客户端看到 prepare 返回 `status=PUBLISHED` 时跳过 publish；即使发生并发或旧客户端再次调用，服务端也返回 200、`changed=false`，不更新时间戳且不重复写 `PACK_PUBLISH` 审计记录。
 
 ### 3.2 本地加密
 

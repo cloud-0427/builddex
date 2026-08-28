@@ -76,10 +76,45 @@ func TestEndToEndPrepareSealEnrollAndAuthorizeLocalPayload(t *testing.T) {
 	if publish.Code != http.StatusOK {
 		t.Fatalf("publish: %d %s", publish.Code, publish.Body.String())
 	}
+	db, err := dbs.Open("acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRepublish, err := store.GetReleaseMetadata(t.Context(), db, release.ReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publishLogsBefore int
+	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM operation_logs WHERE operation='PACK_PUBLISH'`).
+		Scan(&publishLogsBefore); err != nil {
+		t.Fatal(err)
+	}
 	republish := doJSON(t, handler, http.MethodPost,
 		"/api/v1/companies/acme/pack/releases/"+release.ReleaseID+"/publish", "", companyCreated.CompanyAPIKey, map[string]any{})
-	if republish.Code != http.StatusConflict || !bytes.Contains(republish.Body.Bytes(), []byte("RELEASE_ALREADY_PUBLISHED")) {
-		t.Fatalf("republish must fail with the published state: %d %s", republish.Code, republish.Body.String())
+	if republish.Code != http.StatusOK {
+		t.Fatalf("republish must be idempotent: %d %s", republish.Code, republish.Body.String())
+	}
+	var republished struct {
+		Status  string `json:"status"`
+		Changed bool   `json:"changed"`
+	}
+	decodeResponse(t, republish, &republished)
+	if republished.Status != "PUBLISHED" || republished.Changed {
+		t.Fatalf("unexpected idempotent publish response: %s", republish.Body.String())
+	}
+	afterRepublish, err := store.GetReleaseMetadata(t.Context(), db, release.ReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publishLogsAfter int
+	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM operation_logs WHERE operation='PACK_PUBLISH'`).
+		Scan(&publishLogsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if afterRepublish.UpdatedAt != beforeRepublish.UpdatedAt ||
+		afterRepublish.PublishedAt != beforeRepublish.PublishedAt || publishLogsAfter != publishLogsBefore {
+		t.Fatalf("idempotent publish must not update release or audit data: before=%+v after=%+v logs=%d/%d",
+			beforeRepublish, afterRepublish, publishLogsBefore, publishLogsAfter)
 	}
 	missingPublish := doJSON(t, handler, http.MethodPost,
 		"/api/v1/companies/acme/pack/releases/missing/publish", "", companyCreated.CompanyAPIKey, map[string]any{})
@@ -261,6 +296,32 @@ func TestReleaseIdempotency(t *testing.T) {
 	if release3.ReleaseID != release2.ReleaseID {
 		t.Fatal("should return existing releaseId")
 	}
+	// A published release remains immutable even when the same content is
+	// prepared by a different build host.
+	db, err := dbs.Open("acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforePackerChange, err := store.GetReleaseMetadata(t.Context(), db, release2.ReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	samePublished := releaseRequest("com.example.app", 1, secure.SHA256URL([]byte("cert")),
+		[]byte("v1 updated content"), "resources-v1 updated content")
+	samePublished["packer"] = "another-build-host"
+	reused := doJSON(t, handler, http.MethodPost, "/api/v1/companies/acme/pack/releases", "",
+		companyCreated.CompanyAPIKey, samePublished)
+	if reused.Code != http.StatusOK {
+		t.Fatalf("reuse published from another host: %d %s", reused.Code, reused.Body.String())
+	}
+	afterPackerChange, err := store.GetReleaseMetadata(t.Context(), db, release2.ReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterPackerChange.Packer != beforePackerChange.Packer || afterPackerChange.UpdatedAt != beforePackerChange.UpdatedAt {
+		t.Fatalf("published release metadata changed during reuse: before=%+v after=%+v",
+			beforePackerChange, afterPackerChange)
+	}
 
 	// 4. Try different content for published (should return 409)
 	res4 := createDraft("1", []byte("v1 different content"))
@@ -293,6 +354,13 @@ func TestReleaseIdempotency(t *testing.T) {
 		"/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/revoke", "", companyCreated.CompanyAPIKey, map[string]any{})
 	if revokeAgain.Code != http.StatusConflict || !bytes.Contains(revokeAgain.Body.Bytes(), []byte("RELEASE_ALREADY_REVOKED")) {
 		t.Fatalf("repeated revoke must fail with the revoked state: %d %s", revokeAgain.Code, revokeAgain.Body.String())
+	}
+	sealRevoked := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/seal", "", companyCreated.CompanyAPIKey, map[string]any{
+			"localCiphertextSha256": secure.SHA256URL([]byte("v1 local payload")), "localPayloadSize": 128,
+		})
+	if sealRevoked.Code != http.StatusConflict || !bytes.Contains(sealRevoked.Body.Bytes(), []byte("INVALID_RELEASE_STATUS_TRANSITION")) {
+		t.Fatalf("revoked release cannot be sealed: %d %s", sealRevoked.Code, sealRevoked.Body.String())
 	}
 	publishRevoked := doJSON(t, handler, http.MethodPost,
 		"/api/v1/companies/acme/pack/releases/"+release2.ReleaseID+"/publish", "", companyCreated.CompanyAPIKey, map[string]any{})

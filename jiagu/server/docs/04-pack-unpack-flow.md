@@ -11,6 +11,8 @@
 7. 插件把 RuntimeConfig v3 和 JGLP 组成 JGRC，写入四个 ABI 的 `liblog_ext.so`。
 8. 所有构建步骤成功后，按配置发布 Release。
 
+若相同构建内容对应的 Release 已经 PUBLISHED，插件复用服务端返回的 Payload Key 和封存摘要并跳过重复 publish。服务端 publish 本身也支持幂等重试，但不会重复更新时间戳或写发布审计记录。
+
 Payload Key 在服务端使用以下 KEK 和 AAD 保护：
 
 ```text

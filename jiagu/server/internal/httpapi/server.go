@@ -463,7 +463,9 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 		}
 		changed := changedReleaseComponents(existing, requested)
 		if len(changed) == 0 {
-			if requested.Packer != "" && requested.Packer != existing.Packer {
+			// A published release is immutable. Packer metadata may only follow the
+			// latest build host while the release is still a draft.
+			if existing.Status == "DRAFT" && requested.Packer != "" && requested.Packer != existing.Packer {
 				if err := store.UpdateReleasePacker(r.Context(), db, existing.ReleaseID, requested.Packer); err != nil {
 					writeStoreError(w, err)
 					return
@@ -581,17 +583,24 @@ func (a *API) changeReleaseStatus(w http.ResponseWriter, r *http.Request, status
 	if !ok {
 		return
 	}
-	packer, err := store.SetReleaseStatus(r.Context(), db, r.PathValue("releaseId"), status)
+	packer, changed, err := store.SetReleaseStatus(r.Context(), db, r.PathValue("releaseId"), status)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	store.AddOperationLog(r.Context(), db, operation, requestID(r.Context()), r.PathValue("releaseId"), packer)
+	if changed {
+		store.AddOperationLog(r.Context(), db, operation, requestID(r.Context()), r.PathValue("releaseId"), packer)
+	}
 	code, message := "RELEASE_REVOKED", "Release revoked."
 	if status == "PUBLISHED" {
 		code, message = "RELEASE_PUBLISHED", "Release published."
+		if !changed {
+			message = "Release is already published; no changes were made."
+		}
 	}
-	writeResponse(w, http.StatusOK, code, message, map[string]any{"releaseId": r.PathValue("releaseId"), "status": status})
+	writeResponse(w, http.StatusOK, code, message, map[string]any{
+		"releaseId": r.PathValue("releaseId"), "status": status, "changed": changed,
+	})
 }
 
 func (a *API) createChallenge(w http.ResponseWriter, r *http.Request) {
@@ -886,8 +895,8 @@ func availableRelease(w http.ResponseWriter, release store.Release, err error) (
 		writeStoreError(w, err)
 		return store.Release{}, false
 	}
-	// Systemic fix: Allow DRAFT releases to be authorized and downloaded
-	// to enable rapid debug iteration without version code increments.
+	// Allow DRAFT releases to be authorized for rapid debug iteration without
+	// versionCode increments. REVOKED releases are never available.
 	if release.Status != "PUBLISHED" && release.Status != "DRAFT" {
 		writeErrorDetails(w, http.StatusGone, "RELEASE_NOT_AVAILABLE",
 			"release is no longer available", map[string]any{
@@ -1142,8 +1151,6 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "CONFLICT", err.Error())
-	case errors.Is(err, store.ErrAlreadyPublished):
-		writeError(w, http.StatusConflict, "RELEASE_ALREADY_PUBLISHED", err.Error())
 	case errors.Is(err, store.ErrAlreadyRevoked):
 		writeError(w, http.StatusConflict, "RELEASE_ALREADY_REVOKED", err.Error())
 	case errors.Is(err, store.ErrInvalidTransition):

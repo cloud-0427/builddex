@@ -26,7 +26,6 @@ var (
 	ErrLimitExceeded     = errors.New("limit exceeded")
 	ErrAuthorization     = errors.New("company authorization is inactive")
 	ErrChallengeUsed     = errors.New("challenge is invalid, expired, or already used")
-	ErrAlreadyPublished  = errors.New("release is already published")
 	ErrAlreadyRevoked    = errors.New("release is already revoked")
 	ErrInvalidTransition = errors.New("invalid release status transition")
 )
@@ -431,7 +430,7 @@ func UpdateReleasePacker(ctx context.Context, db *sql.DB, releaseID, packer stri
 		return nil
 	}
 	result, err := db.ExecContext(ctx, `UPDATE payload_releases SET packer=?, updated_at=?
-		WHERE release_id=? AND status IN ('DRAFT','PUBLISHED') AND packer<>?`,
+		WHERE release_id=? AND status='DRAFT' AND packer<>?`,
 		packer, time.Now().Unix(), releaseID, packer)
 	if err != nil {
 		return err
@@ -440,10 +439,10 @@ func UpdateReleasePacker(ctx context.Context, db *sql.DB, releaseID, packer stri
 	return nil
 }
 
-func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string) (string, error) {
+func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string) (string, bool, error) {
 	release, err := GetReleaseMetadata(ctx, db, releaseID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	now := time.Now().Unix()
@@ -451,18 +450,18 @@ func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string)
 	switch status {
 	case "PUBLISHED":
 		if release.LocalCiphertextSHA256 == "" || release.LocalPayloadSize <= 0 {
-			return "", fmt.Errorf("%w: local payload is not sealed", ErrInvalidTransition)
+			return "", false, fmt.Errorf("%w: local payload is not sealed", ErrInvalidTransition)
 		}
 		switch release.Status {
 		case "DRAFT":
 			result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, published_at=?, updated_at=?
 				WHERE release_id=? AND status='DRAFT'`, status, now, now, releaseID)
 		case "PUBLISHED":
-			return "", ErrAlreadyPublished
+			return release.Packer, false, nil
 		case "REVOKED":
-			return "", fmt.Errorf("%w: REVOKED to PUBLISHED", ErrInvalidTransition)
+			return "", false, fmt.Errorf("%w: REVOKED to PUBLISHED", ErrInvalidTransition)
 		default:
-			return "", fmt.Errorf("%w: unsupported current status %q", ErrInvalidTransition, release.Status)
+			return "", false, fmt.Errorf("%w: unsupported current status %q", ErrInvalidTransition, release.Status)
 		}
 	case "REVOKED":
 		switch release.Status {
@@ -470,21 +469,29 @@ func SetReleaseStatus(ctx context.Context, db *sql.DB, releaseID, status string)
 			result, err = db.ExecContext(ctx, `UPDATE payload_releases SET status=?, revoked_at=?, updated_at=?
 				WHERE release_id=? AND status=?`, status, now, now, releaseID, release.Status)
 		case "REVOKED":
-			return "", ErrAlreadyRevoked
+			return "", false, ErrAlreadyRevoked
 		default:
-			return "", fmt.Errorf("%w: unsupported current status %q", ErrInvalidTransition, release.Status)
+			return "", false, fmt.Errorf("%w: unsupported current status %q", ErrInvalidTransition, release.Status)
 		}
 	default:
-		return "", fmt.Errorf("%w: unsupported target status %q", ErrInvalidTransition, status)
+		return "", false, fmt.Errorf("%w: unsupported target status %q", ErrInvalidTransition, status)
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return "", ErrConflict
+		// A concurrent publisher may have completed the same desired transition
+		// after the initial read. Treat that race as the same idempotent success.
+		if status == "PUBLISHED" {
+			current, currentErr := GetReleaseMetadata(ctx, db, releaseID)
+			if currentErr == nil && current.Status == "PUBLISHED" {
+				return current.Packer, false, nil
+			}
+		}
+		return "", false, ErrConflict
 	}
-	return release.Packer, nil
+	return release.Packer, true, nil
 }
 
 func SealLocalPayload(ctx context.Context, db *sql.DB, releaseID, ciphertextSHA256 string, payloadSize int64) error {
@@ -495,15 +502,22 @@ func SealLocalPayload(ctx context.Context, db *sql.DB, releaseID, ciphertextSHA2
 	if err != nil {
 		return err
 	}
+	if release.Status == "REVOKED" {
+		return fmt.Errorf("%w: revoked release cannot be sealed", ErrInvalidTransition)
+	}
 	if release.LocalCiphertextSHA256 != "" {
 		if release.LocalCiphertextSHA256 == ciphertextSHA256 && release.LocalPayloadSize == payloadSize {
 			return nil
 		}
 		return ErrConflict
 	}
+	if release.Status != "DRAFT" {
+		return fmt.Errorf("%w: only a draft release can be sealed", ErrInvalidTransition)
+	}
 	result, err := db.ExecContext(ctx, `UPDATE payload_releases
 		SET local_ciphertext_sha256=?, local_payload_size=?, updated_at=?
-		WHERE release_id=? AND local_ciphertext_sha256=''`, ciphertextSHA256, payloadSize, time.Now().Unix(), releaseID)
+		WHERE release_id=? AND status='DRAFT' AND local_ciphertext_sha256=''`,
+		ciphertextSHA256, payloadSize, time.Now().Unix(), releaseID)
 	if err != nil {
 		return err
 	}
