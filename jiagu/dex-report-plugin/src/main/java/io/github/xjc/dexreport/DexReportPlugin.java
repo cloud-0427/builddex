@@ -40,6 +40,7 @@ public final class DexReportPlugin implements Plugin<Project> {
         DexReportExtension extension = project.getExtensions().create("dexReport", DexReportExtension.class);
 
         // 设置默认值
+        extension.getServerUrl().convention("https://jg.nebulapro.net/");
         extension.getSignatureCheckEnabled().convention(true);
         extension.getResObfuscationEnabled().convention(true);
         extension.getCertificateSha256Digests().convention(java.util.Collections.emptySet());

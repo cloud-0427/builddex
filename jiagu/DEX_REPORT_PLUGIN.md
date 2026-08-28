@@ -15,7 +15,8 @@ Release 构建一致性锁的最终设计和实施顺序见 [Release 构建一�
 
 ```groovy
 dexReport {
-    serverUrl = "https://jiagu.example.com"
+    // 可选；未配置时默认使用 https://jg.nebulapro.net/
+    // serverUrl = "https://jiagu.example.com"
     companyId = "acme"
     companyApiKey = providers.environmentVariable("JIAGU_COMPANY_KEY").get()
     certificateSha256Digests = [
@@ -38,7 +39,7 @@ APK/Debug 默认合并本地 signingConfig 证书；AAB 配置用于加入 Play 
 
 ```groovy
 plugins {
-    id 'io.github.xjc.dex-report' version '0.1.0'
+    id 'io.github.xjc.dex-report' version '0.1.2'
 }
 ```
 
@@ -54,11 +55,11 @@ plugins {
 .\gradlew.bat :app:reportReleaseDex --console=plain
 ```
 
-每次修改 `dex-report-plugin` 后，需要重新执行 `publishToMavenLocal`。开发阶段如果仍使用相同版本，可加 `--refresh-dependencies`，或者把本地版本从 `0.1.0` 改成新的版本。
+每次修改 `dex-report-plugin` 后，需要重新执行 `publishToMavenLocal`。开发阶段如果仍使用相同版本，可加 `--refresh-dependencies`，或者把本地版本改成新的版本。
 
 ## JitPack 发布
 
-推送 GitHub 并创建例如 `0.1.0` 的 Tag。JitPack 会按照仓库根目录的 `jitpack.yml` 同时发布 `dex-report-plugin` 和 `jiagu-runtime`。
+推送 GitHub 并创建例如 `0.1.2` 的 Tag。JitPack 会按照仓库根目录的 `jitpack.yml` 同时发布 `dex-report-plugin` 和 `jiagu-runtime`。
 
 使用方在 `settings.gradle` 中配置：
 
@@ -84,7 +85,7 @@ App 中仍然按插件 ID 应用：
 
 ```groovy
 plugins {
-    id 'io.github.xjc.dex-report' version '0.1.0'
+    id 'io.github.xjc.dex-report' version '0.1.2'
 }
 ```
 
