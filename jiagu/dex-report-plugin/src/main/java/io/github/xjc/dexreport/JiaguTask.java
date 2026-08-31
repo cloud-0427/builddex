@@ -376,11 +376,7 @@ public abstract class JiaguTask extends DefaultTask {
 
         // 适度回调：保留 R 类在壳中。
         // 完全移除 R 类可能导致某些系统资源（如图标、主题）在壳 Application 阶段解析失败。
-        boolean shouldKeepInShell = name.startsWith("io/github/xjc/jiagu/") ||
-                                    name.startsWith("com/google/crypto/tink/") ||
-                                    name.startsWith("com/google/android/play/") ||
-                                    name.startsWith("com/google/android/gms/") ||
-                                    name.contains("/R$") || name.endsWith("/R.class");
+        boolean shouldKeepInShell = shouldKeepInShell(name);
 
         if (shouldKeepInShell || !name.endsWith(".class")) {
             // 壳程序代码、白名单代码 或 非代码资源：透传到输出 JAR (壳 JAR)
@@ -396,6 +392,23 @@ public abstract class JiaguTask extends DefaultTask {
             businessJos.closeEntry();
         }
         processedNames.add(name);
+    }
+
+    static boolean shouldKeepInShell(String name) {
+        return name.startsWith("io/github/xjc/jiagu/") ||
+                name.startsWith("com/google/crypto/tink/") ||
+                name.startsWith("com/google/android/play/") ||
+                name.startsWith("com/google/android/gms/") ||
+                // Device authorization runs before the encrypted business DEX is loaded.
+                // Keep its complete HTTP stack in the shell so NetworkHelper can initialize.
+                name.startsWith("okhttp3/") ||
+                name.startsWith("okio/") ||
+                name.startsWith("org/conscrypt/") ||
+                name.startsWith("kotlin/") ||
+                name.startsWith("androidx/startup/") ||
+                name.startsWith("org/jetbrains/annotations/") ||
+                name.startsWith("org/jspecify/annotations/") ||
+                name.contains("/R$") || name.endsWith("/R.class");
     }
 
     private void deleteDirectory(File directory) {

@@ -2,35 +2,29 @@ package io.github.xjc.jiagu;
 
 import org.junit.Test;
 
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.util.List;
+
+import okhttp3.ConnectionSpec;
+import okhttp3.Request;
+import okhttp3.TlsVersion;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 
 public class NetworkHelperHttpTest {
     @Test
-    public void runtimeRequestsDisableConnectionReuse() throws Exception {
-        RecordingConnection connection = new RecordingConnection();
-        NetworkHelper.disableConnectionReuse(connection);
-        assertEquals("close", connection.connectionHeader);
+    public void runtimeRequestsUseOkHttpDefaultConnectionPersistence() throws Exception {
+        Request request = NetworkHelper.buildRequest("https://example.com/test", new byte[] {1});
+        assertNull(request.header("Connection"));
+        assertEquals("application/json, application/octet-stream", request.header("Accept"));
     }
 
-    private static final class RecordingConnection extends HttpURLConnection {
-        String connectionHeader;
-
-        RecordingConnection() throws Exception {
-            super(new URL("http://127.0.0.1/"));
-        }
-
-        @Override
-        public void setRequestProperty(String key, String value) {
-            if ("Connection".equalsIgnoreCase(key)) {
-                connectionHeader = value;
-            }
-        }
-
-        @Override public void disconnect() {}
-        @Override public boolean usingProxy() { return false; }
-        @Override public void connect() {}
+    @Test
+    public void runtimePrefersTls13AndFallsBackToTls12() {
+        List<ConnectionSpec> specs = NetworkHelper.connectionSpecs();
+        assertEquals(TlsVersion.TLS_1_3, specs.get(0).tlsVersions().get(0));
+        assertEquals(TlsVersion.TLS_1_2, specs.get(1).tlsVersions().get(0));
+        assertFalse(specs.get(2).isTls());
     }
 }

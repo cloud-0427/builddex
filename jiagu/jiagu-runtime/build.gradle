@@ -67,6 +67,8 @@ afterEvaluate {
 
 dependencies {
     implementation libs.appcompat
+    implementation 'com.squareup.okhttp3:okhttp:5.4.0'
+    implementation 'org.conscrypt:conscrypt-android:2.5.3'
     implementation 'com.google.android.play:integrity:1.6.0'
     // Android only guarantees the platform Ed25519 provider from API 33.
     // Tink supplies a verified implementation for the runtime's minSdk 29.

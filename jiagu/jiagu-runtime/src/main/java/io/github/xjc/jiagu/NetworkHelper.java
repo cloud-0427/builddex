@@ -17,12 +17,10 @@ import com.google.android.play.core.integrity.StandardIntegrityManager;
 
 import org.json.JSONObject;
 import org.json.JSONArray;
+import org.conscrypt.Conscrypt;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
@@ -30,6 +28,7 @@ import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
+import java.security.Provider;
 import java.security.SignatureException;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
@@ -44,6 +43,19 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
+
+import okhttp3.ConnectionSpec;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+import okhttp3.TlsVersion;
 
 /** Device-bound authorization client used by the native shell during startup. */
 public final class NetworkHelper {
@@ -53,8 +65,12 @@ public final class NetworkHelper {
     private static final int HTTP_TIMEOUT_MS = 15_000;
     private static final int MAX_JSON_BYTES = 2 * 1024 * 1024;
     private static final int MAX_PAYLOAD_BYTES = 128 * 1024 * 1024;
-
+    private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
     private NetworkHelper() {}
+
+    private static final class HttpClientHolder {
+        private static final OkHttpClient INSTANCE = createHttpClient();
+    }
 
     /**
      * Authorizes the device and decrypts the APK-local payload into one direct buffer.
@@ -444,36 +460,27 @@ public final class NetworkHelper {
     }
 
     private static byte[] request(String url, byte[] body, int maxResponseBytes) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        connection.setRequestMethod("POST");
-        connection.setConnectTimeout(HTTP_TIMEOUT_MS);
-        connection.setReadTimeout(HTTP_TIMEOUT_MS);
-        connection.setDoOutput(true);
-        connection.setUseCaches(false);
-        // Keep this local to Jiagu requests. Disabling JVM-wide keep-alive would
-        // affect every HTTP client in the host application.
-        disableConnectionReuse(connection);
-        connection.setRequestProperty("Content-Type", "application/json");
-        connection.setRequestProperty("Accept", "application/json, application/octet-stream");
-        connection.setFixedLengthStreamingMode(body.length);
+        Request request = buildRequest(url, body);
         int status;
-        byte[] response;
-        try {
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(body);
+        byte[] responseBytes;
+        try (Response response = HttpClientHolder.INSTANCE.newCall(request).execute()) {
+            status = response.code();
+            ResponseBody responseBody = response.body();
+            if (responseBody == null) {
+                responseBytes = new byte[0];
+            } else {
+                long contentLength = responseBody.contentLength();
+                if (contentLength > maxResponseBytes) {
+                    throw new SecurityException("Jiagu response exceeds size limit");
+                }
+                responseBytes = readLimited(responseBody.byteStream(), maxResponseBytes);
             }
-            status = connection.getResponseCode();
-            InputStream input = status >= 200 && status < 300
-                    ? connection.getInputStream() : connection.getErrorStream();
-            response = readLimited(input, maxResponseBytes);
-        } finally {
-            connection.disconnect();
         }
         if (status < 200 || status >= 300) {
             String code = "HTTP_" + status;
             String message = "request rejected";
             try {
-                JSONObject error = new JSONObject(new String(response, StandardCharsets.UTF_8));
+                JSONObject error = new JSONObject(new String(responseBytes, StandardCharsets.UTF_8));
                 code = error.optString("code", code);
                 message = error.optString("message", message);
             } catch (Exception ignored) {
@@ -481,11 +488,59 @@ public final class NetworkHelper {
             }
             throw new SecurityException("Jiagu server rejected request: " + code + ": " + message);
         }
-        return response;
+        return responseBytes;
     }
 
-    static void disableConnectionReuse(HttpURLConnection connection) {
-        connection.setRequestProperty("Connection", "close");
+    static Request buildRequest(String url, byte[] body) {
+        return new Request.Builder()
+                .url(url)
+                .header("Accept", "application/json, application/octet-stream")
+                .post(RequestBody.create(body, JSON_MEDIA_TYPE))
+                .build();
+    }
+
+    static List<ConnectionSpec> connectionSpecs() {
+        ConnectionSpec tls13 = new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+                .tlsVersions(TlsVersion.TLS_1_3)
+                .build();
+        ConnectionSpec tls12 = new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+                .tlsVersions(TlsVersion.TLS_1_2)
+                .build();
+        return Arrays.asList(tls13, tls12, ConnectionSpec.CLEARTEXT);
+    }
+
+    private static OkHttpClient createHttpClient() {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .connectTimeout(HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .readTimeout(HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .writeTimeout(HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .connectionSpecs(connectionSpecs())
+                .retryOnConnectionFailure(true);
+        try {
+            Provider provider = Conscrypt.newProvider();
+            X509TrustManager trustManager = defaultTrustManager();
+            SSLContext sslContext = SSLContext.getInstance("TLS", provider);
+            sslContext.init(null, new TrustManager[] {trustManager}, null);
+            builder.sslSocketFactory(sslContext.getSocketFactory(), trustManager);
+            Log.i(TAG, "Using bundled Conscrypt TLS provider: " + provider.getName());
+        } catch (Throwable error) {
+            // Unsupported ABI or provider initialization failure must not make the app unstartable.
+            // OkHttp will use Android's platform TLS provider as a compatibility fallback.
+            Log.w(TAG, "Bundled Conscrypt unavailable; using Android platform TLS", error);
+        }
+        return builder.build();
+    }
+
+    private static X509TrustManager defaultTrustManager() throws Exception {
+        TrustManagerFactory factory = TrustManagerFactory.getInstance(
+                TrustManagerFactory.getDefaultAlgorithm());
+        factory.init((KeyStore) null);
+        for (TrustManager manager : factory.getTrustManagers()) {
+            if (manager instanceof X509TrustManager) {
+                return (X509TrustManager) manager;
+            }
+        }
+        throw new IllegalStateException("No system X509TrustManager available");
     }
 
     private static byte[] readLimited(InputStream input, int limit) throws Exception {
