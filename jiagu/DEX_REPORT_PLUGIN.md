@@ -39,7 +39,7 @@ APK/Debug 默认合并本地 signingConfig 证书；AAB 配置用于加入 Play 
 
 ```groovy
 plugins {
-    id 'io.github.xjc.dex-report' version '0.1.2'
+    id 'io.github.xjc.dex-report' version '0.1.3'
 }
 ```
 
@@ -59,7 +59,7 @@ plugins {
 
 ## JitPack 发布
 
-推送 GitHub 并创建例如 `0.1.2` 的 Tag。JitPack 会按照仓库根目录的 `jitpack.yml` 同时发布 `dex-report-plugin` 和 `jiagu-runtime`。
+推送 GitHub 并创建例如 `0.1.3` 的 Tag。JitPack 会按照仓库根目录的 `jitpack.yml` 同时发布 `dex-report-plugin` 和 `jiagu-runtime`。
 
 使用方在 `settings.gradle` 中配置：
 
@@ -85,7 +85,7 @@ App 中仍然按插件 ID 应用：
 
 ```groovy
 plugins {
-    id 'io.github.xjc.dex-report' version '0.1.2'
+    id 'io.github.xjc.dex-report' version '0.1.3'
 }
 ```
 
