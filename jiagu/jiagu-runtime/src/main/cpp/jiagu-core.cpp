@@ -194,10 +194,112 @@ static int read_int_be(const char* data, size_t& offset) {
     return value;
 }
 
+static int android_sdk_int(JNIEnv* env) {
+    jclass version_class = env->FindClass("android/os/Build$VERSION");
+    JNI_CHECK_NULL(version_class, "Build.VERSION class not found", -1);
+    jfieldID sdk_int_field = env->GetStaticFieldID(version_class, "SDK_INT", "I");
+    JNI_CHECK_NULL(sdk_int_field, "Build.VERSION.SDK_INT not found", -1);
+    return env->GetStaticIntField(version_class, sdk_int_field);
+}
+
+// Android 10 and 11 initialize the legacy AndroidKeyStore through
+// ActivityThread.currentApplication(). Application.attachBaseContext() runs before
+// ActivityThread assigns mInitialApplication, so make the proxy visible temporarily.
+static bool prepare_legacy_keystore_context(JNIEnv* env, jobject proxy_app) {
+    int sdk_int = android_sdk_int(env);
+    if (sdk_int < 0) return false;
+    if (sdk_int < 29 || sdk_int > 30) return true;
+
+    jclass activity_thread_class = env->FindClass("android/app/ActivityThread");
+    JNI_CHECK_NULL(activity_thread_class, "ActivityThread class not found for Keystore bridge", false);
+    jmethodID current_method = env->GetStaticMethodID(
+            activity_thread_class, "currentActivityThread", "()Landroid/app/ActivityThread;");
+    JNI_CHECK_NULL(current_method, "ActivityThread.currentActivityThread not found", false);
+    jobject activity_thread = env->CallStaticObjectMethod(activity_thread_class, current_method);
+    JNI_CHECK_NULL(activity_thread, "ActivityThread.currentActivityThread returned null", false);
+    jfieldID initial_application_field = env->GetFieldID(
+            activity_thread_class, "mInitialApplication", "Landroid/app/Application;");
+    JNI_CHECK_NULL(initial_application_field, "ActivityThread.mInitialApplication not found", false);
+
+    jobject initial_application = env->GetObjectField(activity_thread, initial_application_field);
+    if (!initial_application) {
+        env->SetObjectField(activity_thread, initial_application_field, proxy_app);
+        if (env->ExceptionCheck()) {
+            LOGE("Jiagu_Native: failed to install Android 10/11 Keystore context bridge");
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            return false;
+        }
+        LOGD("Android API %d Keystore context bridge installed", sdk_int);
+    }
+    return true;
+}
+
+// attachBaseContext() is still inside LoadedApk.makeApplication(). Older Android versions
+// overwrite fields changed during nativeAttach after it returns. Reapply the binding from
+// nativeOnCreate, when framework Application construction has completed.
+static bool bind_real_application(JNIEnv* env, jobject proxy_app, jobject real_app) {
+    jclass activity_thread_class = env->FindClass("android/app/ActivityThread");
+    JNI_CHECK_NULL(activity_thread_class, "ActivityThread class not found", false);
+    jmethodID current_method = env->GetStaticMethodID(
+            activity_thread_class, "currentActivityThread", "()Landroid/app/ActivityThread;");
+    JNI_CHECK_NULL(current_method, "ActivityThread.currentActivityThread not found", false);
+    jobject activity_thread = env->CallStaticObjectMethod(activity_thread_class, current_method);
+    JNI_CHECK_NULL(activity_thread, "ActivityThread.currentActivityThread returned null", false);
+
+    jfieldID bound_application_field = env->GetFieldID(
+            activity_thread_class, "mBoundApplication", "Landroid/app/ActivityThread$AppBindData;");
+    JNI_CHECK_NULL(bound_application_field, "ActivityThread.mBoundApplication not found", false);
+    jobject bound_application = env->GetObjectField(activity_thread, bound_application_field);
+    JNI_CHECK_NULL(bound_application, "ActivityThread.mBoundApplication returned null", false);
+
+    jclass app_bind_data_class = env->GetObjectClass(bound_application);
+    JNI_CHECK_NULL(app_bind_data_class, "AppBindData class not found", false);
+    jfieldID info_field = env->GetFieldID(app_bind_data_class, "info", "Landroid/app/LoadedApk;");
+    JNI_CHECK_NULL(info_field, "AppBindData.info not found", false);
+    jobject loaded_apk = env->GetObjectField(bound_application, info_field);
+    JNI_CHECK_NULL(loaded_apk, "LoadedApk not found", false);
+
+    jclass loaded_apk_class = env->GetObjectClass(loaded_apk);
+    JNI_CHECK_NULL(loaded_apk_class, "LoadedApk class not found", false);
+    jfieldID application_field = env->GetFieldID(
+            loaded_apk_class, "mApplication", "Landroid/app/Application;");
+    JNI_CHECK_NULL(application_field, "LoadedApk.mApplication not found", false);
+    env->SetObjectField(loaded_apk, application_field, real_app);
+
+    jfieldID initial_application_field = env->GetFieldID(
+            activity_thread_class, "mInitialApplication", "Landroid/app/Application;");
+    JNI_CHECK_NULL(initial_application_field, "ActivityThread.mInitialApplication not found", false);
+    env->SetObjectField(activity_thread, initial_application_field, real_app);
+
+    jfieldID all_applications_field = env->GetFieldID(
+            activity_thread_class, "mAllApplications", "Ljava/util/ArrayList;");
+    JNI_CHECK_NULL(all_applications_field, "ActivityThread.mAllApplications not found", false);
+    jobject all_applications = env->GetObjectField(activity_thread, all_applications_field);
+    JNI_CHECK_NULL(all_applications, "ActivityThread.mAllApplications returned null", false);
+    jclass array_list_class = env->FindClass("java/util/ArrayList");
+    JNI_CHECK_NULL(array_list_class, "ArrayList class not found", false);
+    jmethodID remove_method = env->GetMethodID(array_list_class, "remove", "(Ljava/lang/Object;)Z");
+    JNI_CHECK_NULL(remove_method, "ArrayList.remove not found", false);
+    jmethodID add_method = env->GetMethodID(array_list_class, "add", "(Ljava/lang/Object;)Z");
+    JNI_CHECK_NULL(add_method, "ArrayList.add not found", false);
+    env->CallBooleanMethod(all_applications, remove_method, proxy_app);
+    env->CallBooleanMethod(all_applications, remove_method, real_app);
+    env->CallBooleanMethod(all_applications, add_method, real_app);
+    if (env->ExceptionCheck()) {
+        LOGE("Jiagu_Native: failed to bind real Application");
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
 // --- 核心逻辑：Native 代理实现 ---
 
 static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     LOGD("Native: Starting attachBaseContext proxy...");
+    if (!prepare_legacy_keystore_context(env, thiz)) return;
 
     // 1. 获取配置 (URL 和 REAL_APPLICATION)
     jclass context_class = env->GetObjectClass(context);
@@ -455,47 +557,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         JNI_CHECK_NULL(real_app_obj, "RealApplication instance creation failed", );
         gRealApp = env->NewGlobalRef(real_app_obj);
 
-        jclass activity_thread_cls = env->FindClass("android/app/ActivityThread");
-        JNI_CHECK_NULL(activity_thread_cls, "ActivityThread class not found", );
-        jmethodID current_at_mid = env->GetStaticMethodID(activity_thread_cls, "currentActivityThread", "()Landroid/app/ActivityThread;");
-        JNI_CHECK_NULL(current_at_mid, "currentActivityThread method not found", );
-        jobject current_at = env->CallStaticObjectMethod(activity_thread_cls, current_at_mid);
-        JNI_CHECK_NULL(current_at, "currentActivityThread failed", );
-
-        jfieldID m_bound_app_fid = env->GetFieldID(activity_thread_cls, "mBoundApplication", "Landroid/app/ActivityThread$AppBindData;");
-        JNI_CHECK_NULL(m_bound_app_fid, "mBoundApplication field not found", );
-        jobject m_bound_app = env->GetObjectField(current_at, m_bound_app_fid);
-        JNI_CHECK_NULL(m_bound_app, "mBoundApplication not found", );
-
-        jclass app_bind_data_cls = env->GetObjectClass(m_bound_app);
-        JNI_CHECK_NULL(app_bind_data_cls, "AppBindData class not found", );
-        jfieldID info_fid = env->GetFieldID(app_bind_data_cls, "info", "Landroid/app/LoadedApk;");
-        JNI_CHECK_NULL(info_fid, "LoadedApk info field not found", );
-        jobject loaded_apk = env->GetObjectField(m_bound_app, info_fid);
-        JNI_CHECK_NULL(loaded_apk, "LoadedApk not found", );
-
-        jclass loaded_apk_cls = env->GetObjectClass(loaded_apk);
-        JNI_CHECK_NULL(loaded_apk_cls, "LoadedApk class not found", );
-        jfieldID m_app_fid = env->GetFieldID(loaded_apk_cls, "mApplication", "Landroid/app/Application;");
-        JNI_CHECK_NULL(m_app_fid, "mApplication field not found in LoadedApk", );
-        env->SetObjectField(loaded_apk, m_app_fid, gRealApp);
-
-        jfieldID m_initial_app_fid = env->GetFieldID(activity_thread_cls, "mInitialApplication", "Landroid/app/Application;");
-        JNI_CHECK_NULL(m_initial_app_fid, "mInitialApplication field not found", );
-        env->SetObjectField(current_at, m_initial_app_fid, gRealApp);
-
-        jfieldID m_all_apps_fid = env->GetFieldID(activity_thread_cls, "mAllApplications", "Ljava/util/ArrayList;");
-        JNI_CHECK_NULL(m_all_apps_fid, "mAllApplications field not found", );
-        jobject m_all_apps = env->GetObjectField(current_at, m_all_apps_fid);
-        JNI_CHECK_NULL(m_all_apps, "mAllApplications not found", );
-        jclass list_cls = env->FindClass("java/util/ArrayList");
-        JNI_CHECK_NULL(list_cls, "ArrayList class not found", );
-        jmethodID remove_mid = env->GetMethodID(list_cls, "remove", "(Ljava/lang/Object;)Z");
-        JNI_CHECK_NULL(remove_mid, "ArrayList.remove method not found", );
-        jmethodID add_mid = env->GetMethodID(list_cls, "add", "(Ljava/lang/Object;)Z");
-        JNI_CHECK_NULL(add_mid, "ArrayList.add method not found", );
-        env->CallBooleanMethod(m_all_apps, remove_mid, thiz);
-        env->CallBooleanMethod(m_all_apps, add_mid, gRealApp);
+        if (!bind_real_application(env, thiz, gRealApp)) return;
 
         jclass application_cls = env->FindClass("android/app/Application");
         JNI_CHECK_NULL(application_cls, "Application class not found", );
@@ -510,6 +572,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
 
 static void native_on_create(JNIEnv *env, jobject thiz) {
     if (gRealApp) {
+        if (!bind_real_application(env, thiz, gRealApp)) return;
         jclass app_cls = env->GetObjectClass(gRealApp);
         jmethodID on_create_mid = env->GetMethodID(app_cls, "onCreate", "()V");
         env->CallVoidMethod(gRealApp, on_create_mid);
