@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,7 +77,7 @@ func New(cfg config.Config, dbs *store.Manager) http.Handler {
 		api.integrity = integrity.DisabledVerifier{}
 	}
 	api.routes()
-	return requestMiddleware(api.mux)
+	return requestMiddlewareWithConfig(cfg.Logging, recoveryMiddleware(api.mux))
 }
 
 func (a *API) routes() {
@@ -116,9 +118,11 @@ func (a *API) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *API) checkCompanyAuth(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireCompany(w, r); !ok {
+	lease, ok := a.requireCompany(w, r)
+	if !ok {
 		return
 	}
+	defer lease.Release()
 	writeResponse(w, http.StatusOK, "COMPANY_AUTHORIZED", "Company API key is valid.", map[string]any{
 		"companyId": r.PathValue("companyId"),
 	})
@@ -156,7 +160,7 @@ func (a *API) createCompany(w http.ResponseWriter, r *http.Request) {
 	if input.Ext == nil {
 		ext = []byte("{}")
 	}
-	_, err = a.dbs.CreateCompany(r.Context(), store.CreateCompanyInput{
+	lease, err := a.dbs.CreateCompany(r.Context(), store.CreateCompanyInput{
 		CompanyID: input.CompanyID, Description: input.Description, AuthorizedFrom: input.AuthorizedFrom,
 		AuthorizedUntil: input.AuthorizedUntil, PackLimit: input.PackLimit, DeliveryLimit: input.DeliveryLimit,
 		ExtJSON: string(ext), APIKeyHash: secure.SHA256URL([]byte(apiKey)),
@@ -165,6 +169,7 @@ func (a *API) createCompany(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	lease.Release()
 	writeResponse(w, http.StatusCreated, "COMPANY_CREATED", "Company created.", map[string]any{
 		"companyId": input.CompanyID, "companyApiKey": apiKey,
 		"warning": "companyApiKey is returned only once; store it securely",
@@ -175,30 +180,40 @@ func (a *API) listCompanies(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	ids, err := a.dbs.CompanyIDs()
+	page, pageSize := pageParameters(r, 20)
+	ids, total, err := a.dbs.CompanyIDsPage(page, pageSize)
 	if err != nil {
 		writeInternal(w, err)
 		return
 	}
 	companies := make([]store.Company, 0, len(ids))
+	failures := make([]map[string]string, 0)
 	for _, id := range ids {
-		db, err := a.dbs.Open(id)
+		lease, err := a.dbs.Acquire(r.Context(), id)
 		if err != nil {
+			failures = append(failures, map[string]string{"companyId": id, "error": err.Error()})
 			continue
 		}
-		company, err := store.GetCompany(r.Context(), db)
+		company, err := store.GetCompany(r.Context(), lease.DB)
+		lease.Release()
 		if err == nil {
 			companies = append(companies, company)
+		} else {
+			failures = append(failures, map[string]string{"companyId": id, "error": err.Error()})
 		}
 	}
-	writeResponse(w, http.StatusOK, "COMPANIES_LISTED", "Companies listed.", map[string]any{"items": companies})
+	writeResponse(w, http.StatusOK, "COMPANIES_LISTED", "Companies listed.", map[string]any{
+		"items": companies, "failures": failures, "total": total, "page": page, "pageSize": pageSize,
+	})
 }
 
 func (a *API) listPackLogs(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	// companyID := r.PathValue("companyId")
 	// Dual authentication: Admin or Company API Key
 	isAdmin := r.Header.Get("Authorization") == "Bearer "+a.cfg.AdminToken
@@ -241,10 +256,12 @@ func (a *API) getCompany(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	company, err := store.GetCompany(r.Context(), db)
 	if err != nil {
 		writeStoreError(w, err)
@@ -257,10 +274,12 @@ func (a *API) updateCompany(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	current, err := store.GetCompany(r.Context(), db)
 	if err != nil {
 		writeStoreError(w, err)
@@ -325,10 +344,12 @@ func (a *API) deleteCompany(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	current, err := store.GetCompany(r.Context(), db)
 	if err != nil {
 		writeStoreError(w, err)
@@ -347,10 +368,12 @@ func (a *API) deleteCompany(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) publicConfig(w http.ResponseWriter, r *http.Request) {
 	companyID := r.PathValue("companyId")
-	if _, err := a.dbs.Open(companyID); err != nil {
+	lease, err := a.dbs.Acquire(r.Context(), companyID)
+	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	lease.Release()
 	privateKey := secure.CompanySigningKey(a.cfg.MasterKey, companyID)
 	writeResponse(w, http.StatusOK, "PUBLIC_CONFIG_FOUND", "Public configuration found.", map[string]any{
 		"companyId": companyID, "grantAlgorithm": "EdDSA", "serverKeyId": "company-sign-v1",
@@ -361,10 +384,12 @@ func (a *API) publicConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.requireCompany(w, r)
+	lease, ok := a.requireCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	company, err := store.GetCompany(r.Context(), db)
 	if err != nil || !companyActive(company) {
 		writeError(w, http.StatusForbidden, "COMPANY_NOT_AUTHORIZED", "company authorization is inactive")
@@ -525,10 +550,12 @@ func (a *API) createRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) sealRelease(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.requireCompany(w, r)
+	lease, ok := a.requireCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	var input struct {
 		LocalCiphertextSHA256 string `json:"localCiphertextSha256"`
 		LocalPayloadSize      int64  `json:"localPayloadSize"`
@@ -555,11 +582,23 @@ func (a *API) sealRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listReleases(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.requireCompany(w, r)
+	lease, ok := a.requireCompany(w, r)
 	if !ok {
 		return
 	}
-	values, err := store.ListReleases(r.Context(), db)
+	defer lease.Release()
+	db := lease.DB
+	pageSize := queryInt(r, "pageSize", 20)
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	beforeCreatedAt, _ := strconv.ParseInt(r.URL.Query().Get("beforeCreatedAt"), 10, 64)
+	beforeReleaseID := r.URL.Query().Get("beforeReleaseId")
+	if (beforeCreatedAt > 0) != (beforeReleaseID != "") {
+		writeError(w, http.StatusBadRequest, "INVALID_CURSOR", "beforeCreatedAt and beforeReleaseId must be provided together")
+		return
+	}
+	values, hasMore, err := store.ListReleasesPage(r.Context(), db, beforeCreatedAt, beforeReleaseID, pageSize)
 	if err != nil {
 		writeInternal(w, err)
 		return
@@ -568,7 +607,13 @@ func (a *API) listReleases(w http.ResponseWriter, r *http.Request) {
 	for _, value := range values {
 		items = append(items, releaseDetails(value, "", false))
 	}
-	writeResponse(w, http.StatusOK, "RELEASES_LISTED", "Releases listed.", map[string]any{"items": items})
+	details := map[string]any{"items": items, "pageSize": pageSize, "hasMore": hasMore}
+	if hasMore && len(values) > 0 {
+		last := values[len(values)-1]
+		details["nextBeforeCreatedAt"] = last.CreatedAt
+		details["nextBeforeReleaseId"] = last.ReleaseID
+	}
+	writeResponse(w, http.StatusOK, "RELEASES_LISTED", "Releases listed.", details)
 }
 
 func (a *API) publishRelease(w http.ResponseWriter, r *http.Request) {
@@ -579,10 +624,12 @@ func (a *API) revokeRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) changeReleaseStatus(w http.ResponseWriter, r *http.Request, status, operation string) {
-	db, ok := a.requireCompany(w, r)
+	lease, ok := a.requireCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	packer, changed, err := store.SetReleaseStatus(r.Context(), db, r.PathValue("releaseId"), status)
 	if err != nil {
 		writeStoreError(w, err)
@@ -604,10 +651,12 @@ func (a *API) changeReleaseStatus(w http.ResponseWriter, r *http.Request, status
 }
 
 func (a *API) createChallenge(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	company, err := store.GetCompany(r.Context(), db)
 	if err != nil || !companyActive(company) {
 		writeError(w, http.StatusForbidden, "COMPANY_NOT_AUTHORIZED", "company authorization is inactive")
@@ -635,10 +684,12 @@ func (a *API) createChallenge(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) enrollDevice(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	company, err := store.GetCompany(r.Context(), db)
 	if err != nil || !companyActive(company) {
 		writeError(w, http.StatusForbidden, "COMPANY_NOT_AUTHORIZED", "company authorization is inactive")
@@ -713,10 +764,12 @@ func (a *API) enrollDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	var input struct {
 		ChallengeID      string `json:"challengeId"`
 		Challenge        string `json:"challenge"`
@@ -834,10 +887,12 @@ func (a *API) addRevocation(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	db, ok := a.openCompany(w, r)
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return
 	}
+	defer lease.Release()
+	db := lease.DB
 	var input struct {
 		TargetType string `json:"targetType"`
 		TargetHash string `json:"targetHash"`
@@ -868,16 +923,17 @@ func (a *API) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func (a *API) requireCompany(w http.ResponseWriter, r *http.Request) (*sql.DB, bool) {
-	db, ok := a.openCompany(w, r)
+func (a *API) requireCompany(w http.ResponseWriter, r *http.Request) (*store.Lease, bool) {
+	lease, ok := a.openCompany(w, r)
 	if !ok {
 		return nil, false
 	}
-	if err := store.AuthenticateCompany(r.Context(), db, secure.SHA256URL([]byte(r.Header.Get("X-Company-Key")))); err != nil {
+	if err := store.AuthenticateCompany(r.Context(), lease.DB, secure.SHA256URL([]byte(r.Header.Get("X-Company-Key")))); err != nil {
+		lease.Release()
 		writeError(w, http.StatusUnauthorized, "COMPANY_UNAUTHORIZED", "invalid company API key")
 		return nil, false
 	}
-	return db, true
+	return lease, true
 }
 
 func publishedRelease(w http.ResponseWriter, r *http.Request, db *sql.DB, releaseID string) (store.Release, bool) {
@@ -912,13 +968,13 @@ func availableRelease(w http.ResponseWriter, release store.Release, err error) (
 	return release, true
 }
 
-func (a *API) openCompany(w http.ResponseWriter, r *http.Request) (*sql.DB, bool) {
-	db, err := a.dbs.Open(r.PathValue("companyId"))
+func (a *API) openCompany(w http.ResponseWriter, r *http.Request) (*store.Lease, bool) {
+	lease, err := a.dbs.Acquire(r.Context(), r.PathValue("companyId"))
 	if err != nil {
 		writeStoreError(w, err)
 		return nil, false
 	}
-	return db, true
+	return lease, true
 }
 
 func companyActive(company store.Company) bool {
@@ -1063,11 +1119,61 @@ func canonical(values ...string) []byte {
 	return []byte(builder.String())
 }
 
+func queryInt(r *http.Request, name string, fallback int) int {
+	value, err := strconv.Atoi(r.URL.Query().Get(name))
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func pageParameters(r *http.Request, defaultPageSize int) (int, int) {
+	page := queryInt(r, "page", 1)
+	pageSize := queryInt(r, "pageSize", defaultPageSize)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = defaultPageSize
+	}
+	return page, pageSize
+}
+
 type contextKey string
 
 const requestIDKey contextKey = "requestId"
 
+func recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				zap.L().Error("panic recovered",
+					zap.String("requestId", requestID(r.Context())),
+					zap.String("method", r.Method),
+					zap.String("path", r.URL.Path),
+					zap.Any("panic", recovered),
+					zap.ByteString("stack", debug.Stack()))
+
+				// Once headers or a response body have been sent, the status code can
+				// no longer be replaced safely. The access log still records the
+				// original response and the panic log contains the failure details.
+				if tracked, ok := w.(*statusWriter); ok && tracked.committed {
+					return
+				}
+				writeResponse(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error", map[string]any{})
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func requestMiddleware(next http.Handler) http.Handler {
+	return requestMiddlewareWithConfig(config.LoggingConfig{
+		SuccessSampleRate: 1, SlowRequestThreshold: 500 * time.Millisecond,
+	}, next)
+}
+
+func requestMiddlewareWithConfig(logging config.LoggingConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedAt := time.Now()
 		id := r.Header.Get("X-Request-Id")
@@ -1079,24 +1185,57 @@ func requestMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
 		tracked := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(tracked, r.WithContext(ctx))
-		zap.L().Info("http request", zap.String("requestId", id), zap.String("method", r.Method),
-			zap.String("path", r.URL.Path), zap.Int("status", tracked.status), zap.Int("bytes", tracked.bytes),
-			zap.Duration("duration", time.Since(startedAt)))
+		duration := time.Since(startedAt)
+		if shouldLogRequest(logging, id, r.URL.Path, tracked.status, duration) {
+			zap.L().Info("http request", zap.String("requestId", id), zap.String("method", r.Method),
+				zap.String("path", r.URL.Path), zap.Int("status", tracked.status), zap.Int("bytes", tracked.bytes),
+				zap.Duration("duration", duration))
+		}
 	})
+}
+
+func shouldLogRequest(logging config.LoggingConfig, requestID, path string, status int, duration time.Duration) bool {
+	if status >= http.StatusBadRequest {
+		return true
+	}
+	slowThreshold := logging.SlowRequestThreshold
+	if slowThreshold <= 0 {
+		slowThreshold = 500 * time.Millisecond
+	}
+	if duration >= slowThreshold {
+		return true
+	}
+	if path == "/healthz" || path == "/readyz" || logging.SuccessSampleRate <= 0 {
+		return false
+	}
+	if logging.SuccessSampleRate >= 1 {
+		return true
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(requestID))
+	return float64(hash.Sum32())/float64(^uint32(0)) < logging.SuccessSampleRate
 }
 
 type statusWriter struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status    int
+	bytes     int
+	committed bool
 }
 
 func (w *statusWriter) WriteHeader(status int) {
+	if w.committed {
+		return
+	}
+	w.committed = true
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *statusWriter) Write(value []byte) (int, error) {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
 	written, err := w.ResponseWriter.Write(value)
 	w.bytes += written
 	return written, err

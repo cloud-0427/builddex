@@ -79,6 +79,22 @@
     return envelope.details;
   }
 
+  async function requestAllCompanies() {
+    const pageSize = 100;
+    const items = [];
+    const failures = [];
+    let page = 1;
+    let total = 0;
+    do {
+      const data = await request(`/api/v1/companies?page=${page}&pageSize=${pageSize}`);
+      items.push(...(data.items || []));
+      failures.push(...(data.failures || []));
+      total = data.total || 0;
+      page += 1;
+    } while ((page - 1) * pageSize < total);
+    return { items, failures, total };
+  }
+
   const formatDate = (seconds, forever = false) => {
     if (!seconds) return forever ? "永久有效" : "—";
     return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(seconds * 1000));
@@ -109,7 +125,7 @@
       tableState.innerHTML = '<span class="spinner"></span><p>正在读取公司信息…</p>';
     }
     try {
-      const data = await request("/api/v1/companies");
+      const data = await requestAllCompanies();
       state.companies = data.items || [];
       render();
       tableState.classList.add("hidden");
@@ -399,7 +415,7 @@
     token = event.currentTarget.elements.token.value.trim();
     $("#tokenError").textContent = "";
     try {
-      const data = await request("/api/v1/companies");
+      const data = await requestAllCompanies();
       sessionStorage.setItem("jiagu.adminToken", token);
       state.companies = data.items || [];
       tokenDialog.close();

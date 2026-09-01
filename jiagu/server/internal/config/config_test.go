@@ -26,6 +26,10 @@ func TestDisabledModeUsesDevelopmentDefaults(t *testing.T) {
 	if cfg.GrantTTL != 7*24*time.Hour {
 		t.Fatalf("unexpected default grant TTL: %s", cfg.GrantTTL)
 	}
+	if cfg.MaxOpenCompanyDatabases != 128 || cfg.DatabaseMaxOpenConns != 2 || cfg.DatabaseMaxIdleConns != 1 ||
+		cfg.ChallengeCleanupInterval != 5*time.Minute || cfg.Logging.SlowRequestThreshold != 500*time.Millisecond {
+		t.Fatalf("unexpected performance defaults: %+v", cfg)
+	}
 }
 
 func TestProfileFilesAndEnvironmentOverride(t *testing.T) {

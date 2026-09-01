@@ -34,12 +34,15 @@ $env:JIAGU_INTEGRITY_MODE = "disabled"
 go run ./cmd/jiagu-server
 ```
 
-生产环境应使用：
+当前线上过渡阶段使用 `integrityMode=disabled`。关闭 Play Integrity 不等于允许使用开发密钥，生产环境仍必须注入独立的管理 Token 和随机主密钥：
 
 ```text
-JIAGU_INTEGRITY_MODE=google
-GOOGLE_APPLICATION_CREDENTIALS=/secure/path/play-integrity-service-account.json
+JIAGU_INTEGRITY_MODE=disabled
+JIAGU_ADMIN_TOKEN=<secure-admin-token>
+JIAGU_MASTER_KEY_B64=<base64-random-master-key>
 ```
+
+后续启用 Play Integrity 时，将 `JIAGU_INTEGRITY_MODE` 改为 `google`，并配置 `GOOGLE_APPLICATION_CREDENTIALS`。`disabled` 是临时线上策略，不是最终安全目标。
 
 健康检查：
 
@@ -55,6 +58,7 @@ GET http://127.0.0.1:8761/healthz
 - [打包与解包流程](docs/04-pack-unpack-flow.md)
 - [安全、配置与运维](docs/05-security-operations.md)
 - [多环境配置与日志滚动](docs/06-environments-logging.md)
+- [服务端性能优化方案](docs/07-performance-optimization-plan.md)
 - [Release 构建一致性锁实施计划](../docs/02-release-build-lock-implementation-plan.md)
 
 ## 验证

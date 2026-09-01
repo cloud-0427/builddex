@@ -31,9 +31,63 @@ var (
 )
 
 type Manager struct {
-	dir string
-	mu  sync.Mutex
-	dbs map[string]*sql.DB
+	dir     string
+	options ManagerOptions
+	mu      sync.Mutex
+	dbs     map[string]*databaseEntry
+	gates   map[string]*companyGate
+	closed  bool
+}
+
+type ManagerOptions struct {
+	MaxOpenDatabases int
+	DatabaseIdleTTL  time.Duration
+	MaxOpenConns     int
+	MaxIdleConns     int
+	ConnMaxIdleTime  time.Duration
+	ConnMaxLifetime  time.Duration
+}
+
+type databaseEntry struct {
+	db       *sql.DB
+	active   int
+	lastUsed time.Time
+}
+
+type companyGate struct {
+	mu   sync.Mutex
+	refs int
+}
+
+type Lease struct {
+	DB             *sql.DB
+	manager        *Manager
+	companyID      string
+	entry          *databaseEntry
+	touchOnRelease bool
+	once           sync.Once
+}
+
+func (l *Lease) Release() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() {
+		l.manager.mu.Lock()
+		if current := l.manager.dbs[l.companyID]; current == l.entry {
+			if current.active > 0 {
+				current.active--
+			}
+			if l.touchOnRelease {
+				current.lastUsed = time.Now()
+			}
+		}
+		shouldPrune := len(l.manager.dbs) > l.manager.options.MaxOpenDatabases
+		l.manager.mu.Unlock()
+		if shouldPrune {
+			_, _ = l.manager.PruneIdle(time.Now())
+		}
+	})
 }
 
 type Company struct {
@@ -95,6 +149,10 @@ type NewRelease struct {
 }
 
 func NewManager(dir string) (*Manager, error) {
+	return NewManagerWithOptions(dir, ManagerOptions{})
+}
+
+func NewManagerWithOptions(dir string, options ManagerOptions) (*Manager, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -102,7 +160,30 @@ func NewManager(dir string) (*Manager, error) {
 	if err := os.MkdirAll(abs, 0o750); err != nil {
 		return nil, err
 	}
-	return &Manager{dir: abs, dbs: make(map[string]*sql.DB)}, nil
+	options = normalizeManagerOptions(options)
+	return &Manager{dir: abs, options: options, dbs: make(map[string]*databaseEntry), gates: make(map[string]*companyGate)}, nil
+}
+
+func normalizeManagerOptions(options ManagerOptions) ManagerOptions {
+	if options.MaxOpenDatabases <= 0 {
+		options.MaxOpenDatabases = 128
+	}
+	if options.DatabaseIdleTTL <= 0 {
+		options.DatabaseIdleTTL = 15 * time.Minute
+	}
+	if options.MaxOpenConns <= 0 {
+		options.MaxOpenConns = 2
+	}
+	if options.MaxIdleConns <= 0 || options.MaxIdleConns > options.MaxOpenConns {
+		options.MaxIdleConns = 1
+	}
+	if options.ConnMaxIdleTime <= 0 {
+		options.ConnMaxIdleTime = 5 * time.Minute
+	}
+	if options.ConnMaxLifetime <= 0 {
+		options.ConnMaxLifetime = 30 * time.Minute
+	}
+	return options
 }
 
 func ValidCompanyID(companyID string) bool { return companyIDPattern.MatchString(companyID) }
@@ -114,19 +195,29 @@ func (m *Manager) companyPath(companyID string) (string, error) {
 	return filepath.Join(m.dir, companyID+".db"), nil
 }
 
-func (m *Manager) CreateCompany(ctx context.Context, input CreateCompanyInput) (*sql.DB, error) {
+func (m *Manager) CreateCompany(ctx context.Context, input CreateCompanyInput) (*Lease, error) {
 	path, err := m.companyPath(input.CompanyID)
 	if err != nil {
 		return nil, err
 	}
+	unlock := m.lockCompany(input.CompanyID)
+	defer unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, errors.New("storage manager is closed")
+	}
+	_, alreadyOpen := m.dbs[input.CompanyID]
+	m.mu.Unlock()
+	if alreadyOpen {
+		return nil, ErrConflict
+	}
 	if _, err := os.Stat(path); err == nil {
 		return nil, ErrConflict
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	db, err := openSQLite(path)
+	db, err := openSQLite(path, m.options)
 	if err != nil {
 		return nil, err
 	}
@@ -135,33 +226,69 @@ func (m *Manager) CreateCompany(ctx context.Context, input CreateCompanyInput) (
 		_ = os.Remove(path)
 		return nil, err
 	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		db.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	defer tx.Rollback()
 	now := time.Now().Unix()
-	_, err = db.ExecContext(ctx, `INSERT INTO company_info
+	_, err = tx.ExecContext(ctx, `INSERT INTO company_info
 		(company_id, description, authorized_from, authorized_until, pack_limit, delivery_limit, status, ext_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`, input.CompanyID, input.Description,
 		input.AuthorizedFrom, input.AuthorizedUntil, input.PackLimit, input.DeliveryLimit, input.ExtJSON, now, now)
 	if err == nil {
-		_, err = db.ExecContext(ctx, `INSERT INTO company_api_keys (key_hash, description, status, created_at)
+		_, err = tx.ExecContext(ctx, `INSERT INTO company_api_keys (key_hash, description, status, created_at)
 			VALUES (?, 'initial company API key', 'ACTIVE', ?)`, input.APIKeyHash, now)
+	}
+	if err == nil {
+		err = tx.Commit()
 	}
 	if err != nil {
 		db.Close()
 		_ = os.Remove(path)
 		return nil, err
 	}
-	m.dbs[input.CompanyID] = db
-	return db, nil
+	entry := &databaseEntry{db: db, active: 1, lastUsed: time.Now()}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		db.Close()
+		return nil, errors.New("storage manager is closed")
+	}
+	m.dbs[input.CompanyID] = entry
+	m.mu.Unlock()
+	return &Lease{DB: db, manager: m, companyID: input.CompanyID, entry: entry, touchOnRelease: true}, nil
 }
 
-func (m *Manager) Open(companyID string) (*sql.DB, error) {
+func (m *Manager) Acquire(ctx context.Context, companyID string) (*Lease, error) {
+	return m.acquire(ctx, companyID, true, false)
+}
+
+func (m *Manager) acquire(ctx context.Context, companyID string, touch, cachedOnly bool) (*Lease, error) {
 	path, err := m.companyPath(companyID)
 	if err != nil {
 		return nil, err
 	}
+	unlock := m.lockCompany(companyID)
+	defer unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if db := m.dbs[companyID]; db != nil {
-		return db, nil
+	if m.closed {
+		m.mu.Unlock()
+		return nil, errors.New("storage manager is closed")
+	}
+	if entry := m.dbs[companyID]; entry != nil {
+		entry.active++
+		if touch {
+			entry.lastUsed = time.Now()
+		}
+		m.mu.Unlock()
+		return &Lease{DB: entry.db, manager: m, companyID: companyID, entry: entry, touchOnRelease: touch}, nil
+	}
+	m.mu.Unlock()
+	if cachedOnly {
+		return nil, ErrNotFound
 	}
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -169,16 +296,45 @@ func (m *Manager) Open(companyID string) (*sql.DB, error) {
 		}
 		return nil, err
 	}
-	db, err := openSQLite(path)
+	db, err := openSQLite(path, m.options)
 	if err != nil {
 		return nil, err
 	}
-	if err := initializeSchema(context.Background(), db); err != nil {
+	if err := initializeSchema(ctx, db); err != nil {
 		db.Close()
 		return nil, err
 	}
-	m.dbs[companyID] = db
-	return db, nil
+	entry := &databaseEntry{db: db, active: 1, lastUsed: time.Now()}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		db.Close()
+		return nil, errors.New("storage manager is closed")
+	}
+	m.dbs[companyID] = entry
+	m.mu.Unlock()
+	return &Lease{DB: db, manager: m, companyID: companyID, entry: entry, touchOnRelease: touch}, nil
+}
+
+func (m *Manager) lockCompany(companyID string) func() {
+	m.mu.Lock()
+	gate := m.gates[companyID]
+	if gate == nil {
+		gate = &companyGate{}
+		m.gates[companyID] = gate
+	}
+	gate.refs++
+	m.mu.Unlock()
+	gate.mu.Lock()
+	return func() {
+		gate.mu.Unlock()
+		m.mu.Lock()
+		gate.refs--
+		if gate.refs == 0 {
+			delete(m.gates, companyID)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) CompanyIDs() ([]string, error) {
@@ -199,23 +355,146 @@ func (m *Manager) CompanyIDs() ([]string, error) {
 	return ids, nil
 }
 
+func (m *Manager) CompanyIDsPage(page, pageSize int) ([]string, int, error) {
+	ids, err := m.CompanyIDs()
+	if err != nil {
+		return nil, 0, err
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	total := len(ids)
+	if total == 0 || page > (total-1)/pageSize+1 {
+		return []string{}, total, nil
+	}
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return ids[start:end], total, nil
+}
+
+func (m *Manager) PruneIdle(now time.Time) (int, error) {
+	type candidate struct {
+		companyID string
+		lastUsed  time.Time
+	}
+	m.mu.Lock()
+	candidates := make([]candidate, 0, len(m.dbs))
+	for companyID, entry := range m.dbs {
+		if entry.active == 0 {
+			candidates = append(candidates, candidate{companyID: companyID, lastUsed: entry.lastUsed})
+		}
+	}
+	m.mu.Unlock()
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].lastUsed.Before(candidates[j].lastUsed) })
+
+	closed := 0
+	var closeErr error
+	for _, candidate := range candidates {
+		unlock := m.lockCompany(candidate.companyID)
+		m.mu.Lock()
+		entry := m.dbs[candidate.companyID]
+		shouldClose := entry != nil && entry.active == 0 &&
+			(now.Sub(entry.lastUsed) >= m.options.DatabaseIdleTTL || len(m.dbs) > m.options.MaxOpenDatabases)
+		if shouldClose {
+			delete(m.dbs, candidate.companyID)
+		}
+		m.mu.Unlock()
+		if shouldClose {
+			if err := entry.db.Close(); err != nil {
+				closeErr = errors.Join(closeErr, err)
+			}
+			closed++
+		}
+		unlock()
+	}
+	return closed, closeErr
+}
+
+func (m *Manager) CleanupExpiredChallenges(ctx context.Context, batchSize int) (int64, int, error) {
+	if batchSize <= 0 {
+		return 0, 0, errors.New("challenge cleanup batch size must be positive")
+	}
+	m.mu.Lock()
+	companyIDs := make([]string, 0, len(m.dbs))
+	for companyID := range m.dbs {
+		companyIDs = append(companyIDs, companyID)
+	}
+	m.mu.Unlock()
+	sort.Strings(companyIDs)
+
+	var deleted int64
+	cleanedDatabases := 0
+	var cleanupErr error
+	cutoff := time.Now().Unix()
+	for _, companyID := range companyIDs {
+		if err := ctx.Err(); err != nil {
+			return deleted, cleanedDatabases, errors.Join(cleanupErr, err)
+		}
+		lease, err := m.acquire(ctx, companyID, false, true)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup challenges for %s: %w", companyID, err))
+			continue
+		}
+		result, err := lease.DB.ExecContext(ctx, `DELETE FROM challenges WHERE challenge_id IN (
+			SELECT challenge_id FROM challenges WHERE expires_at < ? ORDER BY expires_at LIMIT ?
+		)`, cutoff, batchSize)
+		lease.Release()
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup challenges for %s: %w", companyID, err))
+			continue
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+			continue
+		}
+		deleted += rows
+		cleanedDatabases++
+	}
+	return deleted, cleanedDatabases, cleanupErr
+}
+
 func (m *Manager) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, db := range m.dbs {
-		_ = db.Close()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	entries := make([]*databaseEntry, 0, len(m.dbs))
+	for id, entry := range m.dbs {
+		entries = append(entries, entry)
 		delete(m.dbs, id)
+	}
+	m.mu.Unlock()
+	for _, entry := range entries {
+		_ = entry.db.Close()
 	}
 }
 
-func openSQLite(path string) (*sql.DB, error) {
+func openSQLite(path string, optionValues ...ManagerOptions) (*sql.DB, error) {
+	options := normalizeManagerOptions(ManagerOptions{})
+	if len(optionValues) > 0 {
+		options = normalizeManagerOptions(optionValues[0])
+	}
 	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
+	db.SetMaxOpenConns(options.MaxOpenConns)
+	db.SetMaxIdleConns(options.MaxIdleConns)
+	db.SetConnMaxIdleTime(options.ConnMaxIdleTime)
+	db.SetConnMaxLifetime(options.ConnMaxLifetime)
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, err
@@ -331,21 +610,39 @@ func UpdateRelease(ctx context.Context, db *sql.DB, release NewRelease, expected
 	return nil
 }
 
-func ListReleases(ctx context.Context, db *sql.DB) ([]Release, error) {
-	rows, err := db.QueryContext(ctx, releaseMetadataSelect+` ORDER BY created_at DESC`)
+func ListReleasesPage(ctx context.Context, db *sql.DB, beforeCreatedAt int64, beforeReleaseID string, pageSize int) ([]Release, bool, error) {
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	query := releaseMetadataSelect
+	args := make([]any, 0, 4)
+	if beforeCreatedAt > 0 && beforeReleaseID != "" {
+		query += ` WHERE created_at < ? OR (created_at = ? AND release_id < ?)`
+		args = append(args, beforeCreatedAt, beforeCreatedAt, beforeReleaseID)
+	}
+	query += ` ORDER BY created_at DESC, release_id DESC LIMIT ?`
+	args = append(args, pageSize+1)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
-	var values []Release
+	values := make([]Release, 0, pageSize+1)
 	for rows.Next() {
 		value, err := scanReleaseMetadata(rows)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		values = append(values, value)
 	}
-	return values, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(values) > pageSize
+	if hasMore {
+		values = values[:pageSize]
+	}
+	return values, hasMore, nil
 }
 
 func ListPackLogs(ctx context.Context, db *sql.DB, page, pageSize int) ([]Release, int, error) {
@@ -529,7 +826,6 @@ func SealLocalPayload(ctx context.Context, db *sql.DB, releaseID, ciphertextSHA2
 
 func CreateChallenge(ctx context.Context, db *sql.DB, id, challenge, purpose string, expiresAt int64) error {
 	now := time.Now().Unix()
-	_, _ = db.ExecContext(ctx, `DELETE FROM challenges WHERE expires_at < ?`, now-3600)
 	_, err := db.ExecContext(ctx, `INSERT INTO challenges (challenge_id, challenge, purpose, expires_at, created_at)
 		VALUES (?, ?, ?, ?, ?)`, id, challenge, purpose, expiresAt, now)
 	return err
@@ -764,6 +1060,7 @@ CREATE TABLE IF NOT EXISTS payload_releases (
     UNIQUE(package_name, version_code)
 );
 CREATE INDEX IF NOT EXISTS idx_payload_release_created ON payload_releases(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payload_release_created_id ON payload_releases(created_at DESC, release_id DESC);
 
 CREATE TABLE IF NOT EXISTS challenges (
     challenge_id TEXT PRIMARY KEY,

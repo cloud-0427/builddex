@@ -70,15 +70,40 @@ func main() {
 		zap.Int("logMaxSizeMB", cfg.Logging.MaxSizeMB),
 		zap.Int("logMaxAgeDays", cfg.Logging.MaxAgeDays),
 		zap.Int("logMaxBackups", cfg.Logging.MaxBackups),
+		zap.Float64("logSuccessSampleRate", cfg.Logging.SuccessSampleRate),
+		zap.Duration("logSlowRequestThreshold", cfg.Logging.SlowRequestThreshold),
 		zap.Bool("logCompress", cfg.Logging.Compress),
+		zap.Duration("challengeCleanupInterval", cfg.ChallengeCleanupInterval),
+		zap.Int("challengeCleanupBatchSize", cfg.ChallengeCleanupBatchSize),
+		zap.Int("maxOpenCompanyDatabases", cfg.MaxOpenCompanyDatabases),
+		zap.Duration("companyDatabaseIdleTTL", cfg.CompanyDatabaseIdleTTL),
+		zap.Int("databaseMaxOpenConns", cfg.DatabaseMaxOpenConns),
+		zap.Int("databaseMaxIdleConns", cfg.DatabaseMaxIdleConns),
 	)
 
-	dbs, err := store.NewManager(cfg.DataDir)
+	dbs, err := store.NewManagerWithOptions(cfg.DataDir, store.ManagerOptions{
+		MaxOpenDatabases: cfg.MaxOpenCompanyDatabases,
+		DatabaseIdleTTL:  cfg.CompanyDatabaseIdleTTL,
+		MaxOpenConns:     cfg.DatabaseMaxOpenConns,
+		MaxIdleConns:     cfg.DatabaseMaxIdleConns,
+		ConnMaxIdleTime:  cfg.DatabaseConnMaxIdleTime,
+		ConnMaxLifetime:  cfg.DatabaseConnMaxLifetime,
+	})
 	if err != nil {
 		logger.Error("initialize storage", zap.Error(err))
 		os.Exit(1)
 	}
 	defer dbs.Close()
+	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		runMaintenance(maintenanceCtx, logger, dbs, cfg.ChallengeCleanupInterval, cfg.ChallengeCleanupBatchSize)
+	}()
+	defer func() {
+		stopMaintenance()
+		<-maintenanceDone
+	}()
 
 	handler := httpapi.New(cfg, dbs)
 	server := &http.Server{
@@ -94,6 +119,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-stop
+		stopMaintenance()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
@@ -104,6 +130,30 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("http server stopped", zap.Error(err))
 		os.Exit(1)
+	}
+}
+
+func runMaintenance(ctx context.Context, logger *zap.Logger, dbs *store.Manager, interval time.Duration, challengeBatchSize int) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			operationCtx, cancel := context.WithTimeout(ctx, min(interval, 30*time.Second))
+			deleted, databases, cleanupErr := dbs.CleanupExpiredChallenges(operationCtx, challengeBatchSize)
+			closed, pruneErr := dbs.PruneIdle(time.Now())
+			cancel()
+			if cleanupErr != nil || pruneErr != nil {
+				logger.Warn("storage maintenance completed with errors", zap.Error(errors.Join(cleanupErr, pruneErr)),
+					zap.Int64("challengesDeleted", deleted), zap.Int("databasesScanned", databases),
+					zap.Int("databasesClosed", closed))
+			} else if deleted > 0 || closed > 0 {
+				logger.Info("storage maintenance completed", zap.Int64("challengesDeleted", deleted),
+					zap.Int("databasesScanned", databases), zap.Int("databasesClosed", closed))
+			}
+		}
 	}
 }
 

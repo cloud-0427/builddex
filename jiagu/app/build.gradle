@@ -13,15 +13,21 @@ dexReport {
     // 支持 "assemble" (默认), "bundle" (生成AAB), "install" (安装) 等。
     attachToTask = "assemble"
 
-//    serverUrl = "http://192.168.111.115:8761"
+    // test
+    serverUrl = "http://192.168.111.115:8761"
+    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
+
+    // online
     companyId = "acme"
-//    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
-    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
+//    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
 
     // 加固密钥是否发布，发布后此版本不能再修改
     publish = true
     // debug 检测，测试关闭，线上可以打开，默认是打开的
     antiDebugEnabled = true
+
+    // 是否混淆res， unity 目前不支持，需要增加 res 白名单，后续添加
+    resObfuscationEnabled = true
 
     // 只保留 中文 和 英文
     resConfigs = ["zh", "en"]

@@ -1,6 +1,6 @@
 module github.com/xjc/jiagu/server
 
-go 1.25.0
+go 1.26.7
 
 require (
 	go.uber.org/zap v1.28.0

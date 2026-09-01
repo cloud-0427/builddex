@@ -53,6 +53,14 @@
 
 `publish` 将 DRAFT 转为 PUBLISHED；对已经 PUBLISHED 的同一 Release 幂等返回 200 和 `changed=false`，不更新 Release 或审计记录。REVOKED 不能再次发布。`revoke` 保持严格状态转换，重复撤销仍返回冲突。
 
+Release 列表使用游标分页。`pageSize` 默认 20，最大 100；下一页使用上一页返回的两个游标字段：
+
+```text
+GET .../pack/releases?pageSize=20&beforeCreatedAt=1788200000&beforeReleaseId=release-id
+```
+
+`beforeCreatedAt` 和 `beforeReleaseId` 必须同时提供。响应包含 `hasMore`、`nextBeforeCreatedAt` 和 `nextBeforeReleaseId`。
+
 | 当前状态 | prepare 内容相同 | prepare 内容变化 | seal | publish | revoke |
 | --- | --- | --- | --- | --- | --- |
 | DRAFT | 复用 Release/Key | 原 ReleaseID 更新并轮换 Key | 首次封存或相同封存幂等 | 已封存后转 PUBLISHED | 转 REVOKED |
@@ -94,3 +102,5 @@ Grant 绑定 deviceId、Release、证书集合、构建摘要、JG3 明文摘要
 ## 管理接口
 
 管理接口使用 `Authorization: Bearer <JIAGU_ADMIN_TOKEN>`，包括公司管理、逻辑删除和撤销管理。生产环境应同时使用 HTTPS、来源网络限制和长随机 Admin Token。
+
+`GET /api/v1/companies` 使用 `page` 和 `pageSize` 分页，默认第一页、每页 20 条，单页最大 100 条。响应包含 `total`；当前页数据库读取失败时，相关企业会出现在 `failures` 中。

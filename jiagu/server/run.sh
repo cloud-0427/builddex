@@ -2,6 +2,9 @@
 
 set -eu
 
+export JIAGU_ADMIN_TOKEN="local-debug-admin-token-change-me"
+export JIAGU_MASTER_KEY_B64="QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BINARY="$SCRIPT_DIR/jiagu-server"
 PID_FILE="$SCRIPT_DIR/jiagu-server.pid"

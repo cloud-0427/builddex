@@ -4,6 +4,14 @@
   "challengeTTLSeconds": 180,
   "grantTTLSeconds": 604800,
   "deviceCredentialTTLSeconds": 2592000,
+  "challengeCleanupIntervalSeconds": 300,
+  "challengeCleanupBatchSize": 500,
+  "maxOpenCompanyDatabases": 128,
+  "companyDatabaseIdleSeconds": 900,
+  "databaseMaxOpenConns": 2,
+  "databaseMaxIdleConns": 1,
+  "databaseConnMaxIdleSeconds": 300,
+  "databaseConnMaxLifetimeSeconds": 1800,
   "logging": {
     "console": true,
     "fileEnabled": true,
@@ -12,6 +20,8 @@
     "maxAgeDays": 2,
     "maxBackups": 10,
     "compress": true,
-    "localTime": true
+    "localTime": true,
+    "successSampleRate": 1.0,
+    "slowRequestThresholdMs": 500
   }
 }

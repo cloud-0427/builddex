@@ -30,7 +30,7 @@ GOOGLE_APPLICATION_CREDENTIALS
 |---|---|---|---|---|
 | dev | `application.dev.json` | `data/dev/companies` | disabled | debug、文本、`logs/dev` |
 | test | `application.test.json` | `data/test/companies` | disabled | debug、文本、`logs/test` |
-| prod | `application.prod.json` | `data/prod/companies` | google | info、JSON、`logs/prod` |
+| prod | `application.prod.json` | `data/prod/companies` | disabled（线上过渡阶段） | info、JSON、`logs/prod` |
 
 公共配置在 `application.json`，默认端口为 `8761`。日志由 Zap 输出、Lumberjack 滚动，历史备份默认最多保留 2 天。
 
@@ -53,9 +53,11 @@ go run ./cmd/jiagu-server -env test -config-dir ./config
 ```powershell
 $env:JIAGU_ADMIN_TOKEN = "secure-admin-token"
 $env:JIAGU_MASTER_KEY_B64 = "base64-random-master-key"
-$env:GOOGLE_APPLICATION_CREDENTIALS = "D:\secure\play-integrity.json"
+$env:JIAGU_INTEGRITY_MODE = "disabled"
 ./jiagu-server.exe -env prod -config-dir ./config
 ```
+
+生产环境当前暂时关闭 Play Integrity，但必须使用独立的 Admin Token 和随机 Master Key，禁止依赖开发默认值。后续启用时将 `JIAGU_INTEGRITY_MODE` 设置为 `google`，并配置 `GOOGLE_APPLICATION_CREDENTIALS`。
 
 也可以使用：
 
@@ -125,7 +127,9 @@ Lumberjack 在活动日志即将超过 `maxSizeMB` 时执行滚动，始终使�
     "maxAgeDays": 2,
     "maxBackups": 10,
     "compress": true,
-    "localTime": true
+    "localTime": true,
+    "successSampleRate": 0.1,
+    "slowRequestThresholdMs": 500
   }
 }
 ```
@@ -160,6 +164,25 @@ json
 | JIAGU_LOG_LOCAL_TIME | `true` |
 | JIAGU_LOG_CONSOLE | `true` |
 | JIAGU_LOG_FILE_ENABLED | `true` |
+| JIAGU_LOG_SUCCESS_SAMPLE_RATE | `0.1` |
+| JIAGU_LOG_SLOW_REQUEST_MS | `500` |
+
+成功响应采样基于 requestId 确定性计算；同一个 requestId 的采样结果稳定。4xx、5xx、慢请求以及发生 panic 的请求不受成功采样率影响。快速成功的 `/healthz` 和 `/readyz` 不写访问日志。
+
+## 数据库与后台维护配置
+
+| JSON 字段 | 默认值 | 环境变量 |
+|---|---:|---|
+| `challengeCleanupIntervalSeconds` | 300 | `JIAGU_CHALLENGE_CLEANUP_INTERVAL_SECONDS` |
+| `challengeCleanupBatchSize` | 500 | `JIAGU_CHALLENGE_CLEANUP_BATCH_SIZE` |
+| `maxOpenCompanyDatabases` | 128 | `JIAGU_MAX_OPEN_COMPANY_DATABASES` |
+| `companyDatabaseIdleSeconds` | 900 | `JIAGU_COMPANY_DATABASE_IDLE_SECONDS` |
+| `databaseMaxOpenConns` | 2 | `JIAGU_DATABASE_MAX_OPEN_CONNS` |
+| `databaseMaxIdleConns` | 1 | `JIAGU_DATABASE_MAX_IDLE_CONNS` |
+| `databaseConnMaxIdleSeconds` | 300 | `JIAGU_DATABASE_CONN_MAX_IDLE_SECONDS` |
+| `databaseConnMaxLifetimeSeconds` | 1800 | `JIAGU_DATABASE_CONN_MAX_LIFETIME_SECONDS` |
+
+后台任务只清理已经打开的企业数据库；未访问数据库中的过期 Challenge 会在该数据库重新进入活跃集合后的清理周期处理。数据库句柄超过空闲时间或缓存容量时，只回收没有活动请求租约的句柄。
 
 ## 日志内容
 

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -76,10 +77,12 @@ func TestEndToEndPrepareSealEnrollAndAuthorizeLocalPayload(t *testing.T) {
 	if publish.Code != http.StatusOK {
 		t.Fatalf("publish: %d %s", publish.Code, publish.Body.String())
 	}
-	db, err := dbs.Open("acme")
+	lease, err := dbs.Acquire(context.Background(), "acme")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer lease.Release()
+	db := lease.DB
 	beforeRepublish, err := store.GetReleaseMetadata(t.Context(), db, release.ReleaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -298,10 +301,12 @@ func TestReleaseIdempotency(t *testing.T) {
 	}
 	// A published release remains immutable even when the same content is
 	// prepared by a different build host.
-	db, err := dbs.Open("acme")
+	lease, err := dbs.Acquire(context.Background(), "acme")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer lease.Release()
+	db := lease.DB
 	beforePackerChange, err := store.GetReleaseMetadata(t.Context(), db, release2.ReleaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -467,6 +472,41 @@ func TestCompanyManagementAndLogicalDelete(t *testing.T) {
 	}
 }
 
+func TestCompanyListPagination(t *testing.T) {
+	dbs, err := store.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbs.Close()
+	handler := New(config.Config{
+		AdminToken: "admin", MasterKey: bytes.Repeat([]byte{0x42}, 32), IntegrityMode: "disabled",
+	}, dbs)
+	for _, companyID := range []string{"company-a", "company-b", "company-c"} {
+		created := doJSON(t, handler, http.MethodPost, "/api/v1/companies", "Bearer admin", "", map[string]any{
+			"companyId": companyID,
+		})
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", companyID, created.Code, created.Body.String())
+		}
+	}
+	response := doJSON(t, handler, http.MethodGet, "/api/v1/companies?page=2&pageSize=2", "Bearer admin", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list companies: %d %s", response.Code, response.Body.String())
+	}
+	var page struct {
+		Items    []store.Company     `json:"items"`
+		Failures []map[string]string `json:"failures"`
+		Total    int                 `json:"total"`
+		Page     int                 `json:"page"`
+		PageSize int                 `json:"pageSize"`
+	}
+	decodeResponse(t, response, &page)
+	if page.Total != 3 || page.Page != 2 || page.PageSize != 2 || len(page.Items) != 1 || len(page.Failures) != 0 ||
+		page.Items[0].CompanyID != "company-c" {
+		t.Fatalf("unexpected page: %+v", page)
+	}
+}
+
 func TestAdminPageIsServed(t *testing.T) {
 	dbs, err := store.NewManager(t.TempDir())
 	if err != nil {
@@ -572,6 +612,73 @@ func TestUnknownAPIUsesResponseEnvelope(t *testing.T) {
 	}
 	if envelope.Code != "API_NOT_FOUND" || envelope.Message == "" || envelope.Details == nil {
 		t.Fatalf("invalid error envelope: %s", response.Body.String())
+	}
+}
+
+func TestRecoveryMiddlewareReturnsInternalError(t *testing.T) {
+	handler := requestMiddleware(recoveryMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("unexpected failure")
+	})))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	request.Header.Set("X-Request-Id", "recovery-test")
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if recorder.Header().Get("X-Request-Id") != "recovery-test" {
+		t.Fatalf("request id = %q", recorder.Header().Get("X-Request-Id"))
+	}
+	var response struct {
+		Code    string         `json:"code"`
+		Message string         `json:"message"`
+		Details map[string]any `json:"details"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != "INTERNAL_ERROR" || response.Message != "internal server error" || response.Details == nil {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+}
+
+func TestRecoveryMiddlewareDoesNotOverwriteCommittedResponse(t *testing.T) {
+	handler := requestMiddleware(recoveryMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("partial response"))
+		panic("failure after response")
+	})))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panic-after-write", nil))
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusAccepted)
+	}
+	if recorder.Body.String() != "partial response" {
+		t.Fatalf("body = %q", recorder.Body.String())
+	}
+}
+
+func TestRequestLogPolicy(t *testing.T) {
+	logging := config.LoggingConfig{SuccessSampleRate: 0, SlowRequestThreshold: 100 * time.Millisecond}
+	if shouldLogRequest(logging, "request", "/healthz", http.StatusOK, time.Second) != true {
+		t.Fatal("slow health request must be logged")
+	}
+	if shouldLogRequest(logging, "request", "/healthz", http.StatusOK, time.Millisecond) {
+		t.Fatal("successful fast health request must not be logged")
+	}
+	if !shouldLogRequest(logging, "request", "/api/test", http.StatusBadRequest, time.Millisecond) {
+		t.Fatal("error response must be logged")
+	}
+	if shouldLogRequest(logging, "request", "/api/test", http.StatusOK, time.Millisecond) {
+		t.Fatal("zero sample rate must skip successful fast requests")
+	}
+	logging.SuccessSampleRate = 1
+	if !shouldLogRequest(logging, "request", "/api/test", http.StatusOK, time.Millisecond) {
+		t.Fatal("full sample rate must log successful requests")
 	}
 }
 
