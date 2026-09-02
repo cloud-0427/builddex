@@ -234,14 +234,7 @@ func (a *API) listPackLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 5 // Changed from 20 to 5 for testing
-	}
+	page, pageSize := pageParameters(r, 20)
 	logs, total, err := store.ListPackLogs(r.Context(), db, page, pageSize)
 	if err != nil {
 		writeInternal(w, err)

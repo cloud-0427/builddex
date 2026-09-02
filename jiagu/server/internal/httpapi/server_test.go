@@ -682,6 +682,26 @@ func TestRequestLogPolicy(t *testing.T) {
 	}
 }
 
+func TestPackLogPageParametersDefaultToTwentyAndCapAtOneHundred(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/companies/acme/pack-logs", nil)
+	page, pageSize := pageParameters(request, 20)
+	if page != 1 || pageSize != 20 {
+		t.Fatalf("default pagination = (%d, %d), want (1, 20)", page, pageSize)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/companies/acme/pack-logs?page=2&pageSize=100", nil)
+	page, pageSize = pageParameters(request, 20)
+	if page != 2 || pageSize != 100 {
+		t.Fatalf("selected pagination = (%d, %d), want (2, 100)", page, pageSize)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/companies/acme/pack-logs?pageSize=101", nil)
+	_, pageSize = pageParameters(request, 20)
+	if pageSize != 20 {
+		t.Fatalf("oversized page size = %d, want default 20", pageSize)
+	}
+}
+
 type challengeValue struct{ ID, Value string }
 
 func newChallenge(t *testing.T, handler http.Handler, purpose string) challengeValue {

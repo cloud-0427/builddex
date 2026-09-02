@@ -108,7 +108,9 @@ logs/dev/jiagu-server.log
 logs/dev/jiagu-server-2026-08-26T15-30-00.000.log.gz
 ```
 
-Lumberjack 在活动日志即将超过 `maxSizeMB` 时执行滚动，始终使用 `jiagu-server.log` 作为当前文件。历史备份按照时间戳重命名，并可进行 gzip 压缩。
+生产环境启用 `rotateDaily` 后，每个本地自然日的 00:00 必然执行一次滚动；服务启动时如果发现活动日志属于前一个自然日，也会立即滚动。`maxSizeMB` 是附加条件：当天文件达到该大小时会额外滚动。当前文件始终为 `jiagu-server.log`，历史备份按照时间戳重命名，并可进行 gzip 压缩。
+
+使用 `run.sh` 启动时，`logs/prod/console.log` 只是 `nohup` 的标准输出/错误启动日志，不由 Lumberjack 管理。生产环境的应用日志及滚动结果应检查 `logs/prod/jiagu-server.log`；修改配置后需要完整停止并重新启动进程。
 
 默认 `maxAgeDays=2`，删除超过 2×24 小时的历史备份；`maxBackups=10` 同时限制最多保留的备份数量。清理在 Lumberjack 执行滚动时触发，活动文件不会被删除。
 
@@ -123,7 +125,8 @@ Lumberjack 在活动日志即将超过 `maxSizeMB` 时执行滚动，始终使�
     "fileEnabled": true,
     "directory": "logs/prod",
     "filePrefix": "jiagu-server",
-    "maxSizeMB": 50,
+    "maxSizeMB": 3072,
+    "rotateDaily": true,
     "maxAgeDays": 2,
     "maxBackups": 10,
     "compress": true,
@@ -157,7 +160,8 @@ json
 | JIAGU_LOG_LEVEL | `debug` |
 | JIAGU_LOG_FORMAT | `json` |
 | JIAGU_LOG_DIR | `D:\logs\jiagu` |
-| JIAGU_LOG_MAX_SIZE_MB | `50` |
+| JIAGU_LOG_MAX_SIZE_MB | `3072` |
+| JIAGU_LOG_ROTATE_DAILY | `true` |
 | JIAGU_LOG_MAX_AGE_DAYS | `2` |
 | JIAGU_LOG_MAX_BACKUPS | `10` |
 | JIAGU_LOG_COMPRESS | `true` |

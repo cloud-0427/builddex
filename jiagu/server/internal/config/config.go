@@ -22,6 +22,7 @@ type LoggingConfig struct {
 	MaxSizeMB            int
 	MaxAgeDays           int
 	MaxBackups           int
+	RotateDaily          bool
 	Compress             bool
 	LocalTime            bool
 	SuccessSampleRate    float64
@@ -137,6 +138,7 @@ type fileLoggingConfig struct {
 	MaxSizeMB              *int     `json:"maxSizeMB"`
 	MaxAgeDays             *int     `json:"maxAgeDays"`
 	MaxBackups             *int     `json:"maxBackups"`
+	RotateDaily            *bool    `json:"rotateDaily"`
 	Compress               *bool    `json:"compress"`
 	LocalTime              *bool    `json:"localTime"`
 	SuccessSampleRate      *float64 `json:"successSampleRate"`
@@ -231,6 +233,9 @@ func applyConfigFile(cfg *Config, path string) error {
 		if logging.MaxBackups != nil {
 			cfg.Logging.MaxBackups = *logging.MaxBackups
 		}
+		if logging.RotateDaily != nil {
+			cfg.Logging.RotateDaily = *logging.RotateDaily
+		}
 		if logging.Compress != nil {
 			cfg.Logging.Compress = *logging.Compress
 		}
@@ -318,6 +323,9 @@ func applyEnvironment(cfg *Config) {
 	}
 	if value, ok := envPositiveInt("JIAGU_LOG_MAX_BACKUPS"); ok {
 		cfg.Logging.MaxBackups = value
+	}
+	if value, ok := envBool("JIAGU_LOG_ROTATE_DAILY"); ok {
+		cfg.Logging.RotateDaily = value
 	}
 	if value, ok := envBool("JIAGU_LOG_COMPRESS"); ok {
 		cfg.Logging.Compress = value

@@ -70,6 +70,7 @@ func main() {
 		zap.Int("logMaxSizeMB", cfg.Logging.MaxSizeMB),
 		zap.Int("logMaxAgeDays", cfg.Logging.MaxAgeDays),
 		zap.Int("logMaxBackups", cfg.Logging.MaxBackups),
+		zap.Bool("logRotateDaily", cfg.Logging.RotateDaily),
 		zap.Float64("logSuccessSampleRate", cfg.Logging.SuccessSampleRate),
 		zap.Duration("logSlowRequestThreshold", cfg.Logging.SlowRequestThreshold),
 		zap.Bool("logCompress", cfg.Logging.Compress),

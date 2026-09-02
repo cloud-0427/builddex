@@ -18,7 +18,8 @@
 | JIAGU_LOG_LEVEL | 配置文件 | debug、info、warn 或 error |
 | JIAGU_LOG_FORMAT | 配置文件 | text 或 json |
 | JIAGU_LOG_DIR | 配置文件 | Lumberjack 日志目录 |
-| JIAGU_LOG_MAX_SIZE_MB | `50` | 单个活动日志达到该大小时滚动 |
+| JIAGU_LOG_MAX_SIZE_MB | `3072` | 单个活动日志达到该大小时滚动 |
+| JIAGU_LOG_ROTATE_DAILY | `true` | 是否在每个本地自然日零点强制滚动 |
 | JIAGU_LOG_MAX_AGE_DAYS | `2` | 历史备份最大保留天数 |
 | JIAGU_LOG_MAX_BACKUPS | `10` | 历史备份最大数量 |
 | JIAGU_LOG_COMPRESS | `true` | 是否 gzip 压缩滚动文件 |

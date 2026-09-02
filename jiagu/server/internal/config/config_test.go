@@ -60,6 +60,31 @@ func TestProfileFilesAndEnvironmentOverride(t *testing.T) {
 	}
 }
 
+func TestProductionProfileOverridesCommonLogSize(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "application.json"), []byte(`{
+        "logging": {"maxSizeMB": 50}
+    }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "application.prod.json"), []byte(`{
+        "integrityMode": "disabled",
+        "logging": {"maxSizeMB": 3072, "rotateDaily": true}
+    }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JIAGU_ADMIN_TOKEN", "")
+	t.Setenv("JIAGU_MASTER_KEY_B64", "")
+
+	cfg, err := LoadWithOptions(Options{Environment: "prod", ConfigDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Logging.MaxSizeMB != 3072 || !cfg.Logging.RotateDaily {
+		t.Fatalf("unexpected production rolling config: %+v", cfg.Logging)
+	}
+}
+
 func TestGoogleModeRequiresSecureConfiguration(t *testing.T) {
 	t.Setenv("JIAGU_INTEGRITY_MODE", "google")
 	t.Setenv("JIAGU_ADMIN_TOKEN", "")

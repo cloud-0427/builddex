@@ -37,7 +37,18 @@
           </div>
           <footer class="table-footer">
             <span id="logsCount">共 0 条记录</span>
-            <div class="pagination" id="logsPagination"></div>
+            <div class="page-controls">
+              <label class="page-size-label" for="pageSizeSelect">
+                每页
+                <select id="pageSizeSelect" aria-label="每页显示条数">
+                  <option value="5">5 条</option>
+                  <option value="20" selected>20 条</option>
+                  <option value="50">50 条</option>
+                  <option value="100">100 条</option>
+                </select>
+              </label>
+              <div class="pagination" id="logsPagination"></div>
+            </div>
           </footer>
         </section>
       </section>

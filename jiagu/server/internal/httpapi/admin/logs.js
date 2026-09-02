@@ -4,6 +4,22 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+  const PAGE_SIZE_OPTIONS = [5, 20, 50, 100];
+  const PAGE_SIZE_STORAGE_KEY = "jiagu.packLogs.pageSize";
+
+  function storedPageSize() {
+    try {
+      const value = Number.parseInt(localStorage.getItem(PAGE_SIZE_STORAGE_KEY), 10);
+      return PAGE_SIZE_OPTIONS.includes(value) ? value : 20;
+    } catch (_) {
+      return 20;
+    }
+  }
+
+  function rememberPageSize(value) {
+    try { localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(value)); } catch (_) { }
+  }
+
   const state = {
     companyId: new URLSearchParams(window.location.search).get("companyId") || "",
     authKey: sessionStorage.getItem("jiagu.authKey") || "",
@@ -11,7 +27,7 @@
     logs: [],
     page: 1,
     total: 0,
-    pageSize: 5
+    pageSize: storedPageSize()
   };
 
   const statusText = {
@@ -137,6 +153,9 @@
     const container = $("#logsContainer");
     container.replaceChildren();
 
+    $("#logsCount").textContent = `共 ${state.total} 条记录`;
+    renderPagination();
+
     if (state.logs.length === 0) {
       const p = document.createElement("p");
       p.className = "table-state";
@@ -215,8 +234,6 @@
       container.append(table);
     });
 
-    $("#logsCount").textContent = `共 ${state.total} 条记录`;
-    renderPagination();
   }
 
   function renderPagination() {
@@ -250,6 +267,7 @@
   }
 
   function initPage() {
+    $("#pageSizeSelect").value = String(state.pageSize);
     if (state.authKey && state.companyId) {
       loadLogs(1);
     } else {
@@ -258,6 +276,13 @@
   }
 
   $("#refreshButton").addEventListener("click", () => loadLogs(state.page));
+  $("#pageSizeSelect").addEventListener("change", event => {
+    const pageSize = Number.parseInt(event.target.value, 10);
+    if (!PAGE_SIZE_OPTIONS.includes(pageSize)) return;
+    state.pageSize = pageSize;
+    rememberPageSize(pageSize);
+    if (state.authKey && state.companyId) loadLogs(1);
+  });
   $("#loginForm").addEventListener("submit", handleLogin);
   $("#authInfo").addEventListener("click", openLogin);
 
