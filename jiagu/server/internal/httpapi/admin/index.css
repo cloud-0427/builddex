@@ -7,9 +7,27 @@
     max-width: 1200px;
 }
 
+.shell.standalone .content {
+    padding-top: 12px;
+}
+
+.shell.standalone .user-chip {
+    max-width: min(360px, 42vw);
+    padding: 6px 14px 6px 6px;
+}
+
+.shell.standalone .user-chip b {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 16px;
+    font-weight: 650;
+}
+
 .topbar {
     position: static;
-    margin-bottom: 20px;
+    margin-bottom: 0;
     background: #fff;
     border-radius: 0 0 12px 12px;
 }
@@ -128,4 +146,16 @@
     font-size: 10px;
     font-weight: 600;
     color: #475467;
+}
+
+@media (max-width: 760px) {
+    .shell.standalone .top-actions .user-chip {
+        max-width: 45vw;
+        padding-right: 10px;
+        font-size: 14px;
+    }
+
+    .shell.standalone .user-chip b {
+        font-size: 14px;
+    }
 }

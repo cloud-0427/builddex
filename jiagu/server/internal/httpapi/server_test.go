@@ -507,7 +507,7 @@ func TestCompanyListPagination(t *testing.T) {
 	}
 }
 
-func TestAdminPageIsServed(t *testing.T) {
+func TestAdminPagesAreServed(t *testing.T) {
 	dbs, err := store.NewManager(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -518,11 +518,18 @@ func TestAdminPageIsServed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte("公司管理")) {
-		t.Fatalf("admin page: %d %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte("打包与下发历史")) || bytes.Contains(recorder.Body.Bytes(), []byte("统计查询")) || bytes.Contains(recorder.Body.Bytes(), []byte("mgr.htm")) {
+		t.Fatalf("statistics index page: %d %s", recorder.Code, recorder.Body.String())
 	}
 
-	scriptRequest := httptest.NewRequest(http.MethodGet, "/admin/app.js", nil)
+	mgrRequest := httptest.NewRequest(http.MethodGet, "/admin/mgr.htm", nil)
+	mgrRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(mgrRecorder, mgrRequest)
+	if mgrRecorder.Code != http.StatusOK || !bytes.Contains(mgrRecorder.Body.Bytes(), []byte("公司管理")) {
+		t.Fatalf("management page: %d %s", mgrRecorder.Code, mgrRecorder.Body.String())
+	}
+
+	scriptRequest := httptest.NewRequest(http.MethodGet, "/admin/mgr.js", nil)
 	scriptRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(scriptRecorder, scriptRequest)
 	if scriptRecorder.Code != http.StatusOK {

@@ -232,7 +232,7 @@
       wrap.title = "点击查看详细打包与下发统计";
       wrap.addEventListener("click", (e) => {
         e.stopPropagation();
-        window.open(`logs.html?companyId=${encodeURIComponent(companyId)}`, '_blank');
+        window.open(`index.html?companyId=${encodeURIComponent(companyId)}`, '_blank');
       });
     }
     const line = document.createElement("div");

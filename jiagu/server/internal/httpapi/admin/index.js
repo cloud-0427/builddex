@@ -140,9 +140,12 @@
       state.total = data.total || 0;
       renderLogs();
       logsState.classList.add("hidden");
-      $("#companyIdDisplay").textContent = state.companyId;
-      $("#companyDescDisplay").textContent = `正在查看 ${state.companyId} 的打包历史记录`;
-      $("#authInfo").innerHTML = `<span>${state.authType === 'admin' ? 'A' : 'C'}</span>${state.authType === 'admin' ? '管理员' : '公司'}`;
+      const authInfo = $("#authInfo");
+      const authBadge = document.createElement("span");
+      const companyLabel = document.createElement("b");
+      authBadge.textContent = state.authType === "admin" ? "A" : "C";
+      companyLabel.textContent = state.companyId;
+      authInfo.replaceChildren(authBadge, companyLabel);
     } catch (error) {
       logsState.classList.remove("hidden");
       logsState.innerHTML = `<p style="color:var(--red)">${error.message}</p>`;
