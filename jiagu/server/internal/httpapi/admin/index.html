@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="dark light">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem("jiagu.theme")||"dark"}catch(_){document.documentElement.dataset.theme="dark"}</script>
   <title>Jiagu · 打包与下发统计</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="index.css">
+  <link rel="stylesheet" href="theme.css">
 </head>
 <body>
   <div class="shell standalone">
@@ -16,6 +18,7 @@
           <h1 id="pageTitle">打包与下发历史</h1>
         </div>
         <div class="top-actions">
+          <button class="icon-button theme-toggle" type="button" title="切换到浅色模式" aria-label="切换到浅色模式">☀</button>
           <button class="icon-button" id="refreshButton" type="button" title="刷新">↻</button>
           <button class="user-chip" id="authInfo" type="button"><span>?</span><b>未连接</b></button>
         </div>
@@ -69,6 +72,7 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="theme.js" defer></script>
   <script src="index.js" defer></script>
 </body>
 </html>

@@ -8,7 +8,7 @@
 }
 
 .shell.standalone .content {
-    padding-top: 12px;
+    padding-top: 6px;
 }
 
 .shell.standalone .user-chip {
@@ -27,7 +27,9 @@
 
 .topbar {
     position: static;
-    margin-bottom: 0;
+    margin: 0 36px;
+    padding-right: 18px;
+    padding-left: 18px;
     background: #fff;
     border-radius: 0 0 12px 12px;
 }
@@ -50,9 +52,8 @@
     align-items:center;
     gap: 10px;
     font-weight: 650;
-    font-size: 11px;
+    font-size: 14px;
     color: #7a8494;
-    text-transform: uppercase;
     letter-spacing: .35px;
 }
 
@@ -149,6 +150,11 @@
 }
 
 @media (max-width: 760px) {
+    .shell.standalone .topbar {
+        margin-right: 16px;
+        margin-left: 16px;
+    }
+
     .shell.standalone .top-actions .user-chip {
         max-width: 45vw;
         padding-right: 10px;

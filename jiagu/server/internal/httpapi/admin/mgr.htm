@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="dark light">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem("jiagu.theme")||"dark"}catch(_){document.documentElement.dataset.theme="dark"}</script>
   <title>Jiagu · 公司管理</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="mgr.css">
+  <link rel="stylesheet" href="theme.css">
 </head>
 <body>
   <div class="shell">
@@ -28,6 +30,7 @@
       <header class="topbar">
         <div><p class="eyebrow">授权中心</p><h1>公司管理</h1></div>
         <div class="top-actions">
+          <button class="icon-button theme-toggle" type="button" title="切换到浅色模式" aria-label="切换到浅色模式">☀</button>
           <button class="icon-button" id="refreshButton" type="button" title="刷新" aria-label="刷新">↻</button>
           <button class="user-chip" id="changeTokenButton" type="button"><span>A</span>管理员</button>
         </div>
@@ -128,6 +131,7 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="theme.js" defer></script>
   <script src="mgr.js" defer></script>
 </body>
 </html>

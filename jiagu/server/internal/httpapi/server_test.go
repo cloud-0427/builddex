@@ -518,7 +518,7 @@ func TestAdminPagesAreServed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte("打包与下发历史")) || bytes.Contains(recorder.Body.Bytes(), []byte("统计查询")) || bytes.Contains(recorder.Body.Bytes(), []byte("mgr.htm")) {
+	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte("打包与下发历史")) || !bytes.Contains(recorder.Body.Bytes(), []byte(`localStorage.getItem("jiagu.theme")||"dark"`)) || bytes.Contains(recorder.Body.Bytes(), []byte("统计查询")) || bytes.Contains(recorder.Body.Bytes(), []byte("mgr.htm")) {
 		t.Fatalf("statistics index page: %d %s", recorder.Code, recorder.Body.String())
 	}
 
@@ -540,6 +540,13 @@ func TestAdminPagesAreServed(t *testing.T) {
 	}
 	if !bytes.Contains(scriptRecorder.Body.Bytes(), []byte(`document.execCommand("copy")`)) {
 		t.Fatal("admin script does not contain the clipboard compatibility path")
+	}
+
+	themeRequest := httptest.NewRequest(http.MethodGet, "/admin/theme.js", nil)
+	themeRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(themeRecorder, themeRequest)
+	if themeRecorder.Code != http.StatusOK || !bytes.Contains(themeRecorder.Body.Bytes(), []byte(`localStorage.setItem(STORAGE_KEY, theme)`)) {
+		t.Fatalf("theme script: %d %s", themeRecorder.Code, themeRecorder.Body.String())
 	}
 }
 

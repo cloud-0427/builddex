@@ -5,7 +5,7 @@
 .breadcrumb button.text-link{background:transparent;border:0;padding:0;color:var(--blue);cursor:pointer;font:inherit}
 .breadcrumb button.text-link:hover{text-decoration:underline}
 .breadcrumb strong{color:var(--ink)}
-.group-header{background:#fafbfc;padding:12px 18px;border-bottom:1px solid var(--line);border-top:1px solid var(--line);display:flex;align-items:center;gap:10px;font-weight:650;font-size:11px;color:#7a8494;text-transform:uppercase;letter-spacing:.35px}
+.group-header{background:#fafbfc;padding:12px 18px;border-bottom:1px solid var(--line);border-top:1px solid var(--line);display:flex;align-items:center;gap:10px;font-weight:650;font-size:14px;color:#7a8494;letter-spacing:.35px}
 .group-header:first-child{border-top:0}
 .group-icon{width:20px;height:20px;background:#eaecf0;border-radius:5px;display:grid;place-items:center;font-size:10px}
 .pagination{display:flex;gap:4px}
