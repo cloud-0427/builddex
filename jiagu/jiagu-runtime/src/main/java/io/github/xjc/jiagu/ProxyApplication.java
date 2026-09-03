@@ -26,7 +26,6 @@ public class ProxyApplication extends Application {
     protected void attachBaseContext(Context base) {
         long startedAt = SystemClock.elapsedRealtime();
         super.attachBaseContext(base);
-        Log.i(TAG, "[StartupTiming] begin proxy attachBaseContext");
         nativeAttach(base);
         Log.i(TAG, "[StartupTiming] complete proxy attachBaseContext totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
@@ -36,7 +35,6 @@ public class ProxyApplication extends Application {
     public void onCreate() {
         long startedAt = SystemClock.elapsedRealtime();
         super.onCreate();
-        Log.i(TAG, "[StartupTiming] begin proxy onCreate");
         nativeOnCreate();
         Log.i(TAG, "[StartupTiming] complete proxy onCreate totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
