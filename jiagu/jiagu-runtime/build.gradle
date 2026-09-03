@@ -9,7 +9,7 @@ def jitPackArtifact = System.getenv('ARTIFACT')
 group = jitPackGroup && jitPackArtifact
         ? "${jitPackGroup}.${jitPackArtifact}"
         : 'io.github.xjc'
-version = System.getenv('VERSION') ?: '0.1.3'
+version = System.getenv('VERSION') ?: '0.1.4'
 
 android {
     namespace 'io.github.xjc.jiagu'
