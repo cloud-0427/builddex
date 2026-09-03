@@ -9,6 +9,6 @@
     "directory": "logs/prod",
     "maxSizeMB": 3072,
     "rotateDaily": true,
-    "successSampleRate": 0.1
+    "successSampleRate": 1.0
   }
 }

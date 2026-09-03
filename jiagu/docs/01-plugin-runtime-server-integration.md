@@ -7,7 +7,7 @@
 运行时保留当前设备身份体系：
 
 - Android Keystore ECDSA P-256 密钥签署 ENROLL/AUTHORIZE challenge；
-- Android Keystore RSA-3072 OAEP 密钥接收服务端封装的 Payload Key；
+- Android Keystore RSA-2048 OAEP 密钥接收服务端封装的 Payload Key；
 - Device Credential 和 Payload Grant 使用公司 Ed25519 Key 签名；
 - 支持公司、Release 和设备撤销；
 - `integrityMode=google` 时额外验证 Play Integrity；`disabled` 时不提供安装真实性证明。

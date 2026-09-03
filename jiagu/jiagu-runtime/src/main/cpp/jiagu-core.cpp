@@ -9,12 +9,14 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <algorithm>
+#include <time.h>
 #include <zlib.h>
 #include "syscall_arch.h"
 #include "obfuscate_str.h"
 
 #define TAG X("Jiagu_Native")
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, X("Jiagu_Native"), __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, X("Jiagu_Native"), __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, X("Jiagu_Native"), __VA_ARGS__)
 
 #define JNI_CHECK_NULL(obj, msg, ret) \
@@ -26,6 +28,18 @@
     }
 
 static jobject gRealApp = nullptr;
+
+static int64_t monotonic_ms() {
+    timespec value{};
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return static_cast<int64_t>(value.tv_sec) * 1000 + value.tv_nsec / 1000000;
+}
+
+static void log_timing(const char* stage, int64_t stage_started_at, int64_t startup_started_at) {
+    LOGI("[StartupTiming] stage=%s durationMs=%lld totalMs=%lld", stage,
+         static_cast<long long>(monotonic_ms() - stage_started_at),
+         static_cast<long long>(monotonic_ms() - startup_started_at));
+}
 
 // --- 动态防护模块 ---
 
@@ -298,9 +312,13 @@ static bool bind_real_application(JNIEnv* env, jobject proxy_app, jobject real_a
 // --- 核心逻辑：Native 代理实现 ---
 
 static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
-    LOGD("Native: Starting attachBaseContext proxy...");
+    const int64_t startup_started_at = monotonic_ms();
+    int64_t stage_started_at = startup_started_at;
+    LOGI("[StartupTiming] begin native attachBaseContext");
     if (!prepare_legacy_keystore_context(env, thiz)) return;
+    log_timing("native-keystore-context-bridge", stage_started_at, startup_started_at);
 
+    stage_started_at = monotonic_ms();
     // 1. 获取配置 (URL 和 REAL_APPLICATION)
     jclass context_class = env->GetObjectClass(context);
     JNI_CHECK_NULL(context_class, "Context class not found", );
@@ -335,7 +353,9 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     bool anti_debug = env->CallBooleanMethod(meta_data, get_bool, env->NewStringUTF(X("ENABLE_ANTI_DEBUG")), true);
     bool sig_check = env->CallBooleanMethod(meta_data, get_bool, env->NewStringUTF(X("ENABLE_SIGNATURE_CHECK")), true);
     jstring expected_sig_j = (jstring)env->CallObjectMethod(meta_data, get_string, env->NewStringUTF(X("EXPECTED_SIGNATURE")));
+    log_timing("native-manifest-metadata", stage_started_at, startup_started_at);
 
+    stage_started_at = monotonic_ms();
     LOGD("[Jiagu] Protection config: antiDebug=%s, signatureCheck=%s",
          anti_debug ? "enabled" : "disabled", sig_check ? "enabled" : "disabled");
     if (anti_debug) {
@@ -352,9 +372,11 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         env->ReleaseStringUTFChars(expected_sig_j, expected_sig);
         LOGD("[Jiagu][Signature] APK signing certificate check passed");
     }
+    log_timing("native-protection-checks", stage_started_at, startup_started_at);
 
     const char *real_app_name = env->GetStringUTFChars(real_app_name_j, nullptr);
     const char *pkg_name_str = env->GetStringUTFChars(pkg_name, nullptr);
+    stage_started_at = monotonic_ms();
 
     // 2. 从只读 ELF 段读取构建期固定的 RuntimeConfig。
     using payload_address_fn = const uint8_t* (*)();
@@ -404,8 +426,10 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     }
     std::string runtime_config(reinterpret_cast<const char*>(bundle_source + 16), config_length);
     const uint8_t* local_payload_source = bundle_source + 16 + config_length;
+    log_timing("native-runtime-bundle-open-and-parse", stage_started_at, startup_started_at);
 
     // 3. Java handles Keystore, authorization and AES-GCM from mapped direct memory.
+    stage_started_at = monotonic_ms();
     jclass network_helper = env->FindClass("io/github/xjc/jiagu/NetworkHelper");
     if (!network_helper) {
         LOGE("Jiagu_Native: NetworkHelper class not found");
@@ -444,7 +468,9 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     }
     // Java has finished consuming the mapped ciphertext; its plaintext buffer is independent.
     dlclose(payload_handle);
+    log_timing("java-authorization-and-payload-decrypt", stage_started_at, startup_started_at);
     JNI_CHECK_NULL(payload_buffer, "device authorization returned no payload", );
+    stage_started_at = monotonic_ms();
     void* decrypted_payload_address = env->GetDirectBufferAddress(payload_buffer);
     jlong payload_capacity = env->GetDirectBufferCapacity(payload_buffer);
     if (!decrypted_payload_address || payload_capacity < 8 || payload_capacity > 128 * 1024 * 1024) {
@@ -467,6 +493,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         LOGE("Jiagu_Native: Invalid DEX count: %d", dex_count);
         return;
     }
+    log_timing("native-jg3-header-parse", stage_started_at, startup_started_at);
 
     const unsigned char* meta_data_ptr = reinterpret_cast<const unsigned char*>(full_buffer);
     size_t meta_offset = offset;
@@ -481,7 +508,9 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     jobjectArray bb_array = env->NewObjectArray(dex_count, byte_buffer_class, nullptr);
     JNI_CHECK_NULL(bb_array, "Failed to create ByteBuffer array", );
 
+    const int64_t all_dex_started_at = monotonic_ms();
     for (int i = 0; i < dex_count; ++i) {
+        const int64_t dex_started_at = monotonic_ms();
         int dex_offset = (static_cast<unsigned char>(meta_data_ptr[meta_offset]) << 24) |
                          (static_cast<unsigned char>(meta_data_ptr[meta_offset + 1]) << 16) |
                          (static_cast<unsigned char>(meta_data_ptr[meta_offset + 2]) << 8) |
@@ -526,8 +555,14 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
             return;
         }
         env->SetObjectArrayElement(bb_array, i, bb);
+        LOGI("[StartupTiming] stage=native-dex-decompress index=%d compressedBytes=%d "
+             "plainBytes=%d durationMs=%lld totalMs=%lld", i, dex_size, dex_plain_size,
+             static_cast<long long>(monotonic_ms() - dex_started_at),
+             static_cast<long long>(monotonic_ms() - startup_started_at));
     }
+    log_timing("native-all-dex-decompress", all_dex_started_at, startup_started_at);
 
+    stage_started_at = monotonic_ms();
     jclass mem_loader_class = env->FindClass("dalvik/system/InMemoryDexClassLoader");
     JNI_CHECK_NULL(mem_loader_class, "InMemoryDexClassLoader class not found", );
     jmethodID loader_init = env->GetMethodID(
@@ -542,9 +577,10 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     jobject mem_cl = env->NewObject(mem_loader_class, loader_init, bb_array, sys_cl);
     JNI_CHECK_NULL(mem_cl, "InMemoryDexClassLoader instance creation failed", );
     inject_dex_elements(env, sys_cl, mem_cl);
-    LOGD("DEX Injection from payload ELF successful");
+    log_timing("native-dex-classloader-create-and-inject", stage_started_at, startup_started_at);
 
     // 4. 实例化 Real Application 并替换
+    stage_started_at = monotonic_ms();
     std::string real_app_path = real_app_name;
     for (size_t i = 0; i < real_app_path.length(); ++i) {
         if (real_app_path[i] == '.') real_app_path[i] = '/';
@@ -565,19 +601,30 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         JNI_CHECK_NULL(attach_mid, "Application.attach method not found", );
         env->CallVoidMethod(gRealApp, attach_mid, context);
     }
+    log_timing("native-real-application-create-bind-and-attach", stage_started_at,
+               startup_started_at);
 
     env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
     env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
+    LOGI("[StartupTiming] complete native attachBaseContext totalMs=%lld",
+         static_cast<long long>(monotonic_ms() - startup_started_at));
 }
 
 static void native_on_create(JNIEnv *env, jobject thiz) {
+    const int64_t started_at = monotonic_ms();
+    LOGI("[StartupTiming] begin native onCreate");
     if (gRealApp) {
+        int64_t stage_started_at = monotonic_ms();
         if (!bind_real_application(env, thiz, gRealApp)) return;
+        log_timing("native-real-application-rebind", stage_started_at, started_at);
+        stage_started_at = monotonic_ms();
         jclass app_cls = env->GetObjectClass(gRealApp);
         jmethodID on_create_mid = env->GetMethodID(app_cls, "onCreate", "()V");
         env->CallVoidMethod(gRealApp, on_create_mid);
-        LOGD("Native: realApplication.onCreate() invoked");
+        log_timing("real-application-onCreate", stage_started_at, started_at);
     }
+    LOGI("[StartupTiming] complete native onCreate totalMs=%lld",
+         static_cast<long long>(monotonic_ms() - started_at));
 }
 
 static const JNINativeMethod gMethods[] = {
@@ -586,6 +633,7 @@ static const JNINativeMethod gMethods[] = {
 };
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    const int64_t started_at = monotonic_ms();
     JNIEnv* env = nullptr;
     if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
     jclass clazz = env->FindClass("io/github/xjc/jiagu/ProxyApplication");
@@ -597,5 +645,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         LOGE("Jiagu_Native: Failed to register natives");
         return JNI_ERR;
     }
+    LOGI("[StartupTiming] stage=jni-on-load durationMs=%lld",
+         static_cast<long long>(monotonic_ms() - started_at));
     return JNI_VERSION_1_6;
 }

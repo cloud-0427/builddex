@@ -14,12 +14,12 @@ dexReport {
     attachToTask = "assemble"
 
     // test
-    serverUrl = "http://192.168.111.115:8761"
-    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
+//    serverUrl = "http://192.168.111.115:8761"
+//    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
 
     // online
     companyId = "acme"
-//    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
+    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
 
     // 加固密钥是否发布，发布后此版本不能再修改
     publish = true

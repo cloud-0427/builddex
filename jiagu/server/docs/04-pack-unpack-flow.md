@@ -26,7 +26,7 @@ AAD = canonical("PAYLOAD-KEY-V3", companyId, releaseId)
 
 1. Runtime 从 `liblog_ext.so` 读取 JGRC，解析 RuntimeConfig 和本地 JGLP。
 2. 校验 APK 的 packageName、versionCode 和实际签名证书。
-3. 在 Android Keystore 中生成 ECDSA P-256 签名 Key 和 RSA-3072 wrapping Key。
+3. 在 Android Keystore 中生成 ECDSA P-256 签名 Key 和 RSA-2048 wrapping Key。
 4. 获取 ENROLL challenge，签署 `ENROLL-V2` canonical message。
 5. `integrityMode=google` 时获取 Play Integrity Standard token。
 6. 服务端验证 challenge、设备签名、Release、证书和可选 Integrity，返回 Ed25519 签名 Credential。

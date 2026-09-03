@@ -6,6 +6,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.os.StrictMode;
+import android.os.SystemClock;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
@@ -20,7 +21,11 @@ import org.json.JSONArray;
 import org.conscrypt.Conscrypt;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
@@ -49,8 +54,13 @@ import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 import okhttp3.ConnectionSpec;
+import okhttp3.Call;
+import okhttp3.Connection;
+import okhttp3.EventListener;
+import okhttp3.Handshake;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
@@ -68,6 +78,19 @@ public final class NetworkHelper {
     private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
     private NetworkHelper() {}
 
+    private static long now() {
+        return SystemClock.elapsedRealtimeNanos();
+    }
+
+    private static long elapsedMs(long startedAt) {
+        return TimeUnit.NANOSECONDS.toMillis(now() - startedAt);
+    }
+
+    private static void timing(String stage, long startedAt, long startupStartedAt) {
+        Log.i(TAG, "[StartupTiming] stage=" + stage + " durationMs=" + elapsedMs(startedAt) +
+                " totalMs=" + elapsedMs(startupStartedAt));
+    }
+
     private static final class HttpClientHolder {
         private static final OkHttpClient INSTANCE = createHttpClient();
     }
@@ -78,37 +101,70 @@ public final class NetworkHelper {
      */
     public static ByteBuffer getAuthorizedPayload(Context context, String runtimeConfigJson,
                                                   ByteBuffer localPayload) {
+        long startupStartedAt = now();
+        Log.i(TAG, "[StartupTiming] begin authorized payload preparation");
         StrictMode.ThreadPolicy previous = StrictMode.getThreadPolicy();
         StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().permitAll().build());
         try {
+            long stageStartedAt = now();
             Config config = Config.parse(runtimeConfigJson);
+            timing("runtime-config-parse", stageStartedAt, startupStartedAt);
+
+            stageStartedAt = now();
             AppIdentity app = AppIdentity.read(context);
             config.verifyApp(app);
+            timing("app-identity-read-and-verify", stageStartedAt, startupStartedAt);
+
+            stageStartedAt = now();
             KeyPair signing = getOrCreateSigningKey(config);
+            timing("keystore-signing-key", stageStartedAt, startupStartedAt);
+
+            stageStartedAt = now();
             KeyPair wrapping = getOrCreateWrappingKey(config);
+            timing("keystore-wrapping-key", stageStartedAt, startupStartedAt);
+
+            stageStartedAt = now();
             String signPublicKey = b64(signing.getPublic().getEncoded());
             String wrapPublicKey = b64(wrapping.getPublic().getEncoded());
             String deviceId = sha256(concat(
                     signing.getPublic().getEncoded(), wrapping.getPublic().getEncoded()));
+            timing("device-identity-build", stageStartedAt, startupStartedAt);
 
+            stageStartedAt = now();
             String credential = loadCredential(context, config, app.actualCertificateSha256, deviceId,
                     signPublicKey, wrapPublicKey);
+            timing("credential-cache-lookup-" + (credential == null ? "miss" : "hit"),
+                    stageStartedAt, startupStartedAt);
             if (credential == null) {
+                stageStartedAt = now();
                 credential = enroll(context, config, app.actualCertificateSha256,
-                        signing, signPublicKey, wrapPublicKey, deviceId);
+                        signing, signPublicKey, wrapPublicKey, deviceId, startupStartedAt);
+                timing("device-enroll", stageStartedAt, startupStartedAt);
                 saveCredential(context, config, app.actualCertificateSha256, credential);
             }
 
+            stageStartedAt = now();
             Authorization authorization = loadAuthorization(context, config, deviceId, wrapping.getPrivate());
+            timing("authorization-cache-lookup-" + (authorization == null ? "miss" : "hit"),
+                    stageStartedAt, startupStartedAt);
             if (authorization == null) {
+                stageStartedAt = now();
                 authorization = authorize(
-                        context, config, signing, wrapping.getPrivate(), deviceId, credential);
+                        context, config, signing, wrapping.getPrivate(), deviceId, credential,
+                        startupStartedAt);
+                timing("device-authorize", stageStartedAt, startupStartedAt);
                 saveAuthorization(context, config, authorization);
             }
 
-            return decryptLocalPayload(config, authorization.payloadKey, localPayload);
+            stageStartedAt = now();
+            ByteBuffer result = decryptLocalPayload(config, authorization.payloadKey, localPayload,
+                    startupStartedAt);
+            timing("local-payload-aes-gcm-decrypt-and-verify", stageStartedAt, startupStartedAt);
+            Log.i(TAG, "[StartupTiming] complete authorized payload preparation totalMs=" +
+                    elapsedMs(startupStartedAt));
+            return result;
         } catch (Throwable error) {
-            Log.e(TAG, "Device authorization failed", error);
+            Log.e(TAG, "Device authorization failed after " + elapsedMs(startupStartedAt) + " ms", error);
             return null;
         } finally {
             StrictMode.setThreadPolicy(previous);
@@ -118,14 +174,25 @@ public final class NetworkHelper {
     private static String enroll(Context context, Config config, String actualCertificateSha256,
                                  KeyPair signing,
                                  String signPublicKey, String wrapPublicKey,
-                                 String deviceId) throws Exception {
+                                 String deviceId, long startupStartedAt) throws Exception {
+        long stageStartedAt = now();
         JSONObject challenge = challenge(config, "ENROLL");
+        timing("enroll-challenge", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         String message = canonical("ENROLL-V2", config.companyId,
                 challenge.getString("challengeId"), challenge.getString("challenge"),
                 config.releaseId, config.packageName, Long.toString(config.versionCode),
                 actualCertificateSha256, config.certificateSetSha256,
                 config.releaseBuildSha256, signPublicKey, wrapPublicKey);
+        timing("enroll-message-build", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         String integrityToken = integrityToken(context, config, sha256(bytes(message)));
+        timing("enroll-integrity-" + (integrityToken.isEmpty() ? "skipped" : "token"),
+                stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
+        String deviceSignature = sign(signing.getPrivate(), bytes(message));
+        timing("enroll-device-signature", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         JSONObject request = new JSONObject()
                 .put("challengeId", challenge.getString("challengeId"))
                 .put("challenge", challenge.getString("challenge"))
@@ -134,35 +201,56 @@ public final class NetworkHelper {
                 .put("signPublicKey", signPublicKey)
                 .put("wrapPublicKey", wrapPublicKey)
                 .put("integrityToken", integrityToken)
-                .put("deviceSignature", sign(signing.getPrivate(), bytes(message)));
+                .put("deviceSignature", deviceSignature);
+        timing("enroll-request-build", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         JSONObject response = postJson(config.basePath() + "/unpack/enroll", request);
+        timing("enroll-http", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         if (!deviceId.equals(response.getString("deviceId"))) {
             throw new SecurityException("deviceId binding mismatch");
         }
         String credential = response.getString("deviceCredential");
         JSONObject claims = verifyJws(config, credential);
         verifyCredential(config, claims, deviceId, signPublicKey, wrapPublicKey);
+        timing("enroll-response-verify", stageStartedAt, startupStartedAt);
         return credential;
     }
 
     private static Authorization authorize(Context context, Config config,
                                            KeyPair signing, PrivateKey wrapPrivate,
-                                           String deviceId, String credential) throws Exception {
+                                           String deviceId, String credential,
+                                           long startupStartedAt) throws Exception {
+        long stageStartedAt = now();
         JSONObject challenge = challenge(config, "AUTHORIZE");
+        timing("authorize-challenge", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         String message = canonical("AUTHORIZE-V2", config.companyId,
                 challenge.getString("challengeId"), challenge.getString("challenge"),
                 config.releaseId, sha256(bytes(credential)), deviceId,
                 config.releaseBuildSha256, Long.toString(config.payloadKeyVersion));
+        timing("authorize-message-build", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         String integrityToken = integrityToken(context, config, sha256(bytes(message)));
+        timing("authorize-integrity-" + (integrityToken.isEmpty() ? "skipped" : "token"),
+                stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
+        String deviceSignature = sign(signing.getPrivate(), bytes(message));
+        timing("authorize-device-signature", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         JSONObject request = new JSONObject()
                 .put("challengeId", challenge.getString("challengeId"))
                 .put("challenge", challenge.getString("challenge"))
                 .put("releaseId", config.releaseId)
                 .put("deviceCredential", credential)
                 .put("integrityToken", integrityToken)
-                .put("deviceSignature", sign(signing.getPrivate(), bytes(message)));
+                .put("deviceSignature", deviceSignature);
+        timing("authorize-request-build", stageStartedAt, startupStartedAt);
+        stageStartedAt = now();
         JSONObject response = postJson(config.basePath() + "/unpack/authorize", request);
+        timing("authorize-http", stageStartedAt, startupStartedAt);
         Log.i(TAG, "Authorization accepted for release " + config.releaseId);
+        stageStartedAt = now();
         String grant = response.getString("grant");
         String wrapped = response.getString("wrappedPayloadKey");
         JSONObject claims = verifyJws(config, grant);
@@ -171,6 +259,7 @@ public final class NetworkHelper {
             throw new SecurityException("wrap algorithm mismatch");
         }
         byte[] key = decryptWrappedKey(wrapPrivate, wrapped);
+        timing("authorize-response-verify-and-key-unwrap", stageStartedAt, startupStartedAt);
         return new Authorization(grant, claims, wrapped, key);
     }
 
@@ -191,10 +280,12 @@ public final class NetworkHelper {
     }
 
     private static ByteBuffer decryptLocalPayload(Config config, byte[] payloadKey,
-                                                  ByteBuffer localPayload) throws Exception {
+                                                   ByteBuffer localPayload,
+                                                   long startupStartedAt) throws Exception {
         ByteBuffer plaintext = null;
         boolean succeeded = false;
         try {
+            long stageStartedAt = now();
             if (localPayload == null || !localPayload.isDirect()) {
                 throw new SecurityException("local payload must use direct memory");
             }
@@ -212,6 +303,9 @@ public final class NetworkHelper {
             if (version != 1 || encryptedLength < 28 || encryptedLength != container.remaining()) {
                 throw new SecurityException("invalid local payload header");
             }
+            timing("local-payload-container-hash-and-header-verify", stageStartedAt,
+                    startupStartedAt);
+            stageStartedAt = now();
             byte[] nonce = new byte[12];
             container.get(nonce);
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
@@ -226,11 +320,14 @@ public final class NetworkHelper {
             plaintext = ByteBuffer.allocateDirect(cipher.getOutputSize(container.remaining()));
             cipher.doFinal(container, plaintext);
             plaintext.flip();
+            timing("local-payload-aes-gcm-decrypt", stageStartedAt, startupStartedAt);
+            stageStartedAt = now();
             ByteBuffer result = plaintext.slice();
             if (!config.payloadPlaintextSha256.equals(sha256(result.duplicate()))) {
                 clear(result);
                 throw new SecurityException("payload plaintext hash mismatch");
             }
+            timing("local-payload-plaintext-hash-verify", stageStartedAt, startupStartedAt);
             succeeded = true;
             return result;
         } finally {
@@ -339,13 +436,17 @@ public final class NetworkHelper {
         String token = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(key, null);
         if (token == null) {
+            Log.i(TAG, "[StartupTiming] credential cache is empty");
             return null;
         }
         try {
             verifyCredential(config, verifyJws(config, token), deviceId,
                     signPublicKey, wrapPublicKey);
+            Log.i(TAG, "[StartupTiming] credential cache is valid");
             return token;
         } catch (Exception invalid) {
+            Log.w(TAG, "[StartupTiming] credential cache rejected reason=" +
+                    invalid.getClass().getSimpleName());
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(key).apply();
             return null;
         }
@@ -370,17 +471,22 @@ public final class NetworkHelper {
         String grant = prefs.getString(key, null);
         String wrapped = prefs.getString(key + ".wrapped", null);
         if (grant == null || wrapped == null) {
+            Log.i(TAG, "[StartupTiming] authorization cache is empty");
             return null;
         }
         try {
             JSONObject claims = verifyJws(config, grant);
             if (claims.getLong("expiresAt") < System.currentTimeMillis() / 1000L + 30L) {
+                Log.i(TAG, "[StartupTiming] authorization cache is expired or near expiry");
                 return null;
             }
             verifyGrant(config, claims, deviceId, wrapped);
             byte[] payloadKey = decryptWrappedKey(wrapPrivate, wrapped);
+            Log.i(TAG, "[StartupTiming] authorization cache is valid");
             return new Authorization(grant, claims, wrapped, payloadKey);
         } catch (Exception e) {
+            Log.w(TAG, "[StartupTiming] authorization cache rejected reason=" +
+                    e.getClass().getSimpleName());
             prefs.edit().remove(key).remove(key + ".wrapped").apply();
             return null;
         }
@@ -419,7 +525,7 @@ public final class NetworkHelper {
             KeyPairGenerator generator = KeyPairGenerator.getInstance(
                     KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE);
             generator.initialize(new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_DECRYPT)
-                    .setKeySize(3072)
+                    .setKeySize(2048)
                     .setDigests(KeyProperties.DIGEST_SHA1)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
                     .build());
@@ -510,12 +616,15 @@ public final class NetworkHelper {
     }
 
     private static OkHttpClient createHttpClient() {
+        long startedAt = now();
         OkHttpClient.Builder builder = new OkHttpClient.Builder()
                 .connectTimeout(HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 .readTimeout(HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 .writeTimeout(HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 .connectionSpecs(connectionSpecs())
-                .retryOnConnectionFailure(true);
+                .retryOnConnectionFailure(true)
+                .eventListenerFactory(call -> new HttpTimingEventListener(
+                        call.request().url().encodedPath()));
         try {
             Provider provider = Conscrypt.newProvider();
             X509TrustManager trustManager = defaultTrustManager();
@@ -528,7 +637,102 @@ public final class NetworkHelper {
             // OkHttp will use Android's platform TLS provider as a compatibility fallback.
             Log.w(TAG, "Bundled Conscrypt unavailable; using Android platform TLS", error);
         }
-        return builder.build();
+        OkHttpClient client = builder.build();
+        Log.i(TAG, "[StartupTiming] stage=http-client-create durationMs=" + elapsedMs(startedAt));
+        return client;
+    }
+
+    private static final class HttpTimingEventListener extends EventListener {
+        private final String path;
+        private long callStartedAt;
+        private long dnsStartedAt;
+        private long connectStartedAt;
+        private long tlsStartedAt;
+        private long requestStartedAt;
+        private long responseStartedAt;
+
+        HttpTimingEventListener(String path) {
+            this.path = path;
+        }
+
+        private void event(String event, long startedAt) {
+            Log.i(TAG, "[HttpTiming] path=" + path + " event=" + event +
+                    " durationMs=" + elapsedMs(startedAt) +
+                    " callMs=" + elapsedMs(callStartedAt));
+        }
+
+        @Override public void callStart(Call call) {
+            callStartedAt = now();
+            Log.i(TAG, "[HttpTiming] path=" + path + " event=call-start");
+        }
+
+        @Override public void dnsStart(Call call, String domainName) {
+            dnsStartedAt = now();
+        }
+
+        @Override public void dnsEnd(Call call, String domainName, List<InetAddress> inetAddressList) {
+            event("dns-end addresses=" + inetAddressList.size(), dnsStartedAt);
+        }
+
+        @Override public void connectStart(Call call, InetSocketAddress inetSocketAddress,
+                                           Proxy proxy) {
+            connectStartedAt = now();
+        }
+
+        @Override public void secureConnectStart(Call call) {
+            tlsStartedAt = now();
+        }
+
+        @Override public void secureConnectEnd(Call call, Handshake handshake) {
+            event("tls-end version=" + (handshake == null ? "none" : handshake.tlsVersion()),
+                    tlsStartedAt);
+        }
+
+        @Override public void connectEnd(Call call, InetSocketAddress inetSocketAddress,
+                                         Proxy proxy, Protocol protocol) {
+            event("connect-end protocol=" + protocol, connectStartedAt);
+        }
+
+        @Override public void connectFailed(Call call, InetSocketAddress inetSocketAddress,
+                                            Proxy proxy, Protocol protocol, IOException ioe) {
+            event("connect-failed error=" + ioe.getClass().getSimpleName(), connectStartedAt);
+        }
+
+        @Override public void connectionAcquired(Call call, Connection connection) {
+            event("connection-acquired protocol=" + connection.protocol(), callStartedAt);
+        }
+
+        @Override public void connectionReleased(Call call, Connection connection) {
+            event("connection-released", callStartedAt);
+        }
+
+        @Override public void requestHeadersStart(Call call) {
+            requestStartedAt = now();
+        }
+
+        @Override public void requestBodyEnd(Call call, long byteCount) {
+            event("request-body-end bytes=" + byteCount, requestStartedAt);
+        }
+
+        @Override public void responseHeadersStart(Call call) {
+            responseStartedAt = now();
+        }
+
+        @Override public void responseHeadersEnd(Call call, Response response) {
+            event("response-headers-end status=" + response.code(), responseStartedAt);
+        }
+
+        @Override public void responseBodyEnd(Call call, long byteCount) {
+            event("response-body-end bytes=" + byteCount, responseStartedAt);
+        }
+
+        @Override public void callEnd(Call call) {
+            event("call-end", callStartedAt);
+        }
+
+        @Override public void callFailed(Call call, IOException ioe) {
+            event("call-failed error=" + ioe.getClass().getSimpleName(), callStartedAt);
+        }
     }
 
     private static X509TrustManager defaultTrustManager() throws Exception {
