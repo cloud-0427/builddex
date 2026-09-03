@@ -132,6 +132,72 @@ func TestEndToEndPrepareSealEnrollAndAuthorizeLocalPayload(t *testing.T) {
 	signEncoded := base64.RawURLEncoding.EncodeToString(signDER)
 	wrapEncoded := base64.RawURLEncoding.EncodeToString(wrapDER)
 
+	bootstrapChallenge := newChallenge(t, handler, "BOOTSTRAP")
+	bootstrapMessage := canonical("BOOTSTRAP-V1", "acme", bootstrapChallenge.ID, bootstrapChallenge.Value,
+		release.ReleaseID, release.PackageName, strconv.FormatInt(release.VersionCode, 10), certificate,
+		release.CertificateSetSHA256, release.ReleaseBuildSHA256,
+		strconv.FormatInt(release.PayloadKeyVersion, 10), signEncoded, wrapEncoded)
+	bootstrapBody := map[string]any{
+		"challengeId": bootstrapChallenge.ID, "challenge": bootstrapChallenge.Value,
+		"releaseId": release.ReleaseID, "actualCertificateSha256": certificate,
+		"signPublicKey": signEncoded, "wrapPublicKey": wrapEncoded,
+		"deviceSignature": signMessage(t, signPrivate, bootstrapMessage),
+	}
+	bootstrap := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/unpack/bootstrap", "", "", bootstrapBody)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("bootstrap: %d %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	var bootstrapped struct {
+		DeviceID            string `json:"deviceId"`
+		DeviceCredential    string `json:"deviceCredential"`
+		Grant               string `json:"grant"`
+		WrappedPayloadKey   string `json:"wrappedPayloadKey"`
+		WrapAlgorithm       string `json:"wrapAlgorithm"`
+		WrapLabel           string `json:"wrapLabel"`
+		CredentialExpiresAt int64  `json:"credentialExpiresAt"`
+		GrantExpiresAt      int64  `json:"grantExpiresAt"`
+	}
+	decodeResponse(t, bootstrap, &bootstrapped)
+	if bootstrapped.DeviceID == "" || bootstrapped.DeviceCredential == "" || bootstrapped.Grant == "" ||
+		bootstrapped.WrapAlgorithm != "RSA-OAEP-SHA1" || bootstrapped.WrapLabel != "" ||
+		bootstrapped.CredentialExpiresAt <= time.Now().Unix() || bootstrapped.GrantExpiresAt <= time.Now().Unix() {
+		t.Fatalf("unexpected bootstrap response: %s", bootstrap.Body.String())
+	}
+	bootstrapWrapped, err := base64.RawURLEncoding.DecodeString(bootstrapped.WrappedPayloadKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapPayloadKey, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, wrapPrivate, bootstrapWrapped, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedBootstrapKey, err := base64.StdEncoding.DecodeString(prepared.PayloadKey)
+	if err != nil || !bytes.Equal(bootstrapPayloadKey, expectedBootstrapKey) {
+		t.Fatal("bootstrap must return the prepared local payload key")
+	}
+	public := secure.CompanySigningKey(master, "acme").Public().(ed25519.PublicKey)
+	var bootstrapCredential deviceCredential
+	if err := secure.VerifyJWS(public, bootstrapped.DeviceCredential, &bootstrapCredential); err != nil ||
+		bootstrapCredential.DeviceID != bootstrapped.DeviceID {
+		t.Fatalf("invalid bootstrap credential: %v", err)
+	}
+	var bootstrapGrant payloadGrant
+	if err := secure.VerifyJWS(public, bootstrapped.Grant, &bootstrapGrant); err != nil ||
+		bootstrapGrant.DeviceID != bootstrapped.DeviceID || bootstrapGrant.ReleaseID != release.ReleaseID {
+		t.Fatalf("invalid bootstrap grant: %v", err)
+	}
+	afterBootstrap, err := store.GetReleaseMetadata(t.Context(), db, release.ReleaseID)
+	if err != nil || afterBootstrap.DeliveryCount != 1 {
+		t.Fatalf("bootstrap must count one payload delivery: count=%d err=%v",
+			afterBootstrap.DeliveryCount, err)
+	}
+	replayedBootstrap := doJSON(t, handler, http.MethodPost,
+		"/api/v1/companies/acme/unpack/bootstrap", "", "", bootstrapBody)
+	if replayedBootstrap.Code < http.StatusBadRequest {
+		t.Fatalf("bootstrap challenge replay must fail: %d %s", replayedBootstrap.Code, replayedBootstrap.Body.String())
+	}
+
 	enrollChallenge := newChallenge(t, handler, "ENROLL")
 	enrollMessage := canonical("ENROLL-V2", "acme", enrollChallenge.ID, enrollChallenge.Value,
 		release.ReleaseID, release.PackageName, strconv.FormatInt(release.VersionCode, 10), certificate,
@@ -214,7 +280,7 @@ func TestEndToEndPrepareSealEnrollAndAuthorizeLocalPayload(t *testing.T) {
 		t.Fatal("authorize must return the prepared local payload key")
 	}
 	var grant payloadGrant
-	public := secure.CompanySigningKey(master, "acme").Public().(ed25519.PublicKey)
+	public = secure.CompanySigningKey(master, "acme").Public().(ed25519.PublicKey)
 	if err := secure.VerifyJWS(public, authorization.Grant, &grant); err != nil {
 		t.Fatal(err)
 	}

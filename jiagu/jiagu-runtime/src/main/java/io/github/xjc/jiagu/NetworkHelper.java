@@ -41,6 +41,10 @@ import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import javax.crypto.Cipher;
@@ -105,6 +109,7 @@ public final class NetworkHelper {
         Log.i(TAG, "[StartupTiming] begin authorized payload preparation");
         StrictMode.ThreadPolicy previous = StrictMode.getThreadPolicy();
         StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().permitAll().build());
+        ExecutorService bootstrapExecutor = null;
         try {
             long stageStartedAt = now();
             Config config = Config.parse(runtimeConfigJson);
@@ -119,9 +124,37 @@ public final class NetworkHelper {
             KeyPair signing = getOrCreateSigningKey(config);
             timing("keystore-signing-key", stageStartedAt, startupStartedAt);
 
+            Future<KeyPair> wrappingFuture = null;
+            Future<JSONObject> bootstrapChallengeFuture = null;
+            if (!hasCredentialCacheEntry(context, config, app.actualCertificateSha256)) {
+                bootstrapExecutor = Executors.newFixedThreadPool(2, runnable -> {
+                    Thread thread = new Thread(runnable, "Jiagu-Bootstrap");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+                wrappingFuture = bootstrapExecutor.submit(() -> {
+                    long parallelStageStartedAt = now();
+                    KeyPair result = getOrCreateWrappingKey(config);
+                    timing("keystore-wrapping-key-parallel", parallelStageStartedAt,
+                            startupStartedAt);
+                    return result;
+                });
+                bootstrapChallengeFuture = bootstrapExecutor.submit(() -> {
+                    long parallelStageStartedAt = now();
+                    JSONObject result = challenge(config, "BOOTSTRAP");
+                    timing("bootstrap-challenge-parallel", parallelStageStartedAt,
+                            startupStartedAt);
+                    return result;
+                });
+                Log.i(TAG, "[StartupTiming] started wrapping key and bootstrap challenge in parallel");
+            }
+
             stageStartedAt = now();
-            KeyPair wrapping = getOrCreateWrappingKey(config);
-            timing("keystore-wrapping-key", stageStartedAt, startupStartedAt);
+            KeyPair wrapping = wrappingFuture == null
+                    ? getOrCreateWrappingKey(config)
+                    : await(wrappingFuture);
+            timing(wrappingFuture == null ? "keystore-wrapping-key" : "keystore-wrapping-key-await",
+                    stageStartedAt, startupStartedAt);
 
             stageStartedAt = now();
             String signPublicKey = b64(signing.getPublic().getEncoded());
@@ -135,25 +168,46 @@ public final class NetworkHelper {
                     signPublicKey, wrapPublicKey);
             timing("credential-cache-lookup-" + (credential == null ? "miss" : "hit"),
                     stageStartedAt, startupStartedAt);
+            Authorization authorization;
             if (credential == null) {
                 stageStartedAt = now();
-                credential = enroll(context, config, app.actualCertificateSha256,
-                        signing, signPublicKey, wrapPublicKey, deviceId, startupStartedAt);
-                timing("device-enroll", stageStartedAt, startupStartedAt);
+                try {
+                    JSONObject bootstrapChallenge = bootstrapChallengeFuture == null
+                            ? challenge(config, "BOOTSTRAP")
+                            : await(bootstrapChallengeFuture);
+                    BootstrapResult bootstrapped = bootstrap(context, config,
+                            app.actualCertificateSha256, signing, wrapping.getPrivate(),
+                            signPublicKey, wrapPublicKey, deviceId, bootstrapChallenge,
+                            startupStartedAt);
+                    credential = bootstrapped.credential;
+                    authorization = bootstrapped.authorization;
+                    timing("device-bootstrap", stageStartedAt, startupStartedAt);
+                } catch (ServerRejectedException rejected) {
+                    if (!rejected.bootstrapUnsupported()) {
+                        throw rejected;
+                    }
+                    Log.w(TAG, "Bootstrap API unavailable; falling back to legacy enroll/authorize");
+                    credential = enroll(context, config, app.actualCertificateSha256,
+                            signing, signPublicKey, wrapPublicKey, deviceId, startupStartedAt);
+                    authorization = authorize(context, config, signing, wrapping.getPrivate(),
+                            deviceId, credential, startupStartedAt);
+                    timing("device-bootstrap-legacy-fallback", stageStartedAt, startupStartedAt);
+                }
                 saveCredential(context, config, app.actualCertificateSha256, credential);
-            }
-
-            stageStartedAt = now();
-            Authorization authorization = loadAuthorization(context, config, deviceId, wrapping.getPrivate());
-            timing("authorization-cache-lookup-" + (authorization == null ? "miss" : "hit"),
-                    stageStartedAt, startupStartedAt);
-            if (authorization == null) {
-                stageStartedAt = now();
-                authorization = authorize(
-                        context, config, signing, wrapping.getPrivate(), deviceId, credential,
-                        startupStartedAt);
-                timing("device-authorize", stageStartedAt, startupStartedAt);
                 saveAuthorization(context, config, authorization);
+            } else {
+                stageStartedAt = now();
+                authorization = loadAuthorization(context, config, deviceId, wrapping.getPrivate());
+                timing("authorization-cache-lookup-" + (authorization == null ? "miss" : "hit"),
+                        stageStartedAt, startupStartedAt);
+                if (authorization == null) {
+                    stageStartedAt = now();
+                    authorization = authorize(
+                            context, config, signing, wrapping.getPrivate(), deviceId, credential,
+                            startupStartedAt);
+                    timing("device-authorize", stageStartedAt, startupStartedAt);
+                    saveAuthorization(context, config, authorization);
+                }
             }
 
             stageStartedAt = now();
@@ -167,8 +221,72 @@ public final class NetworkHelper {
             Log.e(TAG, "Device authorization failed after " + elapsedMs(startupStartedAt) + " ms", error);
             return null;
         } finally {
+            if (bootstrapExecutor != null) {
+                bootstrapExecutor.shutdownNow();
+            }
             StrictMode.setThreadPolicy(previous);
         }
+    }
+
+    private static BootstrapResult bootstrap(Context context, Config config,
+                                             String actualCertificateSha256,
+                                             KeyPair signing, PrivateKey wrapPrivate,
+                                             String signPublicKey, String wrapPublicKey,
+                                             String deviceId, JSONObject challenge,
+                                             long startupStartedAt) throws Exception {
+        long stageStartedAt = now();
+        String message = canonical("BOOTSTRAP-V1", config.companyId,
+                challenge.getString("challengeId"), challenge.getString("challenge"),
+                config.releaseId, config.packageName, Long.toString(config.versionCode),
+                actualCertificateSha256, config.certificateSetSha256,
+                config.releaseBuildSha256, Long.toString(config.payloadKeyVersion),
+                signPublicKey, wrapPublicKey);
+        timing("bootstrap-message-build", stageStartedAt, startupStartedAt);
+
+        stageStartedAt = now();
+        String integrityToken = integrityToken(context, config, sha256(bytes(message)));
+        timing("bootstrap-integrity-" + (integrityToken.isEmpty() ? "skipped" : "token"),
+                stageStartedAt, startupStartedAt);
+
+        stageStartedAt = now();
+        String deviceSignature = sign(signing.getPrivate(), bytes(message));
+        timing("bootstrap-device-signature", stageStartedAt, startupStartedAt);
+
+        stageStartedAt = now();
+        JSONObject request = new JSONObject()
+                .put("challengeId", challenge.getString("challengeId"))
+                .put("challenge", challenge.getString("challenge"))
+                .put("releaseId", config.releaseId)
+                .put("actualCertificateSha256", actualCertificateSha256)
+                .put("signPublicKey", signPublicKey)
+                .put("wrapPublicKey", wrapPublicKey)
+                .put("integrityToken", integrityToken)
+                .put("deviceSignature", deviceSignature);
+        timing("bootstrap-request-build", stageStartedAt, startupStartedAt);
+
+        stageStartedAt = now();
+        JSONObject response = postJson(config.basePath() + "/unpack/bootstrap", request);
+        timing("bootstrap-http", stageStartedAt, startupStartedAt);
+
+        stageStartedAt = now();
+        if (!deviceId.equals(response.getString("deviceId"))) {
+            throw new SecurityException("deviceId binding mismatch");
+        }
+        String credential = response.getString("deviceCredential");
+        verifyCredential(config, verifyJws(config, credential), deviceId,
+                signPublicKey, wrapPublicKey);
+        String grant = response.getString("grant");
+        String wrapped = response.getString("wrappedPayloadKey");
+        JSONObject claims = verifyJws(config, grant);
+        verifyGrant(config, claims, deviceId, wrapped);
+        if (!"RSA-OAEP-SHA1".equals(response.getString("wrapAlgorithm"))) {
+            throw new SecurityException("wrap algorithm mismatch");
+        }
+        byte[] key = decryptWrappedKey(wrapPrivate, wrapped);
+        timing("bootstrap-response-verify-and-key-unwrap", stageStartedAt,
+                startupStartedAt);
+        Log.i(TAG, "Bootstrap accepted for release " + config.releaseId);
+        return new BootstrapResult(credential, new Authorization(grant, claims, wrapped, key));
     }
 
     private static String enroll(Context context, Config config, String actualCertificateSha256,
@@ -592,7 +710,7 @@ public final class NetworkHelper {
             } catch (Exception ignored) {
                 // Keep the bounded generic error; never log authorization tokens or bodies.
             }
-            throw new SecurityException("Jiagu server rejected request: " + code + ": " + message);
+            throw new ServerRejectedException(status, code, message);
         }
         return responseBytes;
     }
@@ -642,6 +760,30 @@ public final class NetworkHelper {
         return client;
     }
 
+    private static boolean hasCredentialCacheEntry(Context context, Config config,
+                                                   String actualCertificateSha256) {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .contains(credentialPreferenceKey(config, actualCertificateSha256));
+    }
+
+    private static <T> T await(Future<T> future) throws Exception {
+        try {
+            return future.get();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        } catch (ExecutionException failed) {
+            Throwable cause = failed.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            if (cause instanceof Error) {
+                throw (Error) cause;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
     private static final class HttpTimingEventListener extends EventListener {
         private final String path;
         private long callStartedAt;
@@ -649,6 +791,7 @@ public final class NetworkHelper {
         private long connectStartedAt;
         private long tlsStartedAt;
         private long requestStartedAt;
+        private long requestCompletedAt;
         private long responseStartedAt;
 
         HttpTimingEventListener(String path) {
@@ -711,11 +854,15 @@ public final class NetworkHelper {
         }
 
         @Override public void requestBodyEnd(Call call, long byteCount) {
+            requestCompletedAt = now();
             event("request-body-end bytes=" + byteCount, requestStartedAt);
         }
 
         @Override public void responseHeadersStart(Call call) {
             responseStartedAt = now();
+            if (requestCompletedAt != 0L) {
+                event("response-wait-end", requestCompletedAt);
+            }
         }
 
         @Override public void responseHeadersEnd(Call call, Response response) {
@@ -816,6 +963,32 @@ public final class NetworkHelper {
 
     private static byte[] b64decode(String value) {
         return Base64.decode(value, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+    }
+
+    private static final class BootstrapResult {
+        final String credential;
+        final Authorization authorization;
+
+        BootstrapResult(String credential, Authorization authorization) {
+            this.credential = credential;
+            this.authorization = authorization;
+        }
+    }
+
+    private static final class ServerRejectedException extends SecurityException {
+        final int status;
+        final String code;
+
+        ServerRejectedException(int status, String code, String message) {
+            super("Jiagu server rejected request: " + code + ": " + message);
+            this.status = status;
+            this.code = code;
+        }
+
+        boolean bootstrapUnsupported() {
+            return (status == 400 && "INVALID_PURPOSE".equals(code)) ||
+                    (status == 404 && "API_NOT_FOUND".equals(code));
+        }
     }
 
     private static final class Authorization {

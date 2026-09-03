@@ -100,6 +100,7 @@ func (a *API) routes() {
 
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/challenges", a.createChallenge)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/enroll", a.enrollDevice)
+	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/bootstrap", a.bootstrapDevice)
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/unpack/authorize", a.authorizePayload)
 
 	a.mux.HandleFunc("POST /api/v1/companies/{companyId}/admin/revocations", a.addRevocation)
@@ -662,8 +663,8 @@ func (a *API) createChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Purpose = strings.ToUpper(input.Purpose)
-	if input.Purpose != "ENROLL" && input.Purpose != "AUTHORIZE" {
-		writeError(w, http.StatusBadRequest, "INVALID_PURPOSE", "purpose must be ENROLL or AUTHORIZE")
+	if input.Purpose != "ENROLL" && input.Purpose != "AUTHORIZE" && input.Purpose != "BOOTSTRAP" {
+		writeError(w, http.StatusBadRequest, "INVALID_PURPOSE", "purpose must be ENROLL, AUTHORIZE, or BOOTSTRAP")
 		return
 	}
 	id, _ := secure.RandomToken(18)
@@ -754,6 +755,140 @@ func (a *API) enrollDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeResponse(w, http.StatusCreated, "DEVICE_ENROLLED", "Device enrolled.", map[string]any{"deviceId": deviceID, "deviceCredential": token, "expiresAt": credential.ExpiresAt})
+}
+
+// bootstrapDevice preserves the same server-challenge, device-proof, revocation,
+// release-binding, and delivery-quota checks as ENROLL followed by AUTHORIZE, but
+// returns the credential and release grant in one response for first installation.
+func (a *API) bootstrapDevice(w http.ResponseWriter, r *http.Request) {
+	lease, ok := a.openCompany(w, r)
+	if !ok {
+		return
+	}
+	defer lease.Release()
+	db := lease.DB
+	company, err := store.GetCompany(r.Context(), db)
+	if err != nil || !companyActive(company) {
+		writeError(w, http.StatusForbidden, "COMPANY_NOT_AUTHORIZED", "company authorization is inactive")
+		return
+	}
+	var input struct {
+		ChallengeID             string `json:"challengeId"`
+		Challenge               string `json:"challenge"`
+		ReleaseID               string `json:"releaseId"`
+		ActualCertificateSHA256 string `json:"actualCertificateSha256"`
+		SignPublicKey           string `json:"signPublicKey"`
+		WrapPublicKey           string `json:"wrapPublicKey"`
+		IntegrityToken          string `json:"integrityToken"`
+		DeviceSignature         string `json:"deviceSignature"`
+	}
+	if !decodeJSON(w, r, &input, 2<<20) {
+		return
+	}
+	release, ok := publishedRelease(w, r, db, input.ReleaseID)
+	if !ok {
+		return
+	}
+	signKey, signDER, err := secure.ParseECDSAPublicKey(input.SignPublicKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_SIGN_KEY", err.Error())
+		return
+	}
+	wrapKey, wrapDER, err := secure.ParseRSAPublicKey(input.WrapPublicKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_WRAP_KEY", err.Error())
+		return
+	}
+	deviceID := secure.SHA256URL(append(append([]byte{}, signDER...), wrapDER...))
+	if !containsString(release.CertificateSHA256Digests, input.ActualCertificateSHA256) {
+		writeErrorDetails(w, http.StatusForbidden, "APP_IDENTITY_MISMATCH", "installed signing certificate is not allowed for this release", map[string]any{
+			"expectedCertificateSetSha256": release.CertificateSetSHA256,
+		})
+		return
+	}
+	message := canonical("BOOTSTRAP-V1", r.PathValue("companyId"), input.ChallengeID, input.Challenge,
+		input.ReleaseID, release.PackageName, strconv.FormatInt(release.VersionCode, 10),
+		input.ActualCertificateSHA256, release.CertificateSetSHA256, release.ReleaseBuildSHA256,
+		strconv.FormatInt(release.PayloadKeyVersion, 10), input.SignPublicKey, input.WrapPublicKey)
+	if err := secure.VerifyECDSA(signKey, message, input.DeviceSignature); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_DEVICE_PROOF", err.Error())
+		return
+	}
+	if err := a.integrity.Verify(r.Context(), input.IntegrityToken, integrity.Expected{
+		RequestHash: secure.SHA256URL(message), PackageName: release.PackageName,
+		VersionCode: release.VersionCode, CertificateSHA256: input.ActualCertificateSHA256,
+	}); err != nil {
+		writeError(w, http.StatusForbidden, "INTEGRITY_REJECTED", err.Error())
+		return
+	}
+	revoked, err := store.IsRevoked(r.Context(), db, "DEVICE", deviceID)
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	if revoked {
+		writeError(w, http.StatusForbidden, "DEVICE_REVOKED", "device is revoked")
+		return
+	}
+	if err := store.ConsumeChallenge(r.Context(), db, input.ChallengeID, input.Challenge, "BOOTSTRAP"); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+
+	companyID := r.PathValue("companyId")
+	now := time.Now()
+	credential := deviceCredential{
+		Type: "DEVICE_CREDENTIAL", CompanyID: companyID, DeviceID: deviceID,
+		SignPublicKey: input.SignPublicKey, WrapPublicKey: input.WrapPublicKey,
+		PackageName: release.PackageName, CertificateSHA256: input.ActualCertificateSHA256,
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(a.cfg.DeviceCredentialTTL).Unix(),
+	}
+	credentialToken, err := secure.SignJWS(
+		secure.CompanySigningKey(a.cfg.MasterKey, companyID), "company-sign-v1", credential)
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	payloadKey, err := a.unprotectPayloadKey(companyID, release)
+	if err != nil {
+		writeInternal(w, errors.New("cannot unwrap local payload key"))
+		return
+	}
+	wrapped, err := secure.WrapRSAOAEP(wrapKey, payloadKey, nil)
+	clear(payloadKey)
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	grantID, _ := secure.RandomToken(18)
+	grant := payloadGrant{
+		Type: "PAYLOAD_GRANT", GrantID: grantID, CompanyID: companyID, DeviceID: deviceID,
+		DeviceWrapKeySHA256: secure.SHA256URL(wrapDER), ReleaseID: release.ReleaseID,
+		PayloadID: release.PayloadID, PayloadVersion: release.PayloadVersion, PackageName: release.PackageName,
+		VersionCode: release.VersionCode, CertificateSHA256: input.ActualCertificateSHA256,
+		CertificateSetSHA256: release.CertificateSetSHA256, ReleaseBuildSHA256: release.ReleaseBuildSHA256,
+		PayloadPlaintextSHA256: release.PlaintextSHA256, LocalCiphertextSHA256: release.LocalCiphertextSHA256,
+		PayloadKeyVersion:       release.PayloadKeyVersion,
+		WrappedPayloadKeySHA256: secure.SHA256URL([]byte(wrapped)), WrapLabel: "",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(a.cfg.GrantTTL).Unix(),
+	}
+	grantToken, err := secure.SignJWS(
+		secure.CompanySigningKey(a.cfg.MasterKey, companyID), "company-sign-v1", grant)
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	if err := store.IncrementDelivery(r.Context(), db, release.ReleaseID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeResponse(w, http.StatusCreated, "DEVICE_BOOTSTRAPPED", "Device enrolled and payload access authorized.", map[string]any{
+		"deviceId": deviceID, "deviceCredential": credentialToken,
+		"credentialExpiresAt": credential.ExpiresAt,
+		"grant":               grantToken, "wrappedPayloadKey": wrapped,
+		"wrapAlgorithm": "RSA-OAEP-SHA1", "wrapLabel": "",
+		"grantExpiresAt": grant.ExpiresAt, "expiresAt": grant.ExpiresAt,
+	})
 }
 
 func (a *API) authorizePayload(w http.ResponseWriter, r *http.Request) {

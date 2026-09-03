@@ -26,10 +26,12 @@ AAD = canonical("PAYLOAD-KEY-V3", companyId, releaseId)
 
 1. Runtime 从 `liblog_ext.so` 读取 JGRC，解析 RuntimeConfig 和本地 JGLP。
 2. 校验 APK 的 packageName、versionCode 和实际签名证书。
-3. 在 Android Keystore 中生成 ECDSA P-256 签名 Key 和 RSA-2048 wrapping Key。
-4. 获取 ENROLL challenge，签署 `ENROLL-V2` canonical message。
+3. 在 Android Keystore 中生成 ECDSA P-256 签名 Key；当本地没有 Credential 缓存时，并行生成 RSA-2048 wrapping Key 和获取 BOOTSTRAP challenge。
+4. Runtime 签署绑定设备公钥、应用身份、ReleaseBuild 和 KeyVersion 的 `BOOTSTRAP-V1` canonical message。
 5. `integrityMode=google` 时获取 Play Integrity Standard token。
-6. 服务端验证 challenge、设备签名、Release、证书和可选 Integrity，返回 Ed25519 签名 Credential。
+6. 服务端验证 challenge、设备签名、撤销、Release、证书、下发配额和可选 Integrity，在一个响应中返回 Ed25519 签名的 Credential、Grant 和 wrapped Payload Key。
+
+旧版 Runtime 仍可使用 `ENROLL` challenge、`/unpack/enroll`、`AUTHORIZE` challenge 和 `/unpack/authorize` 四步流程；服务端保留这些接口。新版 Runtime 遇到尚未支持 BOOTSTRAP 的旧服务端时也会回退到旧流程。
 
 Credential 客户端缓存作用域为公司、包名和实际签名证书，不包含 Release。后续版本只要上述身份不变且 Credential 有效，就跳过 ENROLL，直接为新 Release 执行 AUTHORIZE。
 

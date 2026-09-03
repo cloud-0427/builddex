@@ -75,11 +75,15 @@ GET .../pack/releases?pageSize=20&beforeCreatedAt=1788200000&beforeReleaseId=rel
 
 ### `POST /api/v1/companies/{companyId}/unpack/challenges`
 
-创建 `ENROLL` 或 `AUTHORIZE` 一次性 challenge。
+创建 `ENROLL`、`AUTHORIZE` 或 `BOOTSTRAP` 一次性 challenge。
 
 ### `POST /api/v1/companies/{companyId}/unpack/enroll`
 
 验证实际应用身份、设备 ECDSA 签名、challenge 和可选 Play Integrity，返回签名 Device Credential。
+
+### `POST /api/v1/companies/{companyId}/unpack/bootstrap`
+
+首次安装专用接口。验证 `BOOTSTRAP` challenge、实际应用身份、设备 ECDSA 签名、撤销、Release、下发配额和可选 Play Integrity，在一个响应中返回 Device Credential、Grant 和设备 RSA 公钥封装的 Payload Key。旧版 `enroll` 和 `authorize` 接口保持不变。
 
 ### `POST /api/v1/companies/{companyId}/unpack/authorize`
 
