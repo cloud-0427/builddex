@@ -6,6 +6,11 @@ plugins {
 
 // app/build.gradle
 dexReport {
+    // 线上真实的签名sha256的 base64URL
+    certificateSha256Digests = [
+            "sy_JLyeXjMJcircorCb5QKmg-xYvEtSdPjrUZLaEmWE"
+    ]
+
     // 指定在哪些构建类型下自动运行。支持 "debug", "release" 等。
     autoRunBuildTypes = ["debug","release"]
 
@@ -105,6 +110,11 @@ android {
     buildFeatures {
         viewBinding true
     }
+}
+
+base {
+    def date = new Date().format("yyMMddHHmm", TimeZone.getTimeZone("GMT+08:00"))
+    archivesName = "${project.name}_${date}_${android.defaultConfig.versionName}"
 }
 
 dependencies {

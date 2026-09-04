@@ -8,7 +8,7 @@ def jitPackArtifact = System.getenv('ARTIFACT')
 def publicationGroup = jitPackGroup && jitPackArtifact
         ? "${jitPackGroup}.${jitPackArtifact}"
         : 'io.github.xjc'
-def publicationVersion = System.getenv('VERSION') ?: '0.1.5'
+def publicationVersion = System.getenv('VERSION') ?: '0.1.6'
 
 // 本地开发使用固定坐标；JitPack 构建时使用其注入的 GitHub 坐标和 Tag。
 group = publicationGroup

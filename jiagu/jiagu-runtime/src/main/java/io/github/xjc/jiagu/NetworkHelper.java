@@ -25,12 +25,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.Provider;
+import java.security.SecureRandom;
 import java.security.SignatureException;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.MGF1ParameterSpec;
@@ -633,16 +635,24 @@ public final class NetworkHelper {
                 .connectionSpecs(connectionSpecs())
                 .retryOnConnectionFailure(true);
         try {
-            Provider provider = Conscrypt.newProvider();
-            X509TrustManager trustManager = defaultTrustManager();
+            Provider provider = Conscrypt.newProviderBuilder()
+                    .provideTrustManager(true)
+                    .build();
+            X509TrustManager trustManager = conscryptTrustManager(provider);
             SSLContext sslContext = SSLContext.getInstance("TLS", provider);
-            sslContext.init(null, new TrustManager[] {trustManager}, null);
+            sslContext.init(null, new TrustManager[] {trustManager}, new SecureRandom());
+            if (!Conscrypt.isConscrypt(sslContext)) {
+                throw new GeneralSecurityException("Expected a bundled Conscrypt SSLContext, got " +
+                        sslContext.getProvider().getName());
+            }
             builder.sslSocketFactory(sslContext.getSocketFactory(), trustManager);
-            Log.i(TAG, "Using bundled Conscrypt TLS provider: " + provider.getName());
+            Log.i(TAG, "Using bundled Conscrypt TLS: provider=" + provider.getName() +
+                    ", trustManager=" + trustManager.getClass().getName());
         } catch (Throwable error) {
             // Unsupported ABI or provider initialization failure must not make the app unstartable.
             // OkHttp will use Android's platform TLS provider as a compatibility fallback.
-            Log.w(TAG, "Bundled Conscrypt unavailable; using Android platform TLS", error);
+            Log.w(TAG, "Bundled Conscrypt TLS initialization failed; " +
+                    "falling back to Android platform TLS", error);
         }
         return builder.build();
     }
@@ -671,16 +681,21 @@ public final class NetworkHelper {
         }
     }
 
-    private static X509TrustManager defaultTrustManager() throws Exception {
-        TrustManagerFactory factory = TrustManagerFactory.getInstance(
-                TrustManagerFactory.getDefaultAlgorithm());
+    private static X509TrustManager conscryptTrustManager(Provider provider) throws Exception {
+        TrustManagerFactory factory = TrustManagerFactory.getInstance("PKIX", provider);
         factory.init((KeyStore) null);
         for (TrustManager manager : factory.getTrustManagers()) {
             if (manager instanceof X509TrustManager) {
-                return (X509TrustManager) manager;
+                X509TrustManager trustManager = (X509TrustManager) manager;
+                if (!Conscrypt.isConscrypt(trustManager)) {
+                    throw new GeneralSecurityException(
+                            "Expected a bundled Conscrypt X509TrustManager, got " +
+                                    trustManager.getClass().getName());
+                }
+                return trustManager;
             }
         }
-        throw new IllegalStateException("No system X509TrustManager available");
+        throw new GeneralSecurityException("Conscrypt PKIX provided no X509TrustManager");
     }
 
     private static byte[] readLimited(InputStream input, int limit) throws Exception {
