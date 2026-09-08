@@ -180,6 +180,45 @@ func TestCleanupExpiredChallengesUsesBatchLimit(t *testing.T) {
 	}
 }
 
+func TestPackLogsOrderByUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	lease, err := manager.CreateCompany(ctx, CreateCompanyInput{
+		CompanyID: "acme", ExtJSON: "{}", APIKeyHash: "key-hash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	for i, updatedAt := range []int64{300, 200, 200} {
+		release := NewRelease{Release: Release{
+			ReleaseID: fmt.Sprintf("release-%d", i), PayloadID: "app-main", PayloadVersion: int64(i + 1),
+			PackageName: "com.example.app", VersionCode: int64(i + 1), CertificateDigestsJSON: "[]",
+			PayloadKeyCiphertext: []byte{1}, PayloadKeyVersion: 1,
+		}}
+		if err := CreateRelease(ctx, lease.DB, release); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lease.DB.Exec(`UPDATE payload_releases SET created_at=?, updated_at=? WHERE release_id=?`,
+			100+i, updatedAt, release.ReleaseID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, want := range []string{"release-0", "release-2", "release-1"} {
+		logs, total, err := ListPackLogs(ctx, lease.DB, i+1, 1)
+		if err != nil || total != 3 || len(logs) != 1 {
+			t.Fatalf("page %d: total=%d logs=%+v err=%v", i+1, total, logs, err)
+		}
+		if logs[0].ReleaseID != want {
+			t.Fatalf("page %d: got %s, want %s", i+1, logs[0].ReleaseID, want)
+		}
+	}
+}
+
 func TestReleaseCursorPaginationHasNoDuplicates(t *testing.T) {
 	manager, err := NewManager(t.TempDir())
 	if err != nil {

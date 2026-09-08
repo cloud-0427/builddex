@@ -665,7 +665,7 @@ func ListPackLogs(ctx context.Context, db *sql.DB, page, pageSize int) ([]Releas
 		local_ciphertext_sha256, local_payload_size, payload_key_version, packer, delivery_count,
 		status, created_at, updated_at, published_at, revoked_at
 		FROM payload_releases
-		ORDER BY created_at DESC
+		ORDER BY updated_at DESC, release_id DESC
 		LIMIT ? OFFSET ?`
 
 	rows, err := db.QueryContext(ctx, query, pageSize, offset)
@@ -1061,6 +1061,7 @@ CREATE TABLE IF NOT EXISTS payload_releases (
 );
 CREATE INDEX IF NOT EXISTS idx_payload_release_created ON payload_releases(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_payload_release_created_id ON payload_releases(created_at DESC, release_id DESC);
+CREATE INDEX IF NOT EXISTS idx_payload_release_updated_id ON payload_releases(updated_at DESC, release_id DESC);
 
 CREATE TABLE IF NOT EXISTS challenges (
     challenge_id TEXT PRIMARY KEY,

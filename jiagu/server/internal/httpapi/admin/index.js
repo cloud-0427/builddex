@@ -186,12 +186,21 @@
 
       const table = document.createElement("table");
       table.innerHTML = `
+        <colgroup>
+          <col class="log-version">
+          <col class="log-status">
+          <col class="log-packer">
+          <col class="log-time">
+          <col class="log-time">
+          <col class="log-delivery">
+        </colgroup>
         <thead>
           <tr>
             <th style="padding-left:48px">版本</th>
             <th>状态</th>
             <th>打包者</th>
-            <th>打包时间</th>
+            <th>创建时间</th>
+            <th>打包更新</th>
             <th>下发次数</th>
           </tr>
         </thead>
@@ -222,16 +231,20 @@
         avatar.textContent = (release.packer || "?").charAt(0).toUpperCase();
         const name = document.createElement("span");
         name.textContent = release.packer || "未知";
+        name.title = name.textContent;
         packerWrap.append(avatar, name);
         packerTd.append(packerWrap);
 
         const timeTd = document.createElement("td");
         timeTd.textContent = formatDate(release.createdAt);
 
+        const updatedTd = document.createElement("td");
+        updatedTd.textContent = formatDate(release.updatedAt);
+
         const deliveryTd = document.createElement("td");
         deliveryTd.textContent = formatNumber(release.deliveryCount);
 
-        tr.append(versionTd, statusTd, packerTd, timeTd, deliveryTd);
+        tr.append(versionTd, statusTd, packerTd, timeTd, updatedTd, deliveryTd);
         tbody.append(tr);
       });
       container.append(table);

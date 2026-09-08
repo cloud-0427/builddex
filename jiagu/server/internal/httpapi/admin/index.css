@@ -131,13 +131,36 @@
     cursor: not-allowed;
 }
 
+#logsContainer table {
+    table-layout: fixed;
+    min-width: 1000px;
+}
+
+#logsContainer .log-version { width: 12%; }
+#logsContainer .log-status { width: 12%; }
+#logsContainer .log-packer { width: 26%; }
+#logsContainer .log-time { width: 19%; }
+#logsContainer .log-delivery { width: 12%; }
+
+#logsContainer td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .packer-cell {
     display: flex;
     align-items: center;
     gap: 8px;
 }
 
+.packer-cell span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .packer-avatar {
+    flex-shrink: 0;
     width: 20px;
     height: 20px;
     background: #f2f4f7;
