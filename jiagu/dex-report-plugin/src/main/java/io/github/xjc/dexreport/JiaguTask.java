@@ -157,6 +157,12 @@ public abstract class JiaguTask extends DefaultTask {
     @OutputFile
     public abstract RegularFileProperty getBusinessMappingFile();
 
+    @OutputFile
+    public abstract RegularFileProperty getShellKeepRulesFile();
+
+    @OutputFile
+    public abstract RegularFileProperty getServiceDescriptorsFile();
+
     @TaskAction
     public void execute() throws IOException {
         long taskStartedAt = System.nanoTime();
@@ -174,6 +180,7 @@ public abstract class JiaguTask extends DefaultTask {
         // ... 省略部分中间 JAR 处理逻辑 (与之前相同) ...
 
         Set<String> processedNames = new HashSet<>();
+        ServiceDescriptors services = new ServiceDescriptors();
         File tempBusinessJar = File.createTempFile("business", ".jar");
         tempBusinessJar.deleteOnExit();
 
@@ -198,7 +205,7 @@ public abstract class JiaguTask extends DefaultTask {
 
                         try (InputStream is = inputJar.getInputStream(entry)) {
                             byte[] data = readStream(is);
-                            processEntry(shellJos, businessJos, entry.getName(), data, processedNames);
+                            processEntry(shellJos, businessJos, entry.getName(), data, processedNames, services);
                         }
                     }
                 }
@@ -215,7 +222,7 @@ public abstract class JiaguTask extends DefaultTask {
                                 String relativePath = dirFile.toPath().relativize(path).toString().replace('\\', '/');
                                 try {
                                     byte[] data = Files.readAllBytes(path);
-                                    processEntry(shellJos, businessJos, relativePath, data, processedNames);
+                                    processEntry(shellJos, businessJos, relativePath, data, processedNames, services);
                                 } catch (IOException e) {
                                     throw new RuntimeException(e);
                                 }
@@ -223,6 +230,12 @@ public abstract class JiaguTask extends DefaultTask {
                 }
             }
             finishStage("目录扫描与分离", inputStartedAt, stageTimes);
+            services.write(shellJos);
+            services.write(businessJos);
+            try (JarOutputStream catalog = new JarOutputStream(Files.newOutputStream(
+                    getServiceDescriptorsFile().get().getAsFile().toPath()))) {
+                services.write(catalog);
+            }
         }
         getLogger().lifecycle("[Jiagu][计时] 代码扫描与分离总耗时 {}",
                 formatDuration(elapsedMillis(stageStartedAt)));
@@ -248,6 +261,17 @@ public abstract class JiaguTask extends DefaultTask {
             File[] dexFiles = tempDexDir.toFile().listFiles((dir, name) -> name.endsWith(".dex"));
             if (dexFiles != null && dexFiles.length > 0) {
                 Arrays.sort(dexFiles, Comparator.comparing(File::getName));
+                ShellKeepRules.generate(
+                        Arrays.stream(dexFiles).map(File::toPath)
+                                .collect(java.util.stream.Collectors.toList()),
+                        outputJarFile.toPath(),
+                        getBootClasspath().getFiles().stream().map(File::toPath)
+                                .collect(java.util.stream.Collectors.toList()),
+                        getShellKeepRulesFile().get().getAsFile().toPath());
+                Files.write(getShellKeepRulesFile().get().getAsFile().toPath(), services.keepRules(),
+                        StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.APPEND);
+                getLogger().lifecycle("[Jiagu] 已生成业务 DEX 引用的壳类/成员白名单: {}",
+                        getShellKeepRulesFile().get().getAsFile());
                 String businessDexSha256 = hashFiles("JIAGU-BUSINESS-DEX-V1", Arrays.asList(dexFiles));
                 Files.write(businessDexSha256File.toPath(), businessDexSha256.getBytes(StandardCharsets.UTF_8));
                 // 按照文件名排序，确保 classes.dex, classes2.dex 等顺序一致
@@ -330,6 +354,8 @@ public abstract class JiaguTask extends DefaultTask {
             commandBuilder.addProguardConfiguration(consumerRules, Origin.unknown());
         }
         commandBuilder.addProguardConfiguration(pluginSafetyRules(), Origin.unknown());
+        commandBuilder.addProguardConfiguration(
+                ServiceDescriptors.read(businessJar.toPath()).keepRules(), Origin.unknown());
         R8.run(commandBuilder.build());
     }
 
@@ -369,7 +395,13 @@ public abstract class JiaguTask extends DefaultTask {
         );
     }
 
-    private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos, String name, byte[] data, Set<String> processedNames) throws IOException {
+    private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos, String name, byte[] data, Set<String> processedNames, ServiceDescriptors services) throws IOException {
+        // Merge all providers before duplicate-entry filtering; multiple libraries may
+        // contribute implementations of the same SPI.
+        if (name.startsWith(ServiceDescriptors.PREFIX)) {
+            services.add(name, data);
+            return;
+        }
         if (processedNames.contains(name)) {
             return;
         }

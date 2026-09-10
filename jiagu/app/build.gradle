@@ -28,7 +28,7 @@ dexReport {
     companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
 
     // 加固密钥是否发布，发布后此版本不能再修改
-    publish = true
+    publish = false
     // debug 检测，测试关闭，线上可以打开，默认是打开的
     antiDebugEnabled = true
 
@@ -52,6 +52,8 @@ dexReport {
 }
 
 android {
+    // Opt in to testing the actual minified/protected release APK.
+    testBuildType providers.gradleProperty('jiagu.testBuildType').getOrElse('debug')
     namespace 'lows.dgeon.ightr.jiagu'
     compileSdk 36
     ndkVersion "28.2.13676358"
@@ -60,12 +62,14 @@ android {
         applicationId "lows.dgeon.ightr.jiagu"
         minSdk 29
         targetSdk 36
-        versionCode 16
-        versionName "1.0.16"
+        versionCode 20
+        versionName "1.0.20"
 
         multiDexEnabled false
 
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner providers.gradleProperty('jiagu.testBuildType').getOrElse('debug') == 'release'
+                ? 'lows.dgeon.ightr.jiagu.ServiceVerificationInstrumentation'
+                : 'androidx.test.runner.AndroidJUnitRunner'
 
         externalNativeBuild {
             cmake {
@@ -130,7 +134,7 @@ dependencies {
 }
 
 configurations {
-    all {
+    configureEach {
         exclude group: 'androidx.profileinstaller', module: 'profileinstaller'
     }
 }

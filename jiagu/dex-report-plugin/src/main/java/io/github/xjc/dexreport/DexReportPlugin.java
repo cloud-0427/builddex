@@ -72,6 +72,9 @@ public final class DexReportPlugin implements Plugin<Project> {
 
                 String variantCap = capitalize(variantName);
                 String buildInvocationId = UUID.randomUUID().toString();
+                org.gradle.api.provider.Provider<org.gradle.api.file.RegularFile> shellRules =
+                        project.getLayout().getBuildDirectory().file(
+                                "intermediates/jiagu/" + variantName + "/shell-keep-rules.pro");
 
                 TaskProvider<JiaguTask> jiaguTaskProvider = project.getTasks().register(
                         "jiagu" + variantCap, JiaguTask.class, task -> {
@@ -112,7 +115,12 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getDebuggable().set(variant.getDebuggable());
                             task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
                             task.getBootClasspath().from(androidComponents.getSdkComponents().getBootClasspath());
-                            task.getProguardFiles().from(variant.getProguardFiles());
+                            // Resolve after DSL finalization, excluding our own output and
+                            // its producer dependency from the business compiler inputs.
+                            task.getProguardFiles().from(project.provider(() ->
+                                    variant.getProguardFiles().get().stream()
+                                            .filter(file -> !file.getAsFile().equals(shellRules.get().getAsFile()))
+                                            .collect(java.util.stream.Collectors.toList())));
                             task.dependsOn(project.getTasks().matching(t -> t.getName().equals("extractProguardFiles")));
                             task.getNativeInputs().from(project.fileTree(project.getProjectDir(), spec -> {
                                 spec.include("src/**/jniLibs/**/*.so");
@@ -169,8 +177,28 @@ public final class DexReportPlugin implements Plugin<Project> {
                                     .file("intermediates/jiagu/" + variantName + "/business-dex.sha256"));
                             task.getBusinessMappingFile().set(project.getLayout().getBuildDirectory()
                                     .file("intermediates/jiagu/" + variantName + "/business-mapping.txt"));
+                            task.getShellKeepRulesFile().set(shellRules);
+                            task.getServiceDescriptorsFile().set(project.getLayout().getBuildDirectory()
+                                    .file("intermediates/jiagu/" + variantName + "/service-descriptors.jar"));
                             task.getBuildInvocationId().set(buildInvocationId);
                         });
+
+                // Carry the producer dependency for every consumer (including lint),
+                // while allowing the path to be read before the producer executes.
+                variant.getProguardFiles().add(jiaguTaskProvider.map(task -> shellRules.get()));
+                TaskProvider<VerifyServicesTask> verifyServices = project.getTasks().register(
+                        "verifyJiaguServices" + variantCap, VerifyServicesTask.class, task -> {
+                            task.setGroup("verification");
+                            task.getApkDirectory().set(variant.getArtifacts().get(SingleArtifact.APK.INSTANCE));
+                            task.getDescriptors().set(jiaguTaskProvider.flatMap(JiaguTask::getServiceDescriptorsFile));
+                            task.getPayload().set(jiaguTaskProvider.flatMap(JiaguTask::getPayloadFile));
+                        });
+                project.getTasks().matching(task -> task.getName().equals("assemble" + variantCap))
+                        .configureEach(task -> task.dependsOn(verifyServices));
+                // AGP's lint model copies ProGuard paths without their producer metadata.
+                project.getTasks().matching(task -> task.getName().contains(variantCap)
+                        && task.getName().toLowerCase(java.util.Locale.ROOT).contains("lint"))
+                        .configureEach(task -> task.dependsOn(jiaguTaskProvider));
 
                 TaskProvider<JiaguReleaseTask> releaseTaskProvider = project.getTasks().register(
                         "createJiaguRelease" + variantCap, JiaguReleaseTask.class, task -> {
