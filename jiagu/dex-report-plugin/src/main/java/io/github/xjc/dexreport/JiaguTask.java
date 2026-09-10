@@ -431,6 +431,9 @@ public abstract class JiaguTask extends DefaultTask {
                 name.startsWith("com/google/crypto/tink/") ||
                 name.startsWith("com/google/android/play/") ||
                 name.startsWith("com/google/android/gms/") ||
+                // Google Play Services resolves AndroidX collection types while the
+                // shell is running, before the encrypted payload class loader exists.
+                name.startsWith("androidx/collection/") ||
                 // Device authorization runs before the encrypted business DEX is loaded.
                 // Keep its complete HTTP stack in the shell so NetworkHelper can initialize.
                 name.startsWith("okhttp3/") ||

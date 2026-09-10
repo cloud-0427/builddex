@@ -13,6 +13,7 @@ public class JiaguTaskShellDependenciesTest {
         assertTrue(JiaguTask.shouldKeepInShell("org/conscrypt/Conscrypt.class"));
         assertTrue(JiaguTask.shouldKeepInShell("kotlin/jvm/internal/Intrinsics.class"));
         assertTrue(JiaguTask.shouldKeepInShell("androidx/startup/Initializer.class"));
+        assertTrue(JiaguTask.shouldKeepInShell("androidx/collection/ArraySet.class"));
         assertFalse(JiaguTask.shouldKeepInShell("com/example/business/MainActivity.class"));
     }
 }

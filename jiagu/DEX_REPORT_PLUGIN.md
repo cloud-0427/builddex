@@ -39,7 +39,7 @@ APK/Debug 默认合并本地 signingConfig 证书；AAB 配置用于加入 Play 
 
 ```groovy
 plugins {
-    id 'io.github.xjc.dex-report' version '0.1.7'
+    id 'io.github.xjc.dex-report' version '0.1.8'
 }
 ```
 
@@ -135,7 +135,7 @@ App 中仍然按插件 ID 应用：
 
 ```groovy
 plugins {
-    id 'io.github.xjc.dex-report' version '0.1.7'
+    id 'io.github.xjc.dex-report' version '0.1.8'
 }
 ```
 
