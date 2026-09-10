@@ -36,6 +36,9 @@ public abstract class DexReportExtension {
     /** 预期的签名 SHA-256 哈希值。 */
     public abstract Property<String> getExpectedSignature();
 
+    /** Fully-qualified shell-side startup log uploader implementation. */
+    public abstract Property<String> getStartupLogUploaderClass();
+
     /** Additional allowed signing certificate SHA-256 Base64URL digests. */
     public abstract SetProperty<String> getCertificateSha256Digests();
 

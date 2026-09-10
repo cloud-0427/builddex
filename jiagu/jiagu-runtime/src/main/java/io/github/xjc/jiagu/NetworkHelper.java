@@ -137,6 +137,7 @@ public final class NetworkHelper {
             String credential = loadCredential(context, config, app.actualCertificateSha256, deviceId,
                     signPublicKey, wrapPublicKey);
             Authorization authorization;
+            JiaguStartupEvent.AuthorizationSource authorizationSource;
             if (credential == null) {
                 long stageStartedAt = now();
                 try {
@@ -148,6 +149,7 @@ public final class NetworkHelper {
                             signPublicKey, wrapPublicKey, deviceId, bootstrapChallenge);
                     credential = bootstrapped.credential;
                     authorization = bootstrapped.authorization;
+                    authorizationSource = JiaguStartupEvent.AuthorizationSource.NETWORK_BOOTSTRAP;
                     timing("device-bootstrap", stageStartedAt, startupStartedAt);
                 } catch (ServerRejectedException rejected) {
                     if (!rejected.bootstrapUnsupported()) {
@@ -158,6 +160,8 @@ public final class NetworkHelper {
                             signing, signPublicKey, wrapPublicKey, deviceId);
                     authorization = authorize(context, config, signing, wrapping.getPrivate(),
                             deviceId, credential);
+                    authorizationSource = JiaguStartupEvent.AuthorizationSource
+                            .NETWORK_LEGACY_ENROLL_AUTHORIZE;
                     timing("device-bootstrap-legacy-fallback", stageStartedAt, startupStartedAt);
                 }
                 saveCredential(context, config, app.actualCertificateSha256, credential);
@@ -168,11 +172,16 @@ public final class NetworkHelper {
                     long stageStartedAt = now();
                     authorization = authorize(
                             context, config, signing, wrapping.getPrivate(), deviceId, credential);
+                    authorizationSource = JiaguStartupEvent.AuthorizationSource.NETWORK_AUTHORIZE;
                     timing("device-authorize", stageStartedAt, startupStartedAt);
                     saveAuthorization(context, config, authorization);
+                } else {
+                    authorizationSource = JiaguStartupEvent.AuthorizationSource
+                            .LOCAL_AUTHORIZATION_CACHE;
                 }
             }
 
+            JiaguStartupReporter.setAuthorizationSource(authorizationSource);
             long stageStartedAt = now();
             ByteBuffer result = decryptLocalPayload(config, authorization.payloadKey, localPayload);
             timing("local-payload-aes-gcm-decrypt-and-verify", stageStartedAt, startupStartedAt);

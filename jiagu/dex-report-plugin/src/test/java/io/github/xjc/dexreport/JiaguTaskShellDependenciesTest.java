@@ -16,4 +16,14 @@ public class JiaguTaskShellDependenciesTest {
         assertTrue(JiaguTask.shouldKeepInShell("androidx/collection/ArraySet.class"));
         assertFalse(JiaguTask.shouldKeepInShell("com/example/business/MainActivity.class"));
     }
+
+    @Test
+    public void configuredStartupUploaderIsKeptInShell() {
+        assertTrue(JiaguTask.shouldKeepInShell(
+                "com/example/StartupUploader.class", "com.example.StartupUploader"));
+        assertTrue(JiaguTask.shouldKeepInShell(
+                "com/example/StartupUploader$1.class", "com.example.StartupUploader"));
+        assertFalse(JiaguTask.shouldKeepInShell(
+                "com/example/Other.class", "com.example.StartupUploader"));
+    }
 }

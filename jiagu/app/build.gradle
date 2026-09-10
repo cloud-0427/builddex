@@ -6,6 +6,9 @@ plugins {
 
 // app/build.gradle
 dexReport {
+    // Shell-side, minimal HTTP startup event uploader.
+    startupLogUploaderClass = "lows.dgeon.ightr.jiagu.StartupEventUploader"
+
     // 线上真实的签名sha256的 base64URL
     certificateSha256Digests = [
             "sy_JLyeXjMJcircorCb5QKmg-xYvEtSdPjrUZLaEmWE"
@@ -62,8 +65,8 @@ android {
         applicationId "lows.dgeon.ightr.jiagu"
         minSdk 29
         targetSdk 36
-        versionCode 20
-        versionName "1.0.20"
+        versionCode 21
+        versionName "1.0.21"
 
         multiDexEnabled false
 

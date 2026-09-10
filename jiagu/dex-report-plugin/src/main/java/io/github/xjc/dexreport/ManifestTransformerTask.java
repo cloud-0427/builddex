@@ -39,6 +39,10 @@ public abstract class ManifestTransformerTask extends DefaultTask {
     @org.gradle.api.tasks.Optional
     public abstract Property<String> getExpectedSignature();
 
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getStartupLogUploaderClass();
+
     @InputFile
     @org.gradle.api.tasks.PathSensitive(org.gradle.api.tasks.PathSensitivity.NONE)
     public abstract RegularFileProperty getMergedManifest();
@@ -102,6 +106,16 @@ public abstract class ManifestTransformerTask extends DefaultTask {
                 expectedSigMetaData.setAttribute("android:name", "EXPECTED_SIGNATURE");
                 expectedSigMetaData.setAttribute("android:value", getExpectedSignature().get());
                 applicationTag.appendChild(expectedSigMetaData);
+            }
+
+            if (getStartupLogUploaderClass().isPresent()
+                    && !getStartupLogUploaderClass().get().trim().isEmpty()) {
+                Element uploaderMetaData = doc.createElement("meta-data");
+                uploaderMetaData.setAttribute("android:name",
+                        "io.github.xjc.jiagu.STARTUP_LOG_UPLOADER");
+                uploaderMetaData.setAttribute("android:value",
+                        getStartupLogUploaderClass().get().trim());
+                applicationTag.appendChild(uploaderMetaData);
             }
             
             getLogger().lifecycle("[Jiagu] Manifest 已修改: 入口 -> ProxyApplication, 已启用动态防护功能");

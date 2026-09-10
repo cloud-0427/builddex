@@ -106,6 +106,10 @@ public abstract class JiaguTask extends DefaultTask {
     @Internal
     public abstract Property<String> getBuildInvocationId();
 
+    @Input
+    @Optional
+    public abstract Property<String> getStartupLogUploaderClass();
+
     @InputFiles
     @PathSensitive(PathSensitivity.RELATIVE)
     public abstract ListProperty<RegularFile> getAllJars();
@@ -268,7 +272,13 @@ public abstract class JiaguTask extends DefaultTask {
                         getBootClasspath().getFiles().stream().map(File::toPath)
                                 .collect(java.util.stream.Collectors.toList()),
                         getShellKeepRulesFile().get().getAsFile().toPath());
-                Files.write(getShellKeepRulesFile().get().getAsFile().toPath(), services.keepRules(),
+                List<String> generatedShellRules = new ArrayList<>(services.keepRules());
+                String uploaderClass = configuredUploaderClass();
+                if (uploaderClass != null) {
+                    generatedShellRules.add("-keep class " + uploaderClass + " { *; }");
+                    generatedShellRules.add("-keep class " + uploaderClass + "$* { *; }");
+                }
+                Files.write(getShellKeepRulesFile().get().getAsFile().toPath(), generatedShellRules,
                         StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.APPEND);
                 getLogger().lifecycle("[Jiagu] 已生成业务 DEX 引用的壳类/成员白名单: {}",
                         getShellKeepRulesFile().get().getAsFile());
@@ -408,7 +418,7 @@ public abstract class JiaguTask extends DefaultTask {
 
         // 适度回调：保留 R 类在壳中。
         // 完全移除 R 类可能导致某些系统资源（如图标、主题）在壳 Application 阶段解析失败。
-        boolean shouldKeepInShell = shouldKeepInShell(name);
+        boolean shouldKeepInShell = shouldKeepInShell(name, configuredUploaderClass());
 
         if (shouldKeepInShell || !name.endsWith(".class")) {
             // 壳程序代码、白名单代码 或 非代码资源：透传到输出 JAR (壳 JAR)
@@ -444,6 +454,32 @@ public abstract class JiaguTask extends DefaultTask {
                 name.startsWith("org/jetbrains/annotations/") ||
                 name.startsWith("org/jspecify/annotations/") ||
                 name.contains("/R$") || name.endsWith("/R.class");
+    }
+
+    static boolean shouldKeepInShell(String name, String uploaderClass) {
+        if (shouldKeepInShell(name)) {
+            return true;
+        }
+        if (uploaderClass == null || uploaderClass.trim().isEmpty()) {
+            return false;
+        }
+        String classPath = uploaderClass.trim().replace('.', '/');
+        return name.equals(classPath + ".class")
+                || name.startsWith(classPath + "$" );
+    }
+
+    private String configuredUploaderClass() {
+        if (!getStartupLogUploaderClass().isPresent()) {
+            return null;
+        }
+        String value = getStartupLogUploaderClass().get().trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (!value.matches("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*")) {
+            throw new IllegalArgumentException("Invalid startupLogUploaderClass: " + value);
+        }
+        return value;
     }
 
     private void deleteDirectory(File directory) {

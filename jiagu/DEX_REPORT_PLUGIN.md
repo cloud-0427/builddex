@@ -1,5 +1,7 @@
 # Jiagu Gradle Plugin
 
+启动解密/完成事件的可选上传扩展见 [启动日志上传扩展](docs/03-startup-log-uploader.md)。
+
 这是当前换壳项目的 Gradle 插件，会处理 Android Variant 的字节码、Manifest、JNI 载荷和资源，并自动引入运行时 AAR。
 
 Release 构建一致性锁的最终设计和实施顺序见 [Release 构建一致性锁实施计划](docs/02-release-build-lock-implementation-plan.md)。核心规则：

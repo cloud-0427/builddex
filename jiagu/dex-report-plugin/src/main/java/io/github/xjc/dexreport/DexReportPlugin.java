@@ -47,6 +47,7 @@ public final class DexReportPlugin implements Plugin<Project> {
         extension.getAutoRunBuildTypes().convention(java.util.Collections.emptySet());
         extension.getAttachToTask().convention("assemble");
         extension.getPublish().convention(false);
+        extension.getStartupLogUploaderClass().convention("");
 
         project.getPluginManager().withPlugin("com.android.application", plugin -> {
             addJiaguRuntimeDependency(project);
@@ -181,6 +182,7 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getServiceDescriptorsFile().set(project.getLayout().getBuildDirectory()
                                     .file("intermediates/jiagu/" + variantName + "/service-descriptors.jar"));
                             task.getBuildInvocationId().set(buildInvocationId);
+                            task.getStartupLogUploaderClass().set(ext.getStartupLogUploaderClass());
                         });
 
                 // Carry the producer dependency for every consumer (including lint),
@@ -266,6 +268,7 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getAntiDebugEnabled().set(jiaguTaskProvider.flatMap(JiaguTask::getAntiDebugEnabled));
                             task.getSignatureCheckEnabled().set(ext.getSignatureCheckEnabled());
                             task.getExpectedSignature().set(ext.getExpectedSignature());
+                            task.getStartupLogUploaderClass().set(ext.getStartupLogUploaderClass());
                         });
 
                 variant.getArtifacts().use(manifestTaskProvider)

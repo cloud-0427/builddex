@@ -26,6 +26,7 @@ public class ProxyApplication extends Application {
     protected void attachBaseContext(Context base) {
         long startedAt = SystemClock.elapsedRealtime();
         super.attachBaseContext(base);
+        JiaguStartupReporter.beginDecryption(base);
         nativeAttach(base);
         Log.i(TAG, "[StartupTiming] complete proxy attachBaseContext totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
@@ -36,6 +37,7 @@ public class ProxyApplication extends Application {
         long startedAt = SystemClock.elapsedRealtime();
         super.onCreate();
         nativeOnCreate();
+        JiaguStartupReporter.startupCompleted(this);
         Log.i(TAG, "[StartupTiming] complete proxy onCreate totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
     }
