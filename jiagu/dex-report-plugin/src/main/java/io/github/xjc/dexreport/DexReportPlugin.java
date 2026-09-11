@@ -116,13 +116,6 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getDebuggable().set(variant.getDebuggable());
                             task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
                             task.getBootClasspath().from(androidComponents.getSdkComponents().getBootClasspath());
-                            // Resolve after DSL finalization, excluding our own output and
-                            // its producer dependency from the business compiler inputs.
-                            task.getProguardFiles().from(project.provider(() ->
-                                    variant.getProguardFiles().get().stream()
-                                            .filter(file -> !file.getAsFile().equals(shellRules.get().getAsFile()))
-                                            .collect(java.util.stream.Collectors.toList())));
-                            task.dependsOn(project.getTasks().matching(t -> t.getName().equals("extractProguardFiles")));
                             task.getNativeInputs().from(project.fileTree(project.getProjectDir(), spec -> {
                                 spec.include("src/**/jniLibs/**/*.so");
                             }));
@@ -134,13 +127,6 @@ public final class DexReportPlugin implements Plugin<Project> {
                             project.getConfigurations().matching(configuration ->
                                     configuration.getName().equals(variantName + "RuntimeClasspath"))
                                     .all(configuration -> {
-                                        task.getConsumerProguardFiles().from(
-                                                configuration.getIncoming().artifactView(view -> {
-                                                    view.setLenient(true);
-                                                    view.getAttributes().attribute(
-                                                            ArtifactTypeDefinition.ARTIFACT_TYPE_ATTRIBUTE,
-                                                            "android-consumer-proguard-rules");
-                                                }).getFiles());
                                         task.getNativeInputs().from(
                                                 configuration.getIncoming().artifactView(view -> {
                                                     view.setLenient(true);
@@ -176,8 +162,6 @@ public final class DexReportPlugin implements Plugin<Project> {
                                     .file("intermediates/jiagu/" + variantName + "/payload.jg3"));
                             task.getBusinessDexSha256File().set(project.getLayout().getBuildDirectory()
                                     .file("intermediates/jiagu/" + variantName + "/business-dex.sha256"));
-                            task.getBusinessMappingFile().set(project.getLayout().getBuildDirectory()
-                                    .file("intermediates/jiagu/" + variantName + "/business-mapping.txt"));
                             task.getShellKeepRulesFile().set(shellRules);
                             task.getServiceDescriptorsFile().set(project.getLayout().getBuildDirectory()
                                     .file("intermediates/jiagu/" + variantName + "/service-descriptors.jar"));
