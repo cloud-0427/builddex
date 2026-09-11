@@ -11,7 +11,7 @@ def centralGroup = providers.gradleProperty('central.group').getOrElse('io.githu
 def publicationGroup = jitPackGroup && jitPackArtifact
         ? "${jitPackGroup}.${jitPackArtifact}"
         : centralGroup
-def publicationVersion = System.getenv('VERSION') ?: '0.1.14'
+def publicationVersion = System.getenv('VERSION') ?: '0.1.15'
 
 // 本地开发使用固定坐标；JitPack 构建时使用其注入的 GitHub 坐标和 Tag。
 group = publicationGroup
@@ -129,10 +129,21 @@ def configureCentralPom = { pom ->
 
 publishing {
     publications.withType(MavenPublication).configureEach {
-        // Plugin marker artifacts normally inherit the plugin ID as groupId.
-        // Use the verified Central namespace for every artifact instead.
+        // The actual plugin module is published under the verified namespace.
+        // The legacy plugin ID is resolved to this module in settings.gradle.
         groupId = publicationGroup
         configureCentralPom(pom)
+    }
+}
+
+// Gradle plugin markers use the plugin ID as their groupId.  The legacy ID
+// `io.github.xjc.dex-report` is outside this project's verified Central
+// namespace (`io.github.cloud-0427`), so Central rejects that marker.  Publish
+// the consumable plugin module instead; consumers resolve the legacy ID with
+// pluginManagement { resolutionStrategy { useModule(...) } }.
+tasks.withType(org.gradle.api.publish.maven.tasks.PublishToMavenRepository).configureEach {
+    onlyIf {
+        !(publication.name == 'dexReportPluginMarkerMaven' && repository.name == 'sonatype')
     }
 }
 
