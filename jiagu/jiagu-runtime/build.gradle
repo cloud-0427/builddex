@@ -11,7 +11,7 @@ def centralGroup = providers.gradleProperty('central.group').getOrElse('io.githu
 group = jitPackGroup && jitPackArtifact
         ? "${jitPackGroup}.${jitPackArtifact}"
         : centralGroup
-version = System.getenv('VERSION') ?: '0.1.11'
+version = System.getenv('VERSION') ?: '0.1.12'
 
 android {
     namespace = 'io.github.xjc.jiagu'

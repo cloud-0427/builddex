@@ -3,7 +3,7 @@ pluginManagement {
             .getOrElse('local')
             .trim()
             .toLowerCase(Locale.ROOT)
-    def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.11')
+    def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.12')
 
     if (!(jiaguSource in ['local', 'jitpack', 'central'])) {
         throw new GradleException(
@@ -53,7 +53,7 @@ def jiaguSource = providers.gradleProperty('jiagu.source')
         .getOrElse('local')
         .trim()
         .toLowerCase(Locale.ROOT)
-def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.11')
+def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.12')
 
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
