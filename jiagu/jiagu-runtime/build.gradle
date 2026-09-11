@@ -1,15 +1,17 @@
 plugins {
     id 'com.android.library'
     id 'maven-publish'
+    id 'signing'
 }
 
 def jitPackGroup = System.getenv('GROUP')
 def jitPackArtifact = System.getenv('ARTIFACT')
+def centralGroup = providers.gradleProperty('central.group').getOrElse('io.github.cloud-0427')
 
 group = jitPackGroup && jitPackArtifact
         ? "${jitPackGroup}.${jitPackArtifact}"
-        : 'io.github.xjc'
-version = System.getenv('VERSION') ?: '0.1.10'
+        : centralGroup
+version = System.getenv('VERSION') ?: '0.1.11'
 
 android {
     namespace = 'io.github.xjc.jiagu'
@@ -54,15 +56,74 @@ android {
     }
 }
 
+def releaseJavadocJar = tasks.register('releaseJavadocJar', Jar) {
+    archiveClassifier = 'javadoc'
+    from(rootProject.file('../README.md'))
+}
+
 afterEvaluate {
     publishing {
         publications {
             release(MavenPublication) {
                 from components.release
                 artifactId = 'jiagu-runtime'
+                artifact releaseJavadocJar
+                pom {
+                    name = 'BuildDex Jiagu Runtime'
+                    description = 'Android runtime library for the BuildDex Jiagu Gradle plugin.'
+                    url = 'https://github.com/cloud-0427/builddex'
+                    licenses {
+                        license {
+                            name = 'The Apache License, Version 2.0'
+                            url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                            distribution = 'repo'
+                        }
+                    }
+                    developers {
+                        developer {
+                            id = 'cloud-0427'
+                            name = 'Cloud-0427'
+                            url = 'https://github.com/cloud-0427'
+                        }
+                    }
+                    scm {
+                        connection = 'scm:git:git://github.com/cloud-0427/builddex.git'
+                        developerConnection = 'scm:git:ssh://github.com/cloud-0427/builddex.git'
+                        url = 'https://github.com/cloud-0427/builddex'
+                    }
+                }
             }
         }
     }
+}
+
+def signingKey = providers.gradleProperty('signingInMemoryKey')
+        .orElse(providers.environmentVariable('SIGNING_IN_MEMORY_KEY')).orNull
+def signingPassword = providers.gradleProperty('signingInMemoryKeyPassword')
+        .orElse(providers.environmentVariable('SIGNING_IN_MEMORY_KEY_PASSWORD')).orNull
+def localGpgExecutable = rootProject.file('C:/Program Files/GnuPG/bin/gpg.exe')
+def gpgExecutableForSigning = providers.gradleProperty('signing.gnupg.executable')
+        .orElse(providers.environmentVariable('SIGNING_GNUPG_EXECUTABLE'))
+        .orElse(localGpgExecutable.isFile() ? localGpgExecutable.absolutePath : '')
+        .get()
+if (!findProperty('signing.gnupg.executable') && gpgExecutableForSigning) {
+    ext.set('signing.gnupg.executable', gpgExecutableForSigning)
+}
+signing {
+    if (signingKey && signingPassword) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+    } else {
+        // Keep the private key in the user's GnuPG keyring.  Gradle reads
+        // signing.gnupg.* properties (including executable/keyName) from the
+        // user Gradle home, rather than from this tracked project.
+        useGpgCmd()
+    }
+    required {
+        gradle.taskGraph.allTasks.any { task ->
+            task.name.toLowerCase(Locale.ROOT).contains('sonatype')
+        }
+    }
+    sign publishing.publications
 }
 
 dependencies {

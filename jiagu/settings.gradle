@@ -3,11 +3,11 @@ pluginManagement {
             .getOrElse('local')
             .trim()
             .toLowerCase(Locale.ROOT)
-    def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.10')
+    def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.11')
 
-    if (!(jiaguSource in ['local', 'jitpack'])) {
+    if (!(jiaguSource in ['local', 'jitpack', 'central'])) {
         throw new GradleException(
-                "jiagu.source 只支持 local 或 jitpack，当前值: ${jiaguSource}")
+                "jiagu.source 只支持 local、jitpack 或 central，当前值: ${jiaguSource}")
     }
 
     repositories {
@@ -35,8 +35,10 @@ pluginManagement {
         resolutionStrategy {
             eachPlugin {
                 if (requested.id.id == 'io.github.xjc.dex-report') {
-                    useModule(
-                            "com.github.cloud-0427.builddex:dex-report-plugin:${jiaguVersion}")
+                    def module = jiaguSource == 'central'
+                            ? "io.github.cloud-0427:dex-report-plugin:${jiaguVersion}"
+                            : "com.github.cloud-0427.builddex:dex-report-plugin:${jiaguVersion}"
+                    useModule(module)
                 }
             }
         }
@@ -51,7 +53,7 @@ def jiaguSource = providers.gradleProperty('jiagu.source')
         .getOrElse('local')
         .trim()
         .toLowerCase(Locale.ROOT)
-def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.10')
+def jiaguVersion = providers.gradleProperty('jiagu.version').getOrElse('0.1.11')
 
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
