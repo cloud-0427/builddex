@@ -56,19 +56,19 @@ dexReport {
 
 android {
     // Opt in to testing the actual minified/protected release APK.
-    testBuildType providers.gradleProperty('jiagu.testBuildType').getOrElse('debug')
-    namespace 'lows.dgeon.ightr.jiagu'
-    compileSdk 36
-    ndkVersion "28.2.13676358"
+    testBuildType = providers.gradleProperty('jiagu.testBuildType').getOrElse('debug')
+    namespace = 'lows.dgeon.ightr.jiagu'
+    compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId "lows.dgeon.ightr.jiagu"
-        minSdk 29
-        targetSdk 36
+        minSdk = 29
+        targetSdk = 36
         versionCode 21
         versionName "1.0.21"
 
-        multiDexEnabled false
+        multiDexEnabled = false
 
         testInstrumentationRunner providers.gradleProperty('jiagu.testBuildType').getOrElse('debug') == 'release'
                 ? 'lows.dgeon.ightr.jiagu.ServiceVerificationInstrumentation'
@@ -84,7 +84,7 @@ android {
     buildTypes {
         release {
             minifyEnabled true
-            shrinkResources true
+            shrinkResources = true
             
             // AGP 9.3+ 正确的禁用方式：在 installation 块中设置
             installation {
@@ -94,7 +94,7 @@ android {
             experimentalProperties["android.experimental.r8.dex-startup-optimization"] = false
             experimentalProperties["android.experimental.art-profile-r8-rewriting"] = false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'src/main/keepRules/rules.keep'
-            signingConfig signingConfigs.debug
+            signingConfig = signingConfigs.debug
         }
         debug {
             installation {
@@ -111,11 +111,11 @@ android {
     externalNativeBuild {
         cmake {
             path file('src/main/cpp/CMakeLists.txt')
-            version '3.22.1'
+            version = '3.22.1'
         }
     }
     buildFeatures {
-        viewBinding true
+        viewBinding = true
     }
 }
 
@@ -131,6 +131,11 @@ dependencies {
     implementation libs.constraintlayout
     implementation libs.material
     implementation libs.androidx.core.splashscreen
+    implementation libs.androidx.core
+    implementation libs.androidx.lifecycle.runtime
+    // Keep the legacy ViewPager and coroutine artifacts off their old transitive versions.
+    implementation libs.androidx.viewpager
+    implementation libs.kotlinx.coroutines.android
     testImplementation libs.junit
     androidTestImplementation libs.espresso.core
     androidTestImplementation libs.ext.junit

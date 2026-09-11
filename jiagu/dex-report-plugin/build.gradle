@@ -8,7 +8,7 @@ def jitPackArtifact = System.getenv('ARTIFACT')
 def publicationGroup = jitPackGroup && jitPackArtifact
         ? "${jitPackGroup}.${jitPackArtifact}"
         : 'io.github.xjc'
-def publicationVersion = System.getenv('VERSION') ?: '0.1.8'
+def publicationVersion = System.getenv('VERSION') ?: '0.1.9'
 
 // 本地开发使用固定坐标；JitPack 构建时使用其注入的 GitHub 坐标和 Tag。
 group = publicationGroup
@@ -20,8 +20,12 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'com.android.tools.build:gradle-api:9.3.1'
-    implementation 'com.android.tools:r8:8.12.14' // Use a version compatible with AGP 9.3.1 if possible, but 8.3.x is common
+    // Compile against the oldest supported Android Components API. AGP 8.12 requires
+    // Gradle 8.13, while this API remains binary-compatible with the AGP 9.x line.
+    compileOnly 'com.android.tools.build:gradle-api:8.12.2'
+    // Keep Jiagu's standalone R8/D8 ahead of AGP 8.12's toolchain and compatible
+    // with Kotlin 2.3 class metadata (R8 8.13.19+).
+    implementation 'com.android.tools:r8:8.13.23'
     testImplementation 'junit:junit:4.13.2'
 }
 
