@@ -167,6 +167,9 @@ public abstract class JiaguTask extends DefaultTask {
     @OutputFile
     public abstract RegularFileProperty getServiceDescriptorsFile();
 
+    @OutputFile
+    public abstract RegularFileProperty getInputIndexFile();
+
     @TaskAction
     public void execute() throws IOException {
         long taskStartedAt = System.nanoTime();
@@ -183,24 +186,53 @@ public abstract class JiaguTask extends DefaultTask {
 
         // ... 省略部分中间 JAR 处理逻辑 (与之前相同) ...
 
-        Set<String> processedNames = new HashSet<>();
+        Map<String, SeenEntry> processedNames = new LinkedHashMap<>();
         ServiceDescriptors services = new ServiceDescriptors();
-        File tempBusinessJar = File.createTempFile("business", ".jar");
-        tempBusinessJar.deleteOnExit();
+        File tempRawBusinessJar = File.createTempFile("business-raw", ".jar");
+        File tempPreservedBusinessJar = File.createTempFile("business-r8-preserved", ".jar");
+        tempRawBusinessJar.deleteOnExit();
+        tempPreservedBusinessJar.deleteOnExit();
+
+        List<InputArtifact> inputArtifacts = inspectInputArtifacts();
+        writeInputIndex(inputArtifacts);
+        int detectedR8Artifacts = 0;
+        for (InputArtifact artifact : inputArtifacts) {
+            if (artifact.result.classification == R8ArtifactDetector.Classification.CONFLICTING_EVIDENCE) {
+                throw new IOException("[Jiagu] Conflicting R8 evidence in input " + artifact.path
+                        + ": " + artifact.result.evidence);
+            }
+            if (artifact.result.classification == R8ArtifactDetector.Classification.R8_PROCESSED) {
+                detectedR8Artifacts++;
+                getLogger().lifecycle("[Jiagu][Input] detected R8 artifact: {} -> {} ({})",
+                        artifact.path, artifact.action(getMinifyEnabled().get()), artifact.result.evidence);
+            }
+        }
+        getLogger().lifecycle("[Jiagu][Input] {} artifacts inspected; {} already processed by R8; audit: {}",
+                inputArtifacts.size(), detectedR8Artifacts, getInputIndexFile().get().getAsFile());
+        int[] rawBusinessClasses = {0};
+        int[] preservedBusinessClasses = {0};
+        Set<String> preservedBusinessClassNames = new HashSet<>();
 
         getLogger().lifecycle("[Jiagu] 正在执行全量代码扫描与分离...");
         stageStartedAt = System.nanoTime();
 
         try (JarOutputStream shellJos = new JarOutputStream(new FileOutputStream(outputJarFile));
-             JarOutputStream businessJos = new JarOutputStream(new FileOutputStream(tempBusinessJar))) {
+             JarOutputStream rawBusinessJos = new JarOutputStream(new FileOutputStream(tempRawBusinessJar));
+             JarOutputStream preservedBusinessJos = new JarOutputStream(
+                     new FileOutputStream(tempPreservedBusinessJar))) {
             // 中间业务 JAR 只供紧随其后的 D8 使用，无需耗时做 ZIP 压缩。
             // 壳 JAR 使用快速压缩，在不明显增大最终产物的前提下降低扫描阶段 CPU 开销。
             shellJos.setLevel(Deflater.BEST_SPEED);
-            businessJos.setLevel(Deflater.NO_COMPRESSION);
+            rawBusinessJos.setLevel(Deflater.NO_COMPRESSION);
+            preservedBusinessJos.setLevel(Deflater.NO_COMPRESSION);
 
             // 1. 处理所有输入的 JAR 文件（包括依赖库）
             long inputStartedAt = System.nanoTime();
-            for (RegularFile jarFile : getAllJars().get()) {
+            List<RegularFile> jars = getAllJars().get();
+            for (int artifactIndex = 0; artifactIndex < jars.size(); artifactIndex++) {
+                RegularFile jarFile = jars.get(artifactIndex);
+                InputArtifact artifact = inputArtifacts.get(artifactIndex);
+                boolean preserveNames = shouldPreserveR8Artifact(artifact);
                 try (JarFile inputJar = new JarFile(jarFile.getAsFile())) {
                     Enumeration<JarEntry> entries = inputJar.entries();
                     while (entries.hasMoreElements()) {
@@ -209,7 +241,12 @@ public abstract class JiaguTask extends DefaultTask {
 
                         try (InputStream is = inputJar.getInputStream(entry)) {
                             byte[] data = readStream(is);
-                            processEntry(shellJos, businessJos, entry.getName(), data, processedNames, services);
+                            processEntry(shellJos,
+                                    preserveNames ? preservedBusinessJos : rawBusinessJos,
+                                    entry.getName(), data, processedNames, services,
+                                    jarFile.getAsFile().getAbsolutePath() + "!/" + entry.getName(),
+                                    preserveNames ? preservedBusinessClasses : rawBusinessClasses,
+                                    preserveNames ? preservedBusinessClassNames : null);
                         }
                     }
                 }
@@ -218,24 +255,28 @@ public abstract class JiaguTask extends DefaultTask {
 
             // 2. 处理所有目录（当前项目的编译产物）
             inputStartedAt = System.nanoTime();
-            for (Directory dir : getAllDirectories().get()) {
-                File dirFile = dir.getAsFile();
+            List<Directory> directories = getAllDirectories().get();
+            int directoryOffset = jars.size();
+            for (int directoryIndex = 0; directoryIndex < directories.size(); directoryIndex++) {
+                File dirFile = directories.get(directoryIndex).getAsFile();
+                InputArtifact artifact = inputArtifacts.get(directoryOffset + directoryIndex);
+                boolean preserveNames = shouldPreserveR8Artifact(artifact);
                 try (java.util.stream.Stream<Path> paths = Files.walk(dirFile.toPath())) {
-                    paths.filter(Files::isRegularFile)
-                            .forEach(path -> {
-                                String relativePath = dirFile.toPath().relativize(path).toString().replace('\\', '/');
-                                try {
-                                    byte[] data = Files.readAllBytes(path);
-                                    processEntry(shellJos, businessJos, relativePath, data, processedNames, services);
-                                } catch (IOException e) {
-                                    throw new RuntimeException(e);
-                                }
-                            });
+                    for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile).sorted()::iterator) {
+                        String relativePath = dirFile.toPath().relativize(path).toString().replace('\\', '/');
+                        processEntry(shellJos,
+                                preserveNames ? preservedBusinessJos : rawBusinessJos,
+                                relativePath, Files.readAllBytes(path), processedNames, services,
+                                path.toAbsolutePath().toString(),
+                                preserveNames ? preservedBusinessClasses : rawBusinessClasses,
+                                preserveNames ? preservedBusinessClassNames : null);
+                    }
                 }
             }
             finishStage("目录扫描与分离", inputStartedAt, stageTimes);
             services.write(shellJos);
-            services.write(businessJos);
+            services.write(rawBusinessJos);
+            services.write(preservedBusinessJos);
             try (JarOutputStream catalog = new JarOutputStream(Files.newOutputStream(
                     getServiceDescriptorsFile().get().getAsFile().toPath()))) {
                 services.write(catalog);
@@ -247,24 +288,31 @@ public abstract class JiaguTask extends DefaultTask {
         // 3. 将业务代码 JAR 转换为 DEX
         getLogger().lifecycle("[Jiagu] 正在将业务代码转换为 DEX...");
         Path tempDexDir = Files.createTempDirectory("jiagu_dex");
+        Path tempRawDexDir = Files.createTempDirectory("jiagu_dex_raw");
+        Path tempPreservedDexDir = Files.createTempDirectory("jiagu_dex_preserved");
         try {
             stageStartedAt = System.nanoTime();
             if (getMinifyEnabled().get()) {
-                runR8(tempBusinessJar, outputJarFile, tempDexDir);
-                finishStage("R8 业务代码裁剪", stageStartedAt, stageTimes);
+                if (rawBusinessClasses[0] > 0) {
+                    runR8(tempRawBusinessJar, outputJarFile,
+                            preservedBusinessClasses[0] > 0 ? tempPreservedBusinessJar : null,
+                            tempRawDexDir);
+                }
+                if (preservedBusinessClasses[0] > 0) {
+                    runD8(tempPreservedBusinessJar, tempPreservedDexDir);
+                    verifyPreservedDescriptors(tempPreservedDexDir, preservedBusinessClassNames);
+                }
+                mergeDexOutputs(tempDexDir, tempRawDexDir, tempPreservedDexDir);
+                finishStage("R8 原始业务 + D8 已混淆业务", stageStartedAt, stageTimes);
             } else {
-                D8Command command = D8Command.builder()
-                        .addProgramFiles(tempBusinessJar.toPath())
-                        .setOutput(tempDexDir, OutputMode.DexIndexed)
-                        .setMinApiLevel(getMinApiLevel().get())
-                        .build();
-                D8.run(command);
+                runD8(tempRawBusinessJar, tempDexDir);
                 finishStage("D8 转换（App 未启用 minify）", stageStartedAt, stageTimes);
             }
 
             File[] dexFiles = tempDexDir.toFile().listFiles((dir, name) -> name.endsWith(".dex"));
             if (dexFiles != null && dexFiles.length > 0) {
                 Arrays.sort(dexFiles, Comparator.comparing(File::getName));
+                verifyNoDuplicateDexClasses(dexFiles);
                 ShellKeepRules.generate(
                         Arrays.stream(dexFiles).map(File::toPath)
                                 .collect(java.util.stream.Collectors.toList()),
@@ -273,6 +321,10 @@ public abstract class JiaguTask extends DefaultTask {
                                 .collect(java.util.stream.Collectors.toList()),
                         getShellKeepRulesFile().get().getAsFile().toPath());
                 List<String> generatedShellRules = new ArrayList<>(services.keepRules());
+                // Payload 与壳由不同 ClassLoader 加载。把可改名的壳类（包括 R8 新建的
+                // external synthetic）限制在壳专属命名域；TraceReferences 生成的 ABI
+                // keep 规则仍会让 Payload 实际引用的壳类保持原名。
+                generatedShellRules.add("-repackageclasses 'io.github.xjc.jiagu.shell.r8'");
                 String uploaderClass = configuredUploaderClass();
                 if (uploaderClass != null) {
                     generatedShellRules.add("-keep class " + uploaderClass + " { *; }");
@@ -329,7 +381,10 @@ public abstract class JiaguTask extends DefaultTask {
         } finally {
             // 清理临时文件
             deleteDirectory(tempDexDir.toFile());
-            tempBusinessJar.delete();
+            deleteDirectory(tempRawDexDir.toFile());
+            deleteDirectory(tempPreservedDexDir.toFile());
+            tempRawBusinessJar.delete();
+            tempPreservedBusinessJar.delete();
         }
         
         getLogger().lifecycle("[Jiagu] 业务代码加固阶段完成。输出: {}", outputJarFile.getName());
@@ -341,7 +396,8 @@ public abstract class JiaguTask extends DefaultTask {
         getLogger().lifecycle("[Jiagu][计时] 总耗时: {}", formatDuration(totalMs));
     }
 
-    private void runR8(File businessJar, File shellJar, Path output) throws Exception {
+    private void runR8(File businessJar, File shellJar, File preservedBusinessJar, Path output)
+            throws Exception {
         R8Command.Builder commandBuilder = R8Command.builder()
                 .addProgramFiles(businessJar.toPath())
                 .addLibraryFiles(getBootClasspath().getFiles().stream()
@@ -353,6 +409,11 @@ public abstract class JiaguTask extends DefaultTask {
                 .setDisableTreeShaking(false)
                 .setDisableMinification(false)
                 .setProguardMapOutputPath(getBusinessMappingFile().get().getAsFile().toPath());
+        if (preservedBusinessJar != null) {
+            // 已经由下游 R8 处理过的产物只作为类路径输入：既帮助 R8 解析类型并
+            // 预留现有描述符，又绝不能再次成为 program input。
+            commandBuilder.addLibraryFiles(preservedBusinessJar.toPath());
+        }
         List<Path> configuredRules = getProguardFiles().getFiles().stream()
                 .filter(File::isFile).map(File::toPath)
                 .collect(java.util.stream.Collectors.toList());
@@ -363,10 +424,125 @@ public abstract class JiaguTask extends DefaultTask {
         if (!consumerRules.isEmpty()) {
             commandBuilder.addProguardConfiguration(consumerRules, Origin.unknown());
         }
-        commandBuilder.addProguardConfiguration(pluginSafetyRules(), Origin.unknown());
+        commandBuilder.addProguardConfiguration(
+                pluginSafetyRules(preservedBusinessJar != null), Origin.unknown());
         commandBuilder.addProguardConfiguration(
                 ServiceDescriptors.read(businessJar.toPath()).keepRules(), Origin.unknown());
         R8.run(commandBuilder.build());
+    }
+
+    private void runD8(File businessJar, Path output) throws Exception {
+        D8Command command = D8Command.builder()
+                .addProgramFiles(businessJar.toPath())
+                .addLibraryFiles(getBootClasspath().getFiles().stream()
+                        .map(File::toPath).collect(java.util.stream.Collectors.toList()))
+                .setOutput(output, OutputMode.DexIndexed)
+                .setMinApiLevel(getMinApiLevel().get())
+                .setMode(getDebuggable().get() ? CompilationMode.DEBUG : CompilationMode.RELEASE)
+                .build();
+        D8.run(command);
+    }
+
+    private void mergeDexOutputs(Path destination, Path... sources) throws IOException {
+        int outputIndex = 1;
+        for (Path source : sources) {
+            File[] files = source.toFile().listFiles((dir, name) -> name.matches("classes[0-9]*\\.dex"));
+            if (files == null) continue;
+            Arrays.sort(files, Comparator.comparingInt(file -> dexOrdinal(file.getName())));
+            for (File file : files) {
+                String outputName = outputIndex == 1 ? "classes.dex" : "classes" + outputIndex + ".dex";
+                Files.copy(file.toPath(), destination.resolve(outputName),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                outputIndex++;
+            }
+        }
+    }
+
+    private static int dexOrdinal(String name) {
+        if ("classes.dex".equals(name)) return 1;
+        return Integer.parseInt(name.substring("classes".length(), name.length() - ".dex".length()));
+    }
+
+    private List<InputArtifact> inspectInputArtifacts() throws IOException {
+        List<InputArtifact> artifacts = new ArrayList<>();
+        for (RegularFile jar : getAllJars().get()) {
+            Path path = jar.getAsFile().toPath();
+            artifacts.add(new InputArtifact(path, "JAR", R8ArtifactDetector.inspectJar(path), hashArtifact(path)));
+        }
+        for (Directory directory : getAllDirectories().get()) {
+            Path path = directory.getAsFile().toPath();
+            artifacts.add(new InputArtifact(path, "DIRECTORY",
+                    R8ArtifactDetector.inspectDirectory(path), hashArtifact(path)));
+        }
+        return artifacts;
+    }
+
+    private boolean shouldPreserveR8Artifact(InputArtifact artifact) {
+        return getMinifyEnabled().get()
+                && artifact.result.classification == R8ArtifactDetector.Classification.R8_PROCESSED;
+    }
+
+    private void writeInputIndex(List<InputArtifact> artifacts) throws IOException {
+        Path output = getInputIndexFile().get().getAsFile().toPath();
+        Files.createDirectories(output.toAbsolutePath().getParent());
+        StringBuilder json = new StringBuilder();
+        json.append("{\n  \"schemaVersion\": 1,\n  \"variantMinifyEnabled\": ")
+                .append(getMinifyEnabled().get()).append(",\n  \"artifacts\": [\n");
+        for (int i = 0; i < artifacts.size(); i++) {
+            InputArtifact artifact = artifacts.get(i);
+            json.append("    {\"path\": \"").append(jsonEscape(artifact.path.toString()))
+                    .append("\", \"type\": \"").append(artifact.type)
+                    .append("\", \"sha256\": \"").append(artifact.sha256)
+                    .append("\", \"classification\": \"").append(artifact.result.classification)
+                    .append("\", \"classCount\": ").append(artifact.result.classCount)
+                    .append(", \"markedClassCount\": ").append(artifact.result.markedClassCount)
+                    .append(", \"evidence\": \"").append(jsonEscape(artifact.result.evidence))
+                    .append("\", \"action\": \"")
+                    .append(artifact.action(getMinifyEnabled().get()))
+                    .append("\", \"r8ProgramInput\": ")
+                    .append(artifact.isR8ProgramInput(getMinifyEnabled().get())).append('}');
+            if (i + 1 < artifacts.size()) json.append(',');
+            json.append('\n');
+        }
+        json.append("  ]\n}\n");
+        Files.write(output, json.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String hashArtifact(Path artifact) throws IOException {
+        java.security.MessageDigest digest;
+        try {
+            digest = java.security.MessageDigest.getInstance("SHA-256");
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new AssertionError(e);
+        }
+        if (Files.isDirectory(artifact)) {
+            try (java.util.stream.Stream<Path> paths = Files.walk(artifact)) {
+                for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile).sorted()::iterator) {
+                    digest.update(artifact.relativize(path).toString().replace('\\', '/')
+                            .getBytes(StandardCharsets.UTF_8));
+                    digest.update((byte) 0);
+                    updateDigest(digest, path);
+                }
+            }
+        } else {
+            updateDigest(digest, artifact);
+        }
+        StringBuilder value = new StringBuilder(64);
+        for (byte b : digest.digest()) value.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+        return value.toString();
+    }
+
+    private static void updateDigest(java.security.MessageDigest digest, Path path) throws IOException {
+        try (InputStream input = Files.newInputStream(path)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
+        }
+    }
+
+    private static String jsonEscape(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\r", "\\r").replace("\n", "\\n");
     }
 
     private List<String> readConsumerProguardRules() throws IOException {
@@ -390,10 +566,15 @@ public abstract class JiaguTask extends DefaultTask {
         return rules;
     }
 
-    private List<String> pluginSafetyRules() {
-        return Arrays.asList(
-                "-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault,Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable",
-                "-repackageclasses 'io.github.xjc.jiagu.payload.r8'",
+    private List<String> pluginSafetyRules(boolean isolateRawNames) {
+        List<String> rules = new ArrayList<>();
+        rules.add("-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault,Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable");
+        if (isolateRawNames) {
+            // Only mixed mode needs this collision domain. R8_PROCESSED artifacts bypass
+            // this R8 invocation, so their existing descriptors stay untouched.
+            rules.add("-repackageclasses 'io.github.xjc.jiagu.payload.raw.r8'");
+        }
+        rules.addAll(Arrays.asList(
                 "-keep class * extends android.app.Application { *; }",
                 "-keep class * extends android.app.Activity { *; }",
                 "-keep class * extends android.app.Service { *; }",
@@ -402,17 +583,98 @@ public abstract class JiaguTask extends DefaultTask {
                 "-keep class * implements androidx.startup.Initializer { *; }",
                 "-keep class * extends android.view.View { public <init>(...); }",
                 "-keepclassmembers class * { native <methods>; }"
-        );
+        ));
+        return rules;
     }
 
-    private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos, String name, byte[] data, Set<String> processedNames, ServiceDescriptors services) throws IOException {
+    private static void verifyNoDuplicateDexClasses(File[] dexFiles) throws IOException {
+        Map<String, String> definitions = new LinkedHashMap<>();
+        for (File dexFile : dexFiles) {
+            for (String className : VerifyServicesTask.classNames(Files.readAllBytes(dexFile.toPath()))) {
+                String previous = definitions.putIfAbsent(className, dexFile.getName());
+                if (previous != null) {
+                    throw new IOException("[Jiagu] Payload class descriptor is defined twice: "
+                            + className + " in " + previous + " and " + dexFile.getName());
+                }
+            }
+        }
+    }
+
+    private static void verifyPreservedDescriptors(Path dexDirectory, Set<String> expected)
+            throws IOException {
+        Set<String> actual = new HashSet<>();
+        File[] dexFiles = dexDirectory.toFile().listFiles((dir, name) -> name.endsWith(".dex"));
+        if (dexFiles != null) {
+            for (File dexFile : dexFiles) {
+                actual.addAll(VerifyServicesTask.classNames(Files.readAllBytes(dexFile.toPath())));
+            }
+        }
+        Set<String> missing = new java.util.TreeSet<>(expected);
+        missing.removeAll(actual);
+        if (!missing.isEmpty()) {
+            throw new IOException("[Jiagu] D8 changed or removed descriptors from an R8_PROCESSED artifact: "
+                    + missing);
+        }
+    }
+
+    private static final class InputArtifact {
+        final Path path;
+        final String type;
+        final R8ArtifactDetector.Result result;
+        final String sha256;
+
+        InputArtifact(Path path, String type, R8ArtifactDetector.Result result, String sha256) {
+            this.path = path.toAbsolutePath();
+            this.type = type;
+            this.result = result;
+            this.sha256 = sha256;
+        }
+
+        String action(boolean variantMinifyEnabled) {
+            if (!variantMinifyEnabled) return "D8_ONLY";
+            return result.classification == R8ArtifactDetector.Classification.R8_PROCESSED
+                    ? "D8_PRESERVE_EXISTING_NAMES" : "R8_PROGRAM_INPUT";
+        }
+
+        boolean isR8ProgramInput(boolean variantMinifyEnabled) {
+            return variantMinifyEnabled
+                    && result.classification == R8ArtifactDetector.Classification.RAW
+                    && result.classCount > 0;
+        }
+    }
+
+    private static final class SeenEntry {
+        final String origin;
+        final String sha256;
+
+        SeenEntry(String origin, String sha256) {
+            this.origin = origin;
+            this.sha256 = sha256;
+        }
+    }
+
+    private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos,
+                              String name, byte[] data, Map<String, SeenEntry> processedNames,
+                              ServiceDescriptors services, String origin, int[] businessClassCount,
+                              Set<String> preservedClassNames)
+            throws IOException {
         // Merge all providers before duplicate-entry filtering; multiple libraries may
         // contribute implementations of the same SPI.
         if (name.startsWith(ServiceDescriptors.PREFIX)) {
             services.add(name, data);
             return;
         }
-        if (processedNames.contains(name)) {
+        boolean programClass = isProgramClassEntry(name);
+        SeenEntry previous = processedNames.get(name);
+        if (previous != null) {
+            if (programClass) {
+                String digest = JiaguServerClient.sha256(data);
+                if (!previous.sha256.equals(digest)) {
+                    throw new IOException("[Jiagu] Duplicate class with different bytecode: " + name
+                            + "\n  first: " + previous.origin
+                            + "\n  second: " + origin);
+                }
+            }
             return;
         }
 
@@ -420,7 +682,7 @@ public abstract class JiaguTask extends DefaultTask {
         // 完全移除 R 类可能导致某些系统资源（如图标、主题）在壳 Application 阶段解析失败。
         boolean shouldKeepInShell = shouldKeepInShell(name, configuredUploaderClass());
 
-        if (shouldKeepInShell || !name.endsWith(".class")) {
+        if (shouldKeepInShell || !programClass) {
             // 壳程序代码、白名单代码 或 非代码资源：透传到输出 JAR (壳 JAR)
             JarEntry outEntry = new JarEntry(name);
             shellJos.putNextEntry(outEntry);
@@ -432,8 +694,20 @@ public abstract class JiaguTask extends DefaultTask {
             businessJos.putNextEntry(outEntry);
             businessJos.write(data);
             businessJos.closeEntry();
+            businessClassCount[0]++;
+            if (preservedClassNames != null) {
+                preservedClassNames.add(name.substring(0, name.length() - ".class".length())
+                        .replace('/', '.'));
+            }
         }
-        processedNames.add(name);
+        processedNames.put(name, new SeenEntry(origin,
+                programClass ? JiaguServerClient.sha256(data) : ""));
+    }
+
+    private static boolean isProgramClassEntry(String name) {
+        return name.endsWith(".class")
+                && !name.startsWith("META-INF/")
+                && !name.equals("module-info.class");
     }
 
     static boolean shouldKeepInShell(String name) {

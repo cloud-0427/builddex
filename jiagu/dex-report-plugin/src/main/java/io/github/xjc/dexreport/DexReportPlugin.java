@@ -181,6 +181,8 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getShellKeepRulesFile().set(shellRules);
                             task.getServiceDescriptorsFile().set(project.getLayout().getBuildDirectory()
                                     .file("intermediates/jiagu/" + variantName + "/service-descriptors.jar"));
+                            task.getInputIndexFile().set(project.getLayout().getBuildDirectory()
+                                    .file("intermediates/jiagu/" + variantName + "/input-index.json"));
                             task.getBuildInvocationId().set(buildInvocationId);
                             task.getStartupLogUploaderClass().set(ext.getStartupLogUploaderClass());
                         });

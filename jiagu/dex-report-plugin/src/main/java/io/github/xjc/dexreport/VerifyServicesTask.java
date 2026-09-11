@@ -26,7 +26,7 @@ public abstract class VerifyServicesTask extends DefaultTask {
 
     @TaskAction public void verify() throws IOException {
         ServiceDescriptors expected = ServiceDescriptors.read(getDescriptors().get().getAsFile().toPath());
-        Set<String> business = new HashSet<>();
+        Map<String, String> businessDefinitions = new LinkedHashMap<>();
         byte[] payload = Files.readAllBytes(getPayload().get().getAsFile().toPath());
         ByteBuffer header = ByteBuffer.wrap(payload);
         if (header.getInt() != 0x4a473300) throw new IOException("Invalid JG3 payload");
@@ -38,7 +38,7 @@ public abstract class VerifyServicesTask extends DefaultTask {
                     new ByteArrayInputStream(payload, body + offset, length))) {
                 byte[] dex = input.readAllBytes();
                 if (dex.length != rawLength) throw new IOException("Invalid payload DEX length");
-                business.addAll(classNames(dex));
+                addDefinitions(businessDefinitions, classNames(dex), "payload dex #" + (i + 1));
             }
         }
         List<Path> apks = new ArrayList<>();
@@ -52,7 +52,7 @@ public abstract class VerifyServicesTask extends DefaultTask {
                 throw new IOException("APK ServiceLoader descriptors differ from input: " + apk
                         + " expected=" + expected.entries + " actual=" + actual.entries);
             }
-            Set<String> classes = new HashSet<>(business);
+            Map<String, String> shellDefinitions = new LinkedHashMap<>();
             try (JarFile jar = new JarFile(apk.toFile())) {
                 Set<String> seen = new HashSet<>();
                 for (JarEntry entry : Collections.list(jar.entries())) {
@@ -62,11 +62,20 @@ public abstract class VerifyServicesTask extends DefaultTask {
                     }
                     if (name.matches("classes[0-9]*\\.dex")) {
                         try (InputStream input = jar.getInputStream(entry)) {
-                            classes.addAll(classNames(input.readAllBytes()));
+                            addDefinitions(shellDefinitions, classNames(input.readAllBytes()),
+                                    apk + "!/" + name);
                         }
                     }
                 }
             }
+            SortedSet<String> collisions = duplicateClassNames(
+                    businessDefinitions.keySet(), shellDefinitions.keySet());
+            if (!collisions.isEmpty()) {
+                throw new IOException("Shell/Payload duplicate class definitions in " + apk + ": "
+                        + collisions + ". These descriptors would be resolved by the wrong ClassLoader.");
+            }
+            Set<String> classes = new HashSet<>(businessDefinitions.keySet());
+            classes.addAll(shellDefinitions.keySet());
             for (Map.Entry<String, SortedSet<String>> entry : expected.entries.entrySet()) {
                 Set<String> required = new HashSet<>(entry.getValue());
                 required.add(entry.getKey());
@@ -75,6 +84,24 @@ public abstract class VerifyServicesTask extends DefaultTask {
             }
             getLogger().lifecycle("[Jiagu] APK 服务声明与壳/业务 DEX 校验通过: {} ({} services)", apk, expected.entries.size());
         }
+    }
+
+    private static void addDefinitions(Map<String, String> definitions, Set<String> classes,
+                                       String origin) throws IOException {
+        for (String className : classes) {
+            String previous = definitions.putIfAbsent(className, origin);
+            if (previous != null) {
+                throw new IOException("Duplicate class definition: " + className
+                        + " in " + previous + " and " + origin);
+            }
+        }
+    }
+
+    static SortedSet<String> duplicateClassNames(Collection<String> first,
+                                                  Collection<String> second) {
+        SortedSet<String> duplicates = new TreeSet<>(first);
+        duplicates.retainAll(new HashSet<>(second));
+        return duplicates;
     }
 
     static Set<String> classNames(byte[] dex) throws IOException {

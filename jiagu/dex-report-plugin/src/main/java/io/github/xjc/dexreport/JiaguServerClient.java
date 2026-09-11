@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -184,7 +185,8 @@ final class JiaguServerClient {
 
     private String requestOnce(String method, String path, String contentType,
                                byte[] body, boolean companyAuth) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) new URL(serverUrl + path).openConnection();
+        HttpURLConnection connection =
+                (HttpURLConnection) URI.create(serverUrl + path).toURL().openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
         connection.setReadTimeout(READ_TIMEOUT_MS);
