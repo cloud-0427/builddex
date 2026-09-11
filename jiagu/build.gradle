@@ -8,6 +8,8 @@ def centralUsername = providers.gradleProperty('centralUsername')
         .orElse(providers.environmentVariable('CENTRAL_USERNAME')).orNull
 def centralPassword = providers.gradleProperty('centralPassword')
         .orElse(providers.environmentVariable('CENTRAL_PASSWORD')).orNull
+group = providers.gradleProperty('central.group').getOrElse('io.github.cloud-0427')
+version = providers.gradleProperty('jiagu.version').getOrElse('0.1.13')
 
 // Sonatype's Central Portal OSSRH compatibility endpoint. Credentials are kept
 // outside version control and are only needed by the remote publishing tasks.
