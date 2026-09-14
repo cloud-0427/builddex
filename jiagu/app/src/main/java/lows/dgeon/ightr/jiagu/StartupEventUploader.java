@@ -6,12 +6,21 @@ import android.provider.Settings;
 import android.util.Log;
 
 import org.json.JSONObject;
+import org.conscrypt.Conscrypt;
 
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+import java.security.Provider;
 import java.util.Locale;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
 
 import io.github.xjc.jiagu.JiaguStartupEvent;
 import io.github.xjc.jiagu.JiaguStartupLogUploader;
@@ -23,7 +32,7 @@ import io.github.xjc.jiagu.JiaguStartupLogUploader;
  * initialization or retry queue is used.</p>
  */
 public final class StartupEventUploader implements JiaguStartupLogUploader {
-    private static final String TAG = "Jiagu_EventUpload";
+    private static final String TAG = "JG_Event";
 
     private static final int TIMEOUT_MS = 15_000;
 
@@ -46,14 +55,19 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
             return;
         }
         if (!event.isFirstLaunch() || !event.isMainProcess()) {
+            // 只有第一次主程序启动，才打印日志，否则先忽略
             return;
         }
 
-        HttpURLConnection connection = null;
+        HttpsURLConnection connection = null;
         try {
             byte[] body = createBody(appContext, event).toString()
                     .getBytes(StandardCharsets.UTF_8);
-            connection = (HttpURLConnection) new URL(EVENT_ENDPOINT).openConnection();
+            connection = (HttpsURLConnection) new URL(EVENT_ENDPOINT).openConnection();
+            // This callback is invoked by the protection shell before business code is
+            // guaranteed to be available. Do not use the platform TLS provider here:
+            // affected Redmi ROMs can crash in its ECH metrics close path.
+            connection.setSSLSocketFactory(StartupTls.socketFactory());
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(TIMEOUT_MS);
             connection.setReadTimeout(TIMEOUT_MS);
@@ -98,7 +112,7 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
         device.put("checkCommonUse", "1");
         device.put("language", languageOrDefault(""));
         device.put("model", valueOrDefault(Build.MODEL, ""));
-        device.put("oaid", oaidOrDefault(context, "123456"));
+        device.put("oaid", oaidOrDefault(context, event.getSessionId()));
         device.put("system", systemOrDefault(""));
 
         JSONObject data = new JSONObject();
@@ -170,5 +184,52 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
 
     private static boolean isBlank(String value) {
         return value == null || value.trim().isEmpty();
+    }
+
+    /**
+     * Shell-safe, lazily initialized TLS setup for the startup reporter only.
+     * It deliberately does not install a global security provider and does not
+     * depend on the business-layer HttpManager.
+     */
+    private static final class StartupTls {
+        private static volatile SSLSocketFactory socketFactory;
+
+        static SSLSocketFactory socketFactory() throws Exception {
+            SSLSocketFactory result = socketFactory;
+            if (result != null) {
+                return result;
+            }
+            synchronized (StartupTls.class) {
+                result = socketFactory;
+                if (result == null) {
+                    // The Android default TrustManager reaches NetworkSecurityConfig,
+                    // DeviceConfig and Certificate Transparency flags. Those framework
+                    // services are not ready while the shell is dispatching this event.
+                    // Keep both the TLS engine and certificate verifier in bundled
+                    // Conscrypt instead.
+                    Provider provider = Conscrypt.newProviderBuilder()
+                            .provideTrustManager(true)
+                            .build();
+                    SSLContext context = SSLContext.getInstance("TLS", provider);
+                    context.init(null, new TrustManager[]{conscryptTrustManager(provider)}, null);
+                    result = context.getSocketFactory();
+                    socketFactory = result;
+                    Log.i(TAG, "Using bundled Conscrypt TLS: provider="
+                            + provider.getName());
+                }
+                return result;
+            }
+        }
+
+        private static X509TrustManager conscryptTrustManager(Provider provider) throws Exception {
+            TrustManagerFactory factory = TrustManagerFactory.getInstance("PKIX", provider);
+            factory.init((KeyStore) null);
+            for (TrustManager manager : factory.getTrustManagers()) {
+                if (manager instanceof X509TrustManager) {
+                    return (X509TrustManager) manager;
+                }
+            }
+            throw new IllegalStateException("No bundled Conscrypt X509TrustManager available");
+        }
     }
 }

@@ -125,6 +125,10 @@ base {
 }
 
 dependencies {
+    // StartupEventUploader runs from the protection shell, before business-layer
+    // classes are guaranteed to be available. Keep its TLS provider direct.
+    implementation 'org.conscrypt:conscrypt-android:2.5.3'
+
     // jiagu-runtime 由加固插件自动注入：local 模式使用本地 project，
     // jitpack 模式使用与插件相同版本的远程 AAR。不要在这里重复声明。
     implementation libs.appcompat
