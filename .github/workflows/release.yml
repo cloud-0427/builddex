@@ -39,6 +39,24 @@ jobs:
         working-directory: jiagu
         run: ./gradlew -p dex-report-plugin clean publishToMavenLocal -x test
 
+      - name: Publish runtime to Maven Central
+        working-directory: jiagu
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          SIGNING_IN_MEMORY_KEY: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          SIGNING_IN_MEMORY_KEY_PASSWORD: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+        run: ./gradlew :jiagu-runtime:publishToSonatype closeAndReleaseSonatypeStagingRepository
+
+      - name: Publish Gradle plugin to Maven Central
+        working-directory: jiagu
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          SIGNING_IN_MEMORY_KEY: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          SIGNING_IN_MEMORY_KEY_PASSWORD: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+        run: ./gradlew -p dex-report-plugin publishToSonatype closeAndReleaseSonatypeStagingRepository
+
       - name: Trigger and verify JitPack build
         shell: bash
         run: |
