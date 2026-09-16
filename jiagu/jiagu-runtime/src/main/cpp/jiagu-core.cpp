@@ -383,7 +383,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (sig_check && expected_sig_j) {
         const char* expected_sig = env->GetStringUTFChars(expected_sig_j, nullptr);
         if (!verify_signature(env, context, expected_sig)) {
-            report_stage_finished(env, 3, STARTUP_STATUS_BLOCKED, "SIGNATURE_MISMATCH",
+            report_stage_finished(env, 4, STARTUP_STATUS_BLOCKED, "SIGNATURE_MISMATCH",
                                   monotonic_ms() - stage_started_at);
             LOGE("[Jiagu][Signature] blocked: APK signing certificate verification failed");
             _exit(0);
@@ -391,7 +391,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         env->ReleaseStringUTFChars(expected_sig_j, expected_sig);
         LOGD("[Jiagu][Signature] APK signing certificate check passed");
     }
-    report_stage_finished(env, 3, STARTUP_STATUS_SUCCEEDED, "CHECK_PASSED",
+    report_stage_finished(env, 4, STARTUP_STATUS_SUCCEEDED, "CHECK_PASSED",
                           monotonic_ms() - stage_started_at);
     const char *real_app_name = env->GetStringUTFChars(real_app_name_j, nullptr);
     const char *pkg_name_str = env->GetStringUTFChars(pkg_name, nullptr);
@@ -403,7 +403,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     stage_started_at = monotonic_ms();
     void* payload_handle = dlopen("liblog_ext.so", RTLD_NOW | RTLD_LOCAL);
     if (!payload_handle) {
-        report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_LOAD_FAILED",
+        report_stage_finished(env, 5, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_LOAD_FAILED",
                               monotonic_ms() - stage_started_at);
         LOGE("Jiagu_Native: Failed to load RuntimeConfig ELF: %s", dlerror());
         env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
@@ -416,7 +416,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     auto payload_size = reinterpret_cast<payload_size_fn>(
             dlsym(payload_handle, "jg_payload_size"));
     if (!payload_address || !payload_size) {
-        report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_EXPORTS_MISSING",
+        report_stage_finished(env, 5, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_EXPORTS_MISSING",
                               monotonic_ms() - stage_started_at);
         LOGE("Jiagu_Native: RuntimeConfig ELF exports are missing: %s", dlerror());
         dlclose(payload_handle);
@@ -427,7 +427,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     size_t bundle_length = payload_size();
     if (!bundle_source || bundle_length < 56 || bundle_length > 129 * 1024 * 1024 ||
             std::memcmp(bundle_source, "JGRC", 4) != 0) {
-		report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_INVALID",
+		report_stage_finished(env, 5, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_INVALID",
                               monotonic_ms() - stage_started_at);
 		LOGE("Jiagu_Native: Runtime bundle ELF returned invalid data");
         dlclose(payload_handle);
@@ -445,7 +445,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (bundle_version != 1 || config_length < 32 || config_length > 256 * 1024 ||
             local_payload_length < 40 || local_payload_length > 128 * 1024 * 1024 ||
             16ULL + config_length + local_payload_length != bundle_length) {
-        report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_INVALID",
+        report_stage_finished(env, 5, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_INVALID",
                               monotonic_ms() - stage_started_at);
         LOGE("Jiagu_Native: Runtime bundle header is invalid");
         dlclose(payload_handle);
@@ -453,7 +453,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     }
     std::string runtime_config(reinterpret_cast<const char*>(bundle_source + 16), config_length);
     const uint8_t* local_payload_source = bundle_source + 16 + config_length;
-    report_stage_finished(env, 4, STARTUP_STATUS_SUCCEEDED, "RUNTIME_BUNDLE_READY",
+    report_stage_finished(env, 5, STARTUP_STATUS_SUCCEEDED, "RUNTIME_BUNDLE_READY",
                           monotonic_ms() - stage_started_at);
     // 3. Java handles Keystore, authorization and AES-GCM from mapped direct memory.
     stage_started_at = monotonic_ms();
@@ -579,7 +579,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         }
         env->SetObjectArrayElement(bb_array, i, bb);
     }
-    report_stage_finished(env, 7, STARTUP_STATUS_SUCCEEDED, "DEX_DECOMPRESSED",
+    report_stage_finished(env, 8, STARTUP_STATUS_SUCCEEDED, "DEX_DECOMPRESSED",
                           monotonic_ms() - all_dex_started_at);
     log_timing("native-all-dex-decompress", all_dex_started_at, startup_started_at);
 
@@ -598,7 +598,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     jobject mem_cl = env->NewObject(mem_loader_class, loader_init, bb_array, sys_cl);
     JNI_CHECK_NULL(mem_cl, "InMemoryDexClassLoader instance creation failed", );
     inject_dex_elements(env, sys_cl, mem_cl);
-    report_stage_finished(env, 8, STARTUP_STATUS_SUCCEEDED, "DEX_CLASSLOADER_INJECTED",
+    report_stage_finished(env, 9, STARTUP_STATUS_SUCCEEDED, "DEX_CLASSLOADER_INJECTED",
                           monotonic_ms() - stage_started_at);
     log_timing("native-dex-classloader-create-and-inject", stage_started_at, startup_started_at);
 
@@ -624,11 +624,11 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         JNI_CHECK_NULL(attach_mid, "Application.attach method not found", );
         env->CallVoidMethod(gRealApp, attach_mid, context);
     } else {
-        report_stage_finished(env, 9, STARTUP_STATUS_FAILED, "REAL_APPLICATION_CREATE_FAILED",
+        report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_CREATE_FAILED",
                               monotonic_ms() - stage_started_at);
         return;
     }
-    report_stage_finished(env, 9, STARTUP_STATUS_SUCCEEDED, "REAL_APPLICATION_ATTACHED",
+    report_stage_finished(env, 10, STARTUP_STATUS_SUCCEEDED, "REAL_APPLICATION_ATTACHED",
                           monotonic_ms() - stage_started_at);
     log_timing("native-real-application-create-bind-and-attach", stage_started_at,
                startup_started_at);
@@ -647,12 +647,12 @@ static void native_on_create(JNIEnv *env, jobject thiz) {
         if (env->ExceptionCheck()) {
             env->ExceptionDescribe();
             env->ExceptionClear();
-            report_stage_finished(env, 10, STARTUP_STATUS_FAILED,
+            report_stage_finished(env, 11, STARTUP_STATUS_FAILED,
                                   "REAL_APPLICATION_ON_CREATE_FAILED",
                                   monotonic_ms() - stage_started_at);
             return;
         }
-        report_stage_finished(env, 10, STARTUP_STATUS_SUCCEEDED,
+        report_stage_finished(env, 11, STARTUP_STATUS_SUCCEEDED,
                               "REAL_APPLICATION_ON_CREATE_COMPLETED",
                               monotonic_ms() - stage_started_at);
         observe_first_activity(env, gRealApp);

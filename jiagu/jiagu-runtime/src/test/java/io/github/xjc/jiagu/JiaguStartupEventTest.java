@@ -26,7 +26,7 @@ public class JiaguStartupEventTest {
                 JiaguStartupEvent.AuthorizationSource.UNKNOWN,
                 "package", true, true, null, -1L);
 
-        assertTrue(event.getStageId() == 2);
+        assertTrue(event.getStageId() == 3);
         assertTrue(event.isMainProcess());
         assertTrue(event.isFirstLaunch());
     }

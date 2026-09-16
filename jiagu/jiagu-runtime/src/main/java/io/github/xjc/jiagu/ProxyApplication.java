@@ -14,7 +14,7 @@ public class ProxyApplication extends Application {
 
     static {
         long startedAt = SystemClock.elapsedRealtime();
-        JiaguStartupReporter.shellCoreLoadStarted();
+        JiaguStartupReporter.startupAttemptStarted();
         try {
             System.loadLibrary("jiagu-core");
             JiaguStartupReporter.shellCoreLoadSucceeded(

@@ -5,17 +5,18 @@ import androidx.annotation.NonNull;
 /** Immutable, non-sensitive startup telemetry event. */
 public final class JiaguStartupEvent {
     public enum Stage {
-        SHELL_CORE_LOAD(1),
-        SHELL_ATTACH(2),
-        RUNTIME_PROTECTION_CHECK(3),
-        RUNTIME_BUNDLE_LOAD(4),
-        DEVICE_AUTHORIZATION(5),
-        PAYLOAD_DECRYPT(6),
-        BUSINESS_DEX_DECOMPRESS(7),
-        BUSINESS_CLASSLOADER_INJECT(8),
-        REAL_APPLICATION_ATTACH(9),
-        REAL_APPLICATION_ON_CREATE(10),
-        FIRST_ACTIVITY_FIRST_FRAME(11);
+        STARTUP_ATTEMPT(1),
+        SHELL_CORE_LOAD(2),
+        SHELL_ATTACH(3),
+        RUNTIME_PROTECTION_CHECK(4),
+        RUNTIME_BUNDLE_LOAD(5),
+        DEVICE_AUTHORIZATION(6),
+        PAYLOAD_DECRYPT(7),
+        BUSINESS_DEX_DECOMPRESS(8),
+        BUSINESS_CLASSLOADER_INJECT(9),
+        REAL_APPLICATION_ATTACH(10),
+        REAL_APPLICATION_ON_CREATE(11),
+        FIRST_ACTIVITY_FIRST_FRAME(12);
 
         private final int id;
 
@@ -29,17 +30,18 @@ public final class JiaguStartupEvent {
 
         static Stage fromId(int id) {
             switch (id) {
-                case 1: return SHELL_CORE_LOAD;
-                case 2: return SHELL_ATTACH;
-                case 3: return RUNTIME_PROTECTION_CHECK;
-                case 4: return RUNTIME_BUNDLE_LOAD;
-                case 5: return DEVICE_AUTHORIZATION;
-                case 6: return PAYLOAD_DECRYPT;
-                case 7: return BUSINESS_DEX_DECOMPRESS;
-                case 8: return BUSINESS_CLASSLOADER_INJECT;
-                case 9: return REAL_APPLICATION_ATTACH;
-                case 10: return REAL_APPLICATION_ON_CREATE;
-                case 11: return FIRST_ACTIVITY_FIRST_FRAME;
+                case 1: return STARTUP_ATTEMPT;
+                case 2: return SHELL_CORE_LOAD;
+                case 3: return SHELL_ATTACH;
+                case 4: return RUNTIME_PROTECTION_CHECK;
+                case 5: return RUNTIME_BUNDLE_LOAD;
+                case 6: return DEVICE_AUTHORIZATION;
+                case 7: return PAYLOAD_DECRYPT;
+                case 8: return BUSINESS_DEX_DECOMPRESS;
+                case 9: return BUSINESS_CLASSLOADER_INJECT;
+                case 10: return REAL_APPLICATION_ATTACH;
+                case 11: return REAL_APPLICATION_ON_CREATE;
+                case 12: return FIRST_ACTIVITY_FIRST_FRAME;
                 default: throw new IllegalArgumentException("Unknown startup stage id: " + id);
             }
         }

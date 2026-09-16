@@ -67,14 +67,14 @@ public final class JiaguStartupReporter {
     private JiaguStartupReporter() {
     }
 
-    /** Starts the session before System.loadLibrary("jiagu-core"). */
-    public static void shellCoreLoadStarted() {
+    /** Records the one-shot startup attempt marker before System.loadLibrary("jiagu-core"). */
+    public static void startupAttemptStarted() {
         synchronized (LOCK) {
             if (startupStartedAt == 0L) {
                 startupStartedAt = SystemClock.elapsedRealtime();
             }
         }
-        emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.STARTED,
+        emit(JiaguStartupEvent.Stage.STARTUP_ATTEMPT, JiaguStartupEvent.Status.STARTED,
                 null, 0L);
     }
 
