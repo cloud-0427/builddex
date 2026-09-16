@@ -79,7 +79,7 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
                 output.write(body);
             }
             int statusCode = connection.getResponseCode();
-            Log.i(TAG, "Startup event: status=" + statusCode + " " + event);
+            Log.d(TAG, "Startup event: status=" + statusCode + " " + event);
         } catch (Exception error) {
             // Startup telemetry is best-effort and must never affect the shell.
             Log.w(TAG, "Startup event failed: " + event, error);
@@ -116,17 +116,24 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
         device.put("system", systemOrDefault(""));
 
         JSONObject data = new JSONObject();
-        data.put("event", event.getType().name());
-        data.put("eventId", "eventId");
-        data.put("itemName", "itemName");
+//        data.put("stageId", "" + event.getStageId());
+//        data.put("stage", event.getStage().name());
+//        data.put("status", event.getStatus().name());
+//        data.put("resultCode", event.getResultCode());
+        data.put("event", event.getStage().name()); // server
+        data.put("eventId", "" + event.getStage().getId()); // server
+        data.put("itemName", event.getStatus().name() + (isBlank(event.getResultCode()) ? "" : "_" + event.getResultCode())); // server
         data.put("sessionId", event.getSessionId());
         data.put("occurredAtMillis", event.getOccurredAtMillis());
-        data.put("elapsedMs", event.getElapsedMs());
+        data.put("elapsedMs", event.getElapsedSinceStartMs());
+        data.put("stageDurationMs", event.getStageDurationMs());
         data.put("isFirstLaunch", event.isFirstLaunch());
         data.put("isMainProcess", event.isMainProcess());
         data.put("processName", event.getProcessName());
+        data.put("activityName", event.getActivityName());
+        data.put("activityResumedElapsedMs", event.getActivityResumedElapsedMs());
         data.put("authorizationSource", event.getAuthorizationSource().name());
-        data.put("networkAuthorizationRequired", event.isNetworkAuthorizationRequired());
+        data.put("networkAuthorizationRequired", event.getNetworkAuthorizationRequired());
 
         JSONObject userEvent = new JSONObject();
         userEvent.put("eventType", TAG);

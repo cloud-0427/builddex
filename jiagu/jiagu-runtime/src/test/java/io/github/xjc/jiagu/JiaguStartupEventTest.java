@@ -21,10 +21,12 @@ public class JiaguStartupEventTest {
     @Test
     public void firstLaunchIsStableEventMetadata() {
         JiaguStartupEvent event = new JiaguStartupEvent(
-                JiaguStartupEvent.Type.DECRYPT_STARTED, "session", "package", "1.0", 1L,
-                1L, 0L, JiaguStartupEvent.AuthorizationSource.UNKNOWN,
-                "package", true, true);
+                JiaguStartupEvent.Stage.SHELL_ATTACH, JiaguStartupEvent.Status.STARTED,
+                null, "session", "package", "1.0", 1L, 1L, 0L, 0L,
+                JiaguStartupEvent.AuthorizationSource.UNKNOWN,
+                "package", true, true, null, -1L);
 
+        assertTrue(event.getStageId() == 2);
         assertTrue(event.isMainProcess());
         assertTrue(event.isFirstLaunch());
     }

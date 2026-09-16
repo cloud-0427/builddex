@@ -100,6 +100,10 @@ public final class NetworkHelper {
     public static ByteBuffer getAuthorizedPayload(Context context, String runtimeConfigJson,
                                                   ByteBuffer localPayload) {
         long startupStartedAt = now();
+        long authorizationStartedAt = startupStartedAt;
+        long payloadDecryptStartedAt = 0L;
+        boolean payloadDecryptStarted = false;
+        JiaguStartupReporter.stageStarted(JiaguStartupEvent.Stage.DEVICE_AUTHORIZATION);
         StrictMode.ThreadPolicy previous = StrictMode.getThreadPolicy();
         StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().permitAll().build());
         ExecutorService bootstrapExecutor = null;
@@ -182,13 +186,25 @@ public final class NetworkHelper {
             }
 
             JiaguStartupReporter.setAuthorizationSource(authorizationSource);
+            JiaguStartupReporter.stageSucceeded(JiaguStartupEvent.Stage.DEVICE_AUTHORIZATION,
+                    authorizationSource.name(), elapsedMs(authorizationStartedAt));
             long stageStartedAt = now();
+            payloadDecryptStartedAt = stageStartedAt;
+            payloadDecryptStarted = true;
+            JiaguStartupReporter.stageStarted(JiaguStartupEvent.Stage.PAYLOAD_DECRYPT);
             ByteBuffer result = decryptLocalPayload(config, authorization.payloadKey, localPayload);
             timing("local-payload-aes-gcm-decrypt-and-verify", stageStartedAt, startupStartedAt);
+            JiaguStartupReporter.stageSucceeded(JiaguStartupEvent.Stage.PAYLOAD_DECRYPT,
+                    "PAYLOAD_DECRYPTED", elapsedMs(stageStartedAt));
             Log.i(TAG, "[StartupTiming] complete authorized payload preparation totalMs=" +
                     elapsedMs(startupStartedAt));
             return result;
         } catch (Throwable error) {
+            JiaguStartupReporter.stageFailed(
+                    payloadDecryptStarted ? JiaguStartupEvent.Stage.PAYLOAD_DECRYPT
+                            : JiaguStartupEvent.Stage.DEVICE_AUTHORIZATION,
+                    payloadDecryptStarted ? "PAYLOAD_DECRYPT_FAILED" : authorizationFailureCode(error),
+                    elapsedMs(payloadDecryptStarted ? payloadDecryptStartedAt : authorizationStartedAt));
             Log.e(TAG, "Device authorization failed after " + elapsedMs(startupStartedAt) + " ms", error);
             return null;
         } finally {
@@ -197,6 +213,19 @@ public final class NetworkHelper {
             }
             StrictMode.setThreadPolicy(previous);
         }
+    }
+
+    private static String authorizationFailureCode(Throwable error) {
+        if (error instanceof java.net.SocketTimeoutException) {
+            return "NETWORK_TIMEOUT";
+        }
+        if (error instanceof ServerRejectedException) {
+            return "NETWORK_REJECTED";
+        }
+        if (error instanceof GeneralSecurityException) {
+            return "KEYSTORE_UNAVAILABLE";
+        }
+        return "DEVICE_AUTHORIZATION_FAILED";
     }
 
     private static BootstrapResult bootstrap(Context context, Config config,

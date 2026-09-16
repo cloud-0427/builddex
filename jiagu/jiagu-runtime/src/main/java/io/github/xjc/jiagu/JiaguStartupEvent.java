@@ -2,6 +2,72 @@ package io.github.xjc.jiagu;
 
 /** Immutable, non-sensitive startup telemetry event. */
 public final class JiaguStartupEvent {
+    public enum Stage {
+        SHELL_CORE_LOAD(1),
+        SHELL_ATTACH(2),
+        RUNTIME_PROTECTION_CHECK(3),
+        RUNTIME_BUNDLE_LOAD(4),
+        DEVICE_AUTHORIZATION(5),
+        PAYLOAD_DECRYPT(6),
+        BUSINESS_DEX_DECOMPRESS(7),
+        BUSINESS_CLASSLOADER_INJECT(8),
+        REAL_APPLICATION_ATTACH(9),
+        REAL_APPLICATION_ON_CREATE(10),
+        FIRST_ACTIVITY_FIRST_FRAME(11);
+
+        private final int id;
+
+        Stage(int id) {
+            this.id = id;
+        }
+
+        public int getId() {
+            return id;
+        }
+
+        static Stage fromId(int id) {
+            switch (id) {
+                case 1: return SHELL_CORE_LOAD;
+                case 2: return SHELL_ATTACH;
+                case 3: return RUNTIME_PROTECTION_CHECK;
+                case 4: return RUNTIME_BUNDLE_LOAD;
+                case 5: return DEVICE_AUTHORIZATION;
+                case 6: return PAYLOAD_DECRYPT;
+                case 7: return BUSINESS_DEX_DECOMPRESS;
+                case 8: return BUSINESS_CLASSLOADER_INJECT;
+                case 9: return REAL_APPLICATION_ATTACH;
+                case 10: return REAL_APPLICATION_ON_CREATE;
+                case 11: return FIRST_ACTIVITY_FIRST_FRAME;
+                default: throw new IllegalArgumentException("Unknown startup stage id: " + id);
+            }
+        }
+    }
+
+    public enum Status {
+        STARTED,
+        SUCCEEDED,
+        FAILED,
+        SKIPPED,
+        BLOCKED;
+
+        static Status fromOrdinal(int ordinal) {
+            switch (ordinal) {
+                case 0: return STARTED;
+                case 1: return SUCCEEDED;
+                case 2: return FAILED;
+                case 3: return SKIPPED;
+                case 4: return BLOCKED;
+                default: throw new IllegalArgumentException(
+                        "Unknown startup status ordinal: " + ordinal);
+            }
+        }
+    }
+
+    /**
+     * Compatibility names emitted by Runtime versions before the stage protocol.
+     * New consumers should use {@link #getStage()} and {@link #getStatus()}.
+     */
+    @Deprecated
     public enum Type {
         DECRYPT_STARTED,
         STARTUP_COMPLETED
@@ -31,38 +97,77 @@ public final class JiaguStartupEvent {
         }
     }
 
-    private final Type type;
+    private final Stage stage;
+    private final Status status;
+    private final String resultCode;
     private final String sessionId;
     private final String packageName;
     private final String versionName;
     private final long versionCode;
     private final long occurredAtMillis;
-    private final long elapsedMs;
+    private final long elapsedSinceStartMs;
+    private final long stageDurationMs;
     private final AuthorizationSource authorizationSource;
     private final String processName;
     private final boolean mainProcess;
     private final boolean firstLaunch;
+    private final String activityName;
+    private final long activityResumedElapsedMs;
 
-    JiaguStartupEvent(Type type, String sessionId, String packageName,
+    JiaguStartupEvent(Stage stage, Status status, String resultCode,
+                      String sessionId, String packageName,
                       String versionName, long versionCode,
-                      long occurredAtMillis, long elapsedMs,
+                      long occurredAtMillis, long elapsedSinceStartMs, long stageDurationMs,
                       AuthorizationSource authorizationSource, String processName,
-                      boolean mainProcess, boolean firstLaunch) {
-        this.type = type;
+                      boolean mainProcess, boolean firstLaunch, String activityName,
+                      long activityResumedElapsedMs) {
+        this.stage = stage;
+        this.status = status;
+        this.resultCode = resultCode;
         this.sessionId = sessionId;
         this.packageName = packageName;
         this.versionName = versionName;
         this.versionCode = versionCode;
         this.occurredAtMillis = occurredAtMillis;
-        this.elapsedMs = elapsedMs;
+        this.elapsedSinceStartMs = elapsedSinceStartMs;
+        this.stageDurationMs = stageDurationMs;
         this.authorizationSource = authorizationSource;
         this.processName = processName;
         this.mainProcess = mainProcess;
         this.firstLaunch = firstLaunch;
+        this.activityName = activityName;
+        this.activityResumedElapsedMs = activityResumedElapsedMs;
     }
 
+    public int getStageId() {
+        return stage.getId();
+    }
+
+    public Stage getStage() {
+        return stage;
+    }
+
+    public Status getStatus() {
+        return status;
+    }
+
+    /** Result of a terminal stage: a success path, failure, or block reason. */
+    public String getResultCode() {
+        return resultCode;
+    }
+
+    /**
+     * Legacy view for existing uploaders. New stage events return {@code null}.
+     */
+    @Deprecated
     public Type getType() {
-        return type;
+        if (stage == Stage.SHELL_ATTACH && status == Status.STARTED) {
+            return Type.DECRYPT_STARTED;
+        }
+        if (stage == Stage.REAL_APPLICATION_ON_CREATE && status == Status.SUCCEEDED) {
+            return Type.STARTUP_COMPLETED;
+        }
+        return null;
     }
 
     public String getSessionId() {
@@ -85,9 +190,18 @@ public final class JiaguStartupEvent {
         return occurredAtMillis;
     }
 
-    /** Milliseconds since shell startup. Zero for DECRYPT_STARTED. */
+    /** Milliseconds since shell core loading started. */
     public long getElapsedMs() {
-        return elapsedMs;
+        return elapsedSinceStartMs;
+    }
+
+    public long getElapsedSinceStartMs() {
+        return elapsedSinceStartMs;
+    }
+
+    /** Duration of this stage; zero for STARTED events. */
+    public long getStageDurationMs() {
+        return stageDurationMs;
     }
 
     /**
@@ -101,6 +215,12 @@ public final class JiaguStartupEvent {
     /** Convenience flag for telemetry systems that only need the network/cache split. */
     public boolean isNetworkAuthorizationRequired() {
         return authorizationSource.isNetworkRequired();
+    }
+
+    /** Null while authorization has not been resolved. */
+    public Boolean getNetworkAuthorizationRequired() {
+        return authorizationSource == AuthorizationSource.UNKNOWN
+                ? null : authorizationSource.isNetworkRequired();
     }
 
     public String getProcessName() {
@@ -121,18 +241,34 @@ public final class JiaguStartupEvent {
         return firstLaunch;
     }
 
+    /** Class name of the first resumed Activity; null for earlier shell stages. */
+    public String getActivityName() {
+        return activityName;
+    }
+
+    /** Elapsed time at first Activity.onResume(), or -1 before it occurs. */
+    public long getActivityResumedElapsedMs() {
+        return activityResumedElapsedMs;
+    }
+
     @Override
     public String toString() {
-        return "type=" + type
+        return "stageId=" + getStageId()
+                + " stage=" + stage
+                + " status=" + status
+                + " resultCode=" + resultCode
                 + " sessionId=" + sessionId
                 + " packageName=" + packageName
                 + " versionName=" + versionName
                 + " versionCode=" + versionCode
                 + " occurredAtMillis=" + occurredAtMillis
-                + " elapsedMs=" + elapsedMs
+                + " elapsedSinceStartMs=" + elapsedSinceStartMs
+                + " stageDurationMs=" + stageDurationMs
                 + " authorizationSource=" + authorizationSource
                 + " processName=" + processName
                 + " mainProcess=" + mainProcess
-                + " firstLaunch=" + firstLaunch;
+                + " firstLaunch=" + firstLaunch
+                + " activityName=" + activityName
+                + " activityResumedElapsedMs=" + activityResumedElapsedMs;
     }
 }

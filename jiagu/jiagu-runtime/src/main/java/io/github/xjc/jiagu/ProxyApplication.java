@@ -14,7 +14,16 @@ public class ProxyApplication extends Application {
 
     static {
         long startedAt = SystemClock.elapsedRealtime();
-        System.loadLibrary("jiagu-core");
+        JiaguStartupReporter.shellCoreLoadStarted();
+        try {
+            System.loadLibrary("jiagu-core");
+            JiaguStartupReporter.shellCoreLoadSucceeded(
+                    SystemClock.elapsedRealtime() - startedAt);
+        } catch (Throwable error) {
+            JiaguStartupReporter.shellCoreLoadFailed(error,
+                    SystemClock.elapsedRealtime() - startedAt);
+            throw error;
+        }
         Log.i(TAG, "[StartupTiming] stage=load-jiagu-core-library durationMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
     }
@@ -28,6 +37,8 @@ public class ProxyApplication extends Application {
         super.attachBaseContext(base);
         JiaguStartupReporter.beginDecryption(base);
         nativeAttach(base);
+        JiaguStartupReporter.stageSucceeded(JiaguStartupEvent.Stage.SHELL_ATTACH,
+                "SHELL_ATTACH_COMPLETED", SystemClock.elapsedRealtime() - startedAt);
         Log.i(TAG, "[StartupTiming] complete proxy attachBaseContext totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
     }
@@ -37,7 +48,6 @@ public class ProxyApplication extends Application {
         long startedAt = SystemClock.elapsedRealtime();
         super.onCreate();
         nativeOnCreate();
-        JiaguStartupReporter.startupCompleted(this);
         Log.i(TAG, "[StartupTiming] complete proxy onCreate totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
     }

@@ -28,6 +28,14 @@
     }
 
 static jobject gRealApp = nullptr;
+static constexpr int STARTUP_STATUS_STARTED = 0;
+static constexpr int STARTUP_STATUS_SUCCEEDED = 1;
+static constexpr int STARTUP_STATUS_FAILED = 2;
+static constexpr int STARTUP_STATUS_BLOCKED = 4;
+static jclass gStartupReporterClass = nullptr;
+static jmethodID gNativeStageStarted = nullptr;
+static jmethodID gNativeStageFinished = nullptr;
+static jmethodID gObserveFirstActivity = nullptr;
 
 static int64_t monotonic_ms() {
     timespec value{};
@@ -39,6 +47,30 @@ static void log_timing(const char* stage, int64_t stage_started_at, int64_t star
     LOGI("[StartupTiming] stage=%s durationMs=%lld totalMs=%lld", stage,
          static_cast<long long>(monotonic_ms() - stage_started_at),
          static_cast<long long>(monotonic_ms() - startup_started_at));
+}
+
+// Keep the native startup path independent from the uploader implementation. Reporting
+// failures are deliberately ignored: telemetry must never change shell behavior.
+static void report_stage_started(JNIEnv* env, int stage_id) {
+    if (!gStartupReporterClass || !gNativeStageStarted) return;
+    env->CallStaticVoidMethod(gStartupReporterClass, gNativeStageStarted, stage_id);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static void report_stage_finished(JNIEnv* env, int stage_id, int status, const char* result_code,
+                                  int64_t duration_ms) {
+    if (!gStartupReporterClass || !gNativeStageFinished) return;
+    jstring code = result_code ? env->NewStringUTF(result_code) : nullptr;
+    env->CallStaticVoidMethod(gStartupReporterClass, gNativeStageFinished, stage_id, status, code,
+                              static_cast<jlong>(duration_ms));
+    if (code) env->DeleteLocalRef(code);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static void observe_first_activity(JNIEnv* env, jobject application) {
+    if (!gStartupReporterClass || !gObserveFirstActivity) return;
+    env->CallStaticVoidMethod(gStartupReporterClass, gObserveFirstActivity, application);
+    if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
 // --- 动态防护模块 ---
@@ -314,6 +346,8 @@ static bool bind_real_application(JNIEnv* env, jobject proxy_app, jobject real_a
 static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     const int64_t startup_started_at = monotonic_ms();
     if (!prepare_legacy_keystore_context(env, thiz)) return;
+    int64_t stage_started_at = monotonic_ms();
+    report_stage_started(env, 3);
     // 1. 获取配置 (URL 和 REAL_APPLICATION)
     jclass context_class = env->GetObjectClass(context);
     JNI_CHECK_NULL(context_class, "Context class not found", );
@@ -358,12 +392,16 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (sig_check && expected_sig_j) {
         const char* expected_sig = env->GetStringUTFChars(expected_sig_j, nullptr);
         if (!verify_signature(env, context, expected_sig)) {
+            report_stage_finished(env, 3, STARTUP_STATUS_BLOCKED, "SIGNATURE_MISMATCH",
+                                  monotonic_ms() - stage_started_at);
             LOGE("[Jiagu][Signature] blocked: APK signing certificate verification failed");
             _exit(0);
         }
         env->ReleaseStringUTFChars(expected_sig_j, expected_sig);
         LOGD("[Jiagu][Signature] APK signing certificate check passed");
     }
+    report_stage_finished(env, 3, STARTUP_STATUS_SUCCEEDED, "CHECK_PASSED",
+                          monotonic_ms() - stage_started_at);
     const char *real_app_name = env->GetStringUTFChars(real_app_name_j, nullptr);
     const char *pkg_name_str = env->GetStringUTFChars(pkg_name, nullptr);
 
@@ -371,8 +409,12 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     using payload_address_fn = const uint8_t* (*)();
     using payload_size_fn = size_t (*)();
 
+    stage_started_at = monotonic_ms();
+    report_stage_started(env, 4);
     void* payload_handle = dlopen("liblog_ext.so", RTLD_NOW | RTLD_LOCAL);
     if (!payload_handle) {
+        report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_LOAD_FAILED",
+                              monotonic_ms() - stage_started_at);
         LOGE("Jiagu_Native: Failed to load RuntimeConfig ELF: %s", dlerror());
         env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
         env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
@@ -384,6 +426,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     auto payload_size = reinterpret_cast<payload_size_fn>(
             dlsym(payload_handle, "jg_payload_size"));
     if (!payload_address || !payload_size) {
+        report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_EXPORTS_MISSING",
+                              monotonic_ms() - stage_started_at);
         LOGE("Jiagu_Native: RuntimeConfig ELF exports are missing: %s", dlerror());
         dlclose(payload_handle);
         return;
@@ -393,6 +437,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     size_t bundle_length = payload_size();
     if (!bundle_source || bundle_length < 56 || bundle_length > 129 * 1024 * 1024 ||
             std::memcmp(bundle_source, "JGRC", 4) != 0) {
+		report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_INVALID",
+                              monotonic_ms() - stage_started_at);
 		LOGE("Jiagu_Native: Runtime bundle ELF returned invalid data");
         dlclose(payload_handle);
         return;
@@ -409,14 +455,18 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (bundle_version != 1 || config_length < 32 || config_length > 256 * 1024 ||
             local_payload_length < 40 || local_payload_length > 128 * 1024 * 1024 ||
             16ULL + config_length + local_payload_length != bundle_length) {
+        report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_INVALID",
+                              monotonic_ms() - stage_started_at);
         LOGE("Jiagu_Native: Runtime bundle header is invalid");
         dlclose(payload_handle);
         return;
     }
     std::string runtime_config(reinterpret_cast<const char*>(bundle_source + 16), config_length);
     const uint8_t* local_payload_source = bundle_source + 16 + config_length;
+    report_stage_finished(env, 4, STARTUP_STATUS_SUCCEEDED, "RUNTIME_BUNDLE_READY",
+                          monotonic_ms() - stage_started_at);
     // 3. Java handles Keystore, authorization and AES-GCM from mapped direct memory.
-    int64_t stage_started_at = monotonic_ms();
+    stage_started_at = monotonic_ms();
     jclass network_helper = env->FindClass("io/github/xjc/jiagu/NetworkHelper");
     if (!network_helper) {
         LOGE("Jiagu_Native: NetworkHelper class not found");
@@ -493,6 +543,7 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     JNI_CHECK_NULL(bb_array, "Failed to create ByteBuffer array", );
 
     const int64_t all_dex_started_at = monotonic_ms();
+    report_stage_started(env, 7);
     for (int i = 0; i < dex_count; ++i) {
         int dex_offset = (static_cast<unsigned char>(meta_data_ptr[meta_offset]) << 24) |
                          (static_cast<unsigned char>(meta_data_ptr[meta_offset + 1]) << 16) |
@@ -539,9 +590,12 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         }
         env->SetObjectArrayElement(bb_array, i, bb);
     }
+    report_stage_finished(env, 7, STARTUP_STATUS_SUCCEEDED, "DEX_DECOMPRESSED",
+                          monotonic_ms() - all_dex_started_at);
     log_timing("native-all-dex-decompress", all_dex_started_at, startup_started_at);
 
     stage_started_at = monotonic_ms();
+    report_stage_started(env, 8);
     jclass mem_loader_class = env->FindClass("dalvik/system/InMemoryDexClassLoader");
     JNI_CHECK_NULL(mem_loader_class, "InMemoryDexClassLoader class not found", );
     jmethodID loader_init = env->GetMethodID(
@@ -556,10 +610,13 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     jobject mem_cl = env->NewObject(mem_loader_class, loader_init, bb_array, sys_cl);
     JNI_CHECK_NULL(mem_cl, "InMemoryDexClassLoader instance creation failed", );
     inject_dex_elements(env, sys_cl, mem_cl);
+    report_stage_finished(env, 8, STARTUP_STATUS_SUCCEEDED, "DEX_CLASSLOADER_INJECTED",
+                          monotonic_ms() - stage_started_at);
     log_timing("native-dex-classloader-create-and-inject", stage_started_at, startup_started_at);
 
     // 4. 实例化 Real Application 并替换
     stage_started_at = monotonic_ms();
+    report_stage_started(env, 9);
     std::string real_app_path = real_app_name;
     for (size_t i = 0; i < real_app_path.length(); ++i) {
         if (real_app_path[i] == '.') real_app_path[i] = '/';
@@ -579,7 +636,13 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         jmethodID attach_mid = env->GetMethodID(application_cls, "attach", "(Landroid/content/Context;)V");
         JNI_CHECK_NULL(attach_mid, "Application.attach method not found", );
         env->CallVoidMethod(gRealApp, attach_mid, context);
+    } else {
+        report_stage_finished(env, 9, STARTUP_STATUS_FAILED, "REAL_APPLICATION_CREATE_FAILED",
+                              monotonic_ms() - stage_started_at);
+        return;
     }
+    report_stage_finished(env, 9, STARTUP_STATUS_SUCCEEDED, "REAL_APPLICATION_ATTACHED",
+                          monotonic_ms() - stage_started_at);
     log_timing("native-real-application-create-bind-and-attach", stage_started_at,
                startup_started_at);
 
@@ -589,10 +652,24 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
 
 static void native_on_create(JNIEnv *env, jobject thiz) {
     if (gRealApp) {
+        const int64_t stage_started_at = monotonic_ms();
+        report_stage_started(env, 10);
         if (!bind_real_application(env, thiz, gRealApp)) return;
         jclass app_cls = env->GetObjectClass(gRealApp);
         jmethodID on_create_mid = env->GetMethodID(app_cls, "onCreate", "()V");
         env->CallVoidMethod(gRealApp, on_create_mid);
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED,
+                                  "REAL_APPLICATION_ON_CREATE_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
+        report_stage_finished(env, 10, STARTUP_STATUS_SUCCEEDED,
+                              "REAL_APPLICATION_ON_CREATE_COMPLETED",
+                              monotonic_ms() - stage_started_at);
+        observe_first_activity(env, gRealApp);
     }
 }
 
@@ -600,6 +677,37 @@ static const JNINativeMethod gMethods[] = {
     {"nativeAttach", "(Landroid/content/Context;)V", (void*)native_attach},
     {"nativeOnCreate", "()V", (void*)native_on_create}
 };
+
+static void cache_startup_reporter(JNIEnv* env) {
+    jclass local = env->FindClass("io/github/xjc/jiagu/JiaguStartupReporter");
+    if (!local) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGE("Jiagu_Native: startup reporter unavailable; telemetry disabled");
+        return;
+    }
+    gNativeStageStarted = env->GetStaticMethodID(local, "nativeStageStarted", "(I)V");
+    gNativeStageFinished = env->GetStaticMethodID(local, "nativeStageFinished",
+                                                  "(IILjava/lang/String;J)V");
+    gObserveFirstActivity = env->GetStaticMethodID(local, "observeFirstActivity",
+                                                   "(Landroid/app/Application;)V");
+    if (!gNativeStageStarted || !gNativeStageFinished || !gObserveFirstActivity) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGE("Jiagu_Native: startup reporter methods unavailable; telemetry disabled");
+        gNativeStageStarted = nullptr;
+        gNativeStageFinished = nullptr;
+        gObserveFirstActivity = nullptr;
+        env->DeleteLocalRef(local);
+        return;
+    }
+    gStartupReporterClass = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    if (!gStartupReporterClass) {
+        gNativeStageStarted = nullptr;
+        gNativeStageFinished = nullptr;
+        gObserveFirstActivity = nullptr;
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+}
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env = nullptr;
@@ -613,5 +721,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
         LOGE("Jiagu_Native: Failed to register natives");
         return JNI_ERR;
     }
+    cache_startup_reporter(env);
     return JNI_VERSION_1_6;
 }

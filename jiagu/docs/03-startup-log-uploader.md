@@ -1,117 +1,163 @@
-# 启动日志上传扩展
+# 启动阶段事件上报设计
 
-`startupLogUploaderClass` 是**可选配置**。不配置时，壳不会反射加载任何
-使用方代码，原有启动链路保持不变；两条事件仅输出到 Logcat（Tag：
-`Jiagu_Startup`）。
+本文定义加固后 APK 的启动阶段事件模型。目标是以一次进程启动为一个
+`sessionId`，从壳加载、授权解密、业务 DEX 装载，一直观测到首个 Activity 的
+首帧绘制。
 
-启用后，Runtime 会发送两类事件：
+> 当前 Runtime 只实现了 `DECRYPT_STARTED` 与 `STARTUP_COMPLETED` 两个兼容事件。
+> 本文中的 11 个阶段是后续 Runtime、Native 和插件应共同实现的目标协议；在全部
+> 阶段落地前，uploader 必须能同时处理旧事件和新事件。
 
-- `DECRYPT_STARTED`：壳进入 Native 授权/解密启动链路前。
-- `STARTUP_COMPLETED`：真实 `Application.onCreate()` 返回后。
+## 目标与边界
 
-推荐在加固配置中指定一个壳侧 uploader：
+- 每个关键阶段都能得到开始、成功或失败的可关联记录。
+- 事件必须覆盖壳早期路径；此时业务 DEX 尚未加载，不能依赖业务 SDK。
+- 首屏完成以 **首个 Activity 的第一帧提交绘制** 为准；`onActivityResumed` 只表示
+  Activity 进入前台，不表示用户已经看到内容。
+- 上报是 best-effort，不得阻塞、改变或中断加固启动链路。
+- 事件不得包含 token、credential、payload key、服务端响应正文、完整签名内容或
+  完整异常堆栈。
+
+## 首期 11 个阶段
+
+每个阶段使用 `STARTED`、`SUCCEEDED`、`FAILED` 三种状态；不适用的阶段可使用
+`SKIPPED`，安全策略主动终止进程使用 `BLOCKED`。`stageDurationMs` 只在结束状态中
+填写。
+
+| stageId | stage | 成功边界 | 终态 `resultCode` 示例 | 预期插点 |
+| --- | --- | --- | --- | --- |
+| 1 | `SHELL_CORE_LOAD` | `jiagu-core` 已成功加载并注册 JNI | `CORE_LIBRARY_LOAD_FAILED` | `ProxyApplication` 静态初始化块 |
+| 2 | `SHELL_ATTACH` | `ProxyApplication.attachBaseContext()` 完成 | `SHELL_ATTACH_FAILED` | `ProxyApplication.attachBaseContext()` |
+| 3 | `RUNTIME_PROTECTION_CHECK` | 反调试、反 Hook、签名校验均通过，或相应开关关闭 | `DEBUGGER_DETECTED`、`HOOK_FRAMEWORK_DETECTED`、`SIGNATURE_MISMATCH` | `native_attach()` |
+| 4 | `RUNTIME_BUNDLE_LOAD` | `liblog_ext.so`、导出符号和 JGRC 头校验通过 | `RUNTIME_BUNDLE_LOAD_FAILED`、`RUNTIME_BUNDLE_INVALID` | `native_attach()` |
+| 5 | `DEVICE_AUTHORIZATION` | 获得可用 payload key / 授权材料 | `KEYSTORE_UNAVAILABLE`、`NETWORK_TIMEOUT`、`NETWORK_REJECTED` | `NetworkHelper.getAuthorizedPayload()` |
+| 6 | `PAYLOAD_DECRYPT` | 本地 payload 完成 AES-GCM 解密与认证校验 | `PAYLOAD_AUTHENTICATION_FAILED`、`PAYLOAD_INVALID` | `NetworkHelper.decryptLocalPayload()` |
+| 7 | `BUSINESS_DEX_DECOMPRESS` | 所有加密业务 DEX 解压到 DirectBuffer | `DEX_DECOMPRESS_FAILED`、`DEX_ENTRY_INVALID` | Native DEX 解压循环 |
+| 8 | `BUSINESS_CLASSLOADER_INJECT` | `InMemoryDexClassLoader` 创建并注入 `dexElements` | `DEX_CLASSLOADER_CREATE_FAILED`、`DEX_INJECTION_FAILED` | Native ClassLoader 注入逻辑 |
+| 9 | `REAL_APPLICATION_ATTACH` | 真实 Application 已创建、绑定并执行 `attach(Context)` | `REAL_APPLICATION_CREATE_FAILED`、`REAL_APPLICATION_BIND_FAILED`、`REAL_APPLICATION_ATTACH_FAILED` | Native 真实 Application 替换逻辑 |
+| 10 | `REAL_APPLICATION_ON_CREATE` | 真实 `Application.onCreate()` 返回 | `REAL_APPLICATION_ON_CREATE_FAILED` | `native_on_create()` |
+| 11 | `FIRST_ACTIVITY_FIRST_FRAME` | 本 session 首个 Activity 首次 `OnPreDraw` / Choreographer 帧回调到达 | `FIRST_FRAME_TIMEOUT` | 真实 Application 的 `ActivityLifecycleCallbacks` 与首个 Activity 的 DecorView |
+
+### 第 5 阶段的授权子结果
+
+`DEVICE_AUTHORIZATION` 必须携带 `authorizationSource`，用于区分缓存命中和网络
+依赖；它不是新的顶层 stage。该阶段成功时，`resultCode` 与
+`authorizationSource` 使用同一个值；两者同时保留，使服务端无需依赖其他字段即可
+按通用 `resultCode` 聚合，也能通过强类型字段分析授权路径。
+
+| 值 | 是否联网 | 含义 |
+| --- | --- | --- |
+| `LOCAL_AUTHORIZATION_CACHE` | 否 | 本地 grant 与 wrapped payload key 校验通过，并可由 Keystore 解封。 |
+| `NETWORK_BOOTSTRAP` | 是 | 无可用 device credential，使用新版 bootstrap。 |
+| `NETWORK_AUTHORIZE` | 是 | credential 可用但授权缓存失效，重新授权。 |
+| `NETWORK_LEGACY_ENROLL_AUTHORIZE` | 是 | bootstrap 不可用，回退到 enroll + authorize。 |
+| `UNKNOWN` | 不确定 | 授权尚未完成，或阶段在授权前已失败。 |
+
+可选的细粒度诊断事件（challenge、Integrity token、credential cache hit/miss、
+authorization cache hit/miss）应作为第 5 阶段的属性或采样诊断事件，而不是首期
+必发事件，以控制早期启动的事件量。
+
+## 统一事件结构
+
+新协议应以通用 `stageId + stage + status` 替代持续扩张的事件枚举。`stageId` 固定为
+上表的 1–11，协议演进时不得改变既有编号；`stage` 是同一编号的可读枚举名。建议
+`JiaguStartupEvent` 至少提供以下字段：
+
+```text
+sessionId                 // 每次进程启动生成；所有阶段共享
+stageId                   // 固定 1..11；用于排序、漏斗及服务端兼容
+stage                     // 上表中的阶段名
+status                    // STARTED / SUCCEEDED / FAILED / SKIPPED / BLOCKED
+resultCode                // 终态必填：成功结果或稳定失败/拦截码
+occurredAtMillis          // 墙上时间，用于服务端排序
+elapsedSinceStartMs       // 相对 SHELL_CORE_LOAD 开始的单调时钟耗时
+stageDurationMs           // 本阶段耗时；仅结束状态填写
+packageName
+versionName / versionCode
+processName
+isMainProcess
+isFirstLaunch
+authorizationSource       // 第 5 阶段成功后填写；未决议/失败时为 UNKNOWN
+networkAuthorizationRequired // 第 5 阶段成功后为 true/false；未决议时为 null
+activityName              // 仅首 Activity；建议上传 hash 或经白名单映射的名称
+activityResumedElapsedMs  // 首个 Activity onResume 时的耗时；首帧前的内部检查点
+failureClass              // 可选的脱敏异常类别，不上传 message/stacktrace
+```
+
+`resultCode` 是所有终态事件的统一结果字段：例如检查通过为 `CHECK_PASSED`，签名
+拦截为 `SIGNATURE_MISMATCH`，DEX 解压失败为 `DEX_DECOMPRESS_FAILED`。第 5 阶段的
+成功结果直接使用 `LOCAL_AUTHORIZATION_CACHE`、`NETWORK_BOOTSTRAP`、
+`NETWORK_AUTHORIZE` 或 `NETWORK_LEGACY_ENROLL_AUTHORIZE`；失败时使用
+`NETWORK_TIMEOUT`、`NETWORK_REJECTED`、`KEYSTORE_UNAVAILABLE` 等稳定错误码。
+
+服务端幂等键应使用：`packageName + versionCode + sessionId + stageId + status`。
+同一阶段允许一个 `STARTED` 和一个终态事件；重试上传不得产生新的业务事件。
+
+## 生命周期与时间线
+
+```text
+SHELL_CORE_LOAD
+  → SHELL_ATTACH
+  → RUNTIME_PROTECTION_CHECK
+  → RUNTIME_BUNDLE_LOAD
+  → DEVICE_AUTHORIZATION
+  → PAYLOAD_DECRYPT
+  → BUSINESS_DEX_DECOMPRESS
+  → BUSINESS_CLASSLOADER_INJECT
+  → REAL_APPLICATION_ATTACH
+  → REAL_APPLICATION_ON_CREATE
+  → FIRST_ACTIVITY_FIRST_FRAME
+```
+
+第 11 阶段只记录本 session 的第一个 Activity。它不必是 Launcher Activity：深链、
+通知或恢复任务都可能使其他 Activity 成为第一个被创建的界面。应记录其受控标识，
+并在 `FIRST_ACTIVITY_FIRST_FRAME` 上报时附带从启动开始至首帧的总耗时。
+
+业务若还需要“数据已就绪”的定义，可另行主动发送 `FIRST_ACTIVITY_FULLY_DRAWN`；它不
+属于加固 Runtime 的首期 11 阶段，因为框架无法可靠判断异步内容何时完成。
+
+## 上报、落盘与失败处理
+
+`startupLogUploaderClass` 仍是可选配置：未配置时，事件只写入 Logcat
+（`Jiagu_Startup`），不反射加载使用方代码。
 
 ```groovy
-// app/build.gradle
 dexReport {
-    // 不需要启动日志时，删除或注释此行即可。
     startupLogUploaderClass = "com.example.StartupUploader"
 }
 ```
 
-本工程的 `app` 模块提供了一个可运行的最小实现
-`lows.dgeon.ightr.jiagu.StartupEventUploader`：它以 `POST`
-提交 JSON 到固定地址 `https://m9.blazepro.net/api/game/user_event`，路径沿用
-`aiKeMeiTrackEvent`。请求仅包含 `productInfo`（包名/版本）、`device`（Android
-ID、品牌、型号、系统、语言）和 `userEvent`（启动阶段、首次启动、授权来源）。
+uploader 必须有 public 无参构造器并实现 `JiaguStartupLogUploader`。插件应把 uploader
+及其内部类保留在壳 DEX，并生成 R8 keep 规则。它只能使用 Android 平台 API 或明确
+保留在壳内的依赖。
 
-该类需要有 public 无参构造器，并实现 `JiaguStartupLogUploader`：
+事件分发可在后台线程执行，但**不能只依赖即时 HTTP 请求**：在阶段开始和失败时，
+Runtime/uploader 应先以轻量、限量的持久化队列落盘；后续启动或后台任务再批量上传。
+这样进程被杀、崩溃或安全策略调用 `_exit` 时，已记录的启动轨迹仍可在下次上报。
 
-```java
-import android.content.Context;
-import java.util.Map;
-
-public final class StartupUploader implements JiaguStartupLogUploader {
-    public StartupUploader() {}
-
-    @Override
-    public void upload(Context appContext, JiaguStartupEvent event) {
-        // 此回调已在 Jiagu-StartupLog 后台线程执行。
-        // 可使用 appContext 初始化使用方日志 SDK、写本地队列或调度 WorkManager。
-        // 请接入使用方自己的埋点/日志队列，不要抛出异常。
-        Telemetry.enqueue("jiagu_startup", Map.of(
-                "event", event.getType().name(),
-                "sessionId", event.getSessionId(),
-                "packageName", event.getPackageName(),
-                "versionCode", event.getVersionCode(),
-                "elapsedMs", event.getElapsedMs(),
-                "firstLaunch", event.isFirstLaunch()));
-    }
-}
-```
-
-插件会将配置的 uploader 及其内部类留在壳中，并向最终 R8 生成 keep
-规则。uploader 应保持轻量，只调用 Android 平台 API 或已经留在壳内的依赖；
-`DECRYPT_STARTED` 发生时业务 DEX 尚不可用。
+网络上传需设置短超时、去重与退避重试；任何 uploader 异常必须被隔离，不能影响
+解密、DEX 注入、Application 或 Activity 生命周期。
 
 ## 首次启动与成功率
 
-`isFirstLaunch()` 与鉴权缓存无关。它表示**当前 App 数据生命周期中，主进程
-记录到的第一次壳启动尝试**：首次安装、清除应用数据后会重新为 `true`；应用升级
-不会重置。首次引入此能力的版本升级会被标记一次 `true`，因为旧版没有该本地状态。
-该标记在进入 `DECRYPT_STARTED` 前同步保存，所以同一 `sessionId` 的
-`DECRYPT_STARTED` 和 `STARTUP_COMPLETED` 会得到相同结果。
+`isFirstLaunch()` 表示当前 App 数据生命周期中主进程记录到的第一次壳启动尝试；首次
+安装或清除数据后会重新为 `true`，普通应用升级不会重置。远程进程不会抢占该标记，
+并且其 `isMainProcess()` 为 `false`。
 
-远程进程不会抢占主进程的首次启动标记，且事件的 `isMainProcess()` 为 `false`；
-统计启动成功率时应只统计 `isMainProcess() == true` 的事件：
+建议用首期第 1 和第 11 阶段计算首次启动端到端成功率：
 
-```java
-if (event.isMainProcess() && event.isFirstLaunch()) {
-    if (event.getType() == JiaguStartupEvent.Type.DECRYPT_STARTED) {
-        telemetry.increment("jiagu_first_launch_started"); // 分母
-    } else if (event.getType() == JiaguStartupEvent.Type.STARTUP_COMPLETED) {
-        telemetry.increment("jiagu_first_launch_completed"); // 分子
-    }
-}
+```text
+分母：SHELL_CORE_LOAD / SUCCEEDED，isMainProcess=true，isFirstLaunch=true
+分子：FIRST_ACTIVITY_FIRST_FRAME / SUCCEEDED，isMainProcess=true，isFirstLaunch=true
 ```
 
-因为 uploader 为异步回调，想要统计崩溃/被杀导致的失败，使用方应将开始事件先
-写入可持久化队列，再由后续启动或后台任务上传；不能只依赖一次即时 HTTP 请求。
+同时保留各阶段的成功率和 P50/P95 耗时，可直接定位失败或耗时集中在哪一个边界。
 
-## 解密凭据来源
+## 与当前实现的兼容关系
 
-`STARTUP_COMPLETED` 事件会携带 `authorizationSource`。可直接使用
-`event.isNetworkAuthorizationRequired()` 判断本次启动是否需要联网取得解密授权；
-需要诊断缓存命中情况时，使用 `event.getAuthorizationSource()`：
+当前 `DECRYPT_STARTED` 对应第 2 阶段开始进入 Native 启动链路附近；
+`STARTUP_COMPLETED` 对应第 10 阶段成功结束。迁移期可同时发送旧事件和新阶段事件，
+待服务端及 uploader 完成切换后再评估旧事件下线。
 
-| 值 | 是否联网 | 含义 |
-| --- | --- | --- |
-| `LOCAL_AUTHORIZATION_CACHE` | 否 | 本地存在未过期、验签通过的 grant 与 wrapped payload key，并由 Android Keystore 解封。 |
-| `NETWORK_BOOTSTRAP` | 是 | 首次启动或本地 device credential 不可用，走新版 bootstrap。 |
-| `NETWORK_AUTHORIZE` | 是 | 本地 credential 可用，但 grant/key 缓存不存在、过期或校验失败，重新授权。 |
-| `NETWORK_LEGACY_ENROLL_AUTHORIZE` | 是 | 服务端不支持新版 bootstrap，回退到 enroll + authorize。 |
-| `UNKNOWN` | 不确定 | 仅会出现在 `DECRYPT_STARTED`，此时授权路径尚未解析。 |
-
-例如：
-
-```java
-if (event.getType() == JiaguStartupEvent.Type.STARTUP_COMPLETED) {
-    telemetry.put("jiagu_authorization_source", event.getAuthorizationSource().name());
-    telemetry.put("jiagu_network_required", event.isNetworkAuthorizationRequired());
-}
-```
-
-若无法在构建时配置，也可以在业务 `Application.onCreate()` 中注册。此前已经
-发出的事件会回放给新的 uploader，因此仍可收到 `DECRYPT_STARTED`：
-
-```java
-@Override
-public void onCreate() {
-    super.onCreate();
-    JiaguStartupReporter.setUploader(new StartupUploader());
-}
-```
-
-传入的 `appContext` 是 Application Context，可安全保存。uploader 异常会被隔离
-并写入 Logcat，不会阻塞或中断启动。建议 `upload()` 只
-负责入队；网络重试与去重由使用方实现，可用 `sessionId + event type` 作为幂等键。
+当前已存在的 Native/Java 计时点可直接作为首批实现基础：授权与 payload 解密、业务
+DEX 解压、ClassLoader 注入、真实 Application 创建/绑定/attach。
