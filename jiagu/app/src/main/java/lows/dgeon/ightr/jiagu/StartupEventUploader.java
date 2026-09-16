@@ -56,11 +56,11 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
     private static final String DEFAULT_APP_ID = "370";
     private static final String DEFAULT_BUNDLE = "wacky.frenzy.blast.cann";
 
-    private static final class HttpClientHolder {
-        private static final OkHttpClient INSTANCE = createHttpClient();
+    public StartupEventUploader() {
     }
 
-    public StartupEventUploader() {
+    private static final class HttpClientHolder {
+        private static final OkHttpClient INSTANCE = createHttpClient();
     }
 
     @Override
