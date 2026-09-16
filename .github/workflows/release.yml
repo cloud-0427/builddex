@@ -48,6 +48,10 @@ jobs:
       - name: Publish runtime to Maven Central
         working-directory: jiagu
         env:
+          # JitPack coordinates are set at the job level; clear them so this
+          # publication uses the verified io.github.cloud-0427 namespace.
+          GROUP: ''
+          ARTIFACT: ''
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
           SIGNING_IN_MEMORY_KEY: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
@@ -57,6 +61,9 @@ jobs:
       - name: Publish Gradle plugin to Maven Central
         working-directory: jiagu
         env:
+          # See runtime publication above.
+          GROUP: ''
+          ARTIFACT: ''
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
           SIGNING_IN_MEMORY_KEY: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
