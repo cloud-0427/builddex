@@ -8,22 +8,24 @@ import android.util.Log;
 import org.json.JSONObject;
 import org.conscrypt.Conscrypt;
 
-import java.io.OutputStream;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.Provider;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 import io.github.xjc.jiagu.JiaguStartupEvent;
 import io.github.xjc.jiagu.JiaguStartupLogUploader;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 /**
  * Minimal shell-safe startup event reporter.
@@ -34,7 +36,14 @@ import io.github.xjc.jiagu.JiaguStartupLogUploader;
 public final class StartupEventUploader implements JiaguStartupLogUploader {
     private static final String TAG = "JG_Event";
 
-    private static final int TIMEOUT_MS = 15_000;
+    // Startup telemetry must not leave the single shell dispatcher blocked for 15 seconds
+    // per event. OkHttp also keeps the fully-consumed response connection available for
+    // the following startup stage, avoiding a fresh TLS handshake for every event.
+    private static final int CONNECT_TIMEOUT_MS = 4_000;
+    private static final int IO_TIMEOUT_MS = 6_000;
+    private static final int CALL_TIMEOUT_MS = 8_000;
+    private static final MediaType JSON_MEDIA_TYPE =
+            MediaType.get("application/json; charset=utf-8");
 
     private static final String EVENT_ENDPOINT =
             "https://m9.blazepro.net/m1/api/game/user_event";
@@ -45,6 +54,10 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
     private static final String DEFAULT_CHANNEL_NAME = "xiaomiapk";
     private static final String DEFAULT_APP_ID = "370";
     private static final String DEFAULT_BUNDLE = "wacky.frenzy.blast.cann";
+
+    private static final class HttpClientHolder {
+        private static final OkHttpClient INSTANCE = createHttpClient();
+    }
 
     public StartupEventUploader() {
     }
@@ -59,35 +72,49 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
             return;
         }
 
-        HttpsURLConnection connection = null;
         try {
             byte[] body = createBody(appContext, event).toString()
                     .getBytes(StandardCharsets.UTF_8);
-            connection = (HttpsURLConnection) new URL(EVENT_ENDPOINT).openConnection();
-            // This callback is invoked by the protection shell before business code is
-            // guaranteed to be available. Do not use the platform TLS provider here:
-            // affected Redmi ROMs can crash in its ECH metrics close path.
-            connection.setSSLSocketFactory(StartupTls.socketFactory());
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(TIMEOUT_MS);
-            connection.setReadTimeout(TIMEOUT_MS);
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setFixedLengthStreamingMode(body.length);
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(body);
+            Request request = new Request.Builder()
+                    .url(EVENT_ENDPOINT)
+                    .header("Accept", "application/json")
+                    .post(RequestBody.create(body, JSON_MEDIA_TYPE))
+                    .build();
+            // Response.close() is essential: it releases the body and allows OkHttp to
+            // reuse its HTTPS socket for the next startup stage. The former
+            // HttpsURLConnection implementation never consumed either response stream.
+            try (Response response = HttpClientHolder.INSTANCE.newCall(request).execute()) {
+                Log.d(TAG, "Startup event: status=" + response.code() + " " + event);
             }
-            int statusCode = connection.getResponseCode();
-            Log.d(TAG, "Startup event: status=" + statusCode + " " + event);
         } catch (Exception error) {
             // Startup telemetry is best-effort and must never affect the shell.
             Log.w(TAG, "Startup event failed: " + event, error);
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
         }
+    }
+
+    private static OkHttpClient createHttpClient() {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .connectTimeout(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .readTimeout(IO_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .writeTimeout(IO_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .callTimeout(CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                // OkHttp retries safe recoverable connection failures, but its call
+                // timeout still bounds the whole best-effort telemetry operation.
+                .retryOnConnectionFailure(true);
+        try {
+            Provider provider = Conscrypt.newProviderBuilder()
+                    .provideTrustManager(true)
+                    .build();
+            X509TrustManager trustManager = StartupTls.conscryptTrustManager(provider);
+            SSLContext context = SSLContext.getInstance("TLS", provider);
+            context.init(null, new TrustManager[]{trustManager}, null);
+            builder.sslSocketFactory(context.getSocketFactory(), trustManager);
+            Log.i(TAG, "Using bundled Conscrypt TLS: provider=" + provider.getName());
+        } catch (Exception error) {
+            // Keep reporting optional. A ROM/provider mismatch must not affect startup.
+            Log.w(TAG, "Cannot initialize bundled Conscrypt TLS; using platform TLS", error);
+        }
+        return builder.build();
     }
 
     private static JSONObject createBody(Context context, JiaguStartupEvent event) throws Exception {
@@ -194,41 +221,12 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
     }
 
     /**
-     * Shell-safe, lazily initialized TLS setup for the startup reporter only.
+     * Shell-safe TLS setup for the startup reporter only.
      * It deliberately does not install a global security provider and does not
      * depend on the business-layer HttpManager.
      */
     private static final class StartupTls {
-        private static volatile SSLSocketFactory socketFactory;
-
-        static SSLSocketFactory socketFactory() throws Exception {
-            SSLSocketFactory result = socketFactory;
-            if (result != null) {
-                return result;
-            }
-            synchronized (StartupTls.class) {
-                result = socketFactory;
-                if (result == null) {
-                    // The Android default TrustManager reaches NetworkSecurityConfig,
-                    // DeviceConfig and Certificate Transparency flags. Those framework
-                    // services are not ready while the shell is dispatching this event.
-                    // Keep both the TLS engine and certificate verifier in bundled
-                    // Conscrypt instead.
-                    Provider provider = Conscrypt.newProviderBuilder()
-                            .provideTrustManager(true)
-                            .build();
-                    SSLContext context = SSLContext.getInstance("TLS", provider);
-                    context.init(null, new TrustManager[]{conscryptTrustManager(provider)}, null);
-                    result = context.getSocketFactory();
-                    socketFactory = result;
-                    Log.i(TAG, "Using bundled Conscrypt TLS: provider="
-                            + provider.getName());
-                }
-                return result;
-            }
-        }
-
-        private static X509TrustManager conscryptTrustManager(Provider provider) throws Exception {
+        static X509TrustManager conscryptTrustManager(Provider provider) throws Exception {
             TrustManagerFactory factory = TrustManagerFactory.getInstance("PKIX", provider);
             factory.init((KeyStore) null);
             for (TrustManager manager : factory.getTrustManagers()) {

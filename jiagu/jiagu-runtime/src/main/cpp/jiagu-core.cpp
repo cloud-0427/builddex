@@ -28,12 +28,10 @@
     }
 
 static jobject gRealApp = nullptr;
-static constexpr int STARTUP_STATUS_STARTED = 0;
 static constexpr int STARTUP_STATUS_SUCCEEDED = 1;
 static constexpr int STARTUP_STATUS_FAILED = 2;
 static constexpr int STARTUP_STATUS_BLOCKED = 4;
 static jclass gStartupReporterClass = nullptr;
-static jmethodID gNativeStageStarted = nullptr;
 static jmethodID gNativeStageFinished = nullptr;
 static jmethodID gObserveFirstActivity = nullptr;
 
@@ -51,12 +49,6 @@ static void log_timing(const char* stage, int64_t stage_started_at, int64_t star
 
 // Keep the native startup path independent from the uploader implementation. Reporting
 // failures are deliberately ignored: telemetry must never change shell behavior.
-static void report_stage_started(JNIEnv* env, int stage_id) {
-    if (!gStartupReporterClass || !gNativeStageStarted) return;
-    env->CallStaticVoidMethod(gStartupReporterClass, gNativeStageStarted, stage_id);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-}
-
 static void report_stage_finished(JNIEnv* env, int stage_id, int status, const char* result_code,
                                   int64_t duration_ms) {
     if (!gStartupReporterClass || !gNativeStageFinished) return;
@@ -347,7 +339,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     const int64_t startup_started_at = monotonic_ms();
     if (!prepare_legacy_keystore_context(env, thiz)) return;
     int64_t stage_started_at = monotonic_ms();
-    report_stage_started(env, 3);
     // 1. 获取配置 (URL 和 REAL_APPLICATION)
     jclass context_class = env->GetObjectClass(context);
     JNI_CHECK_NULL(context_class, "Context class not found", );
@@ -410,7 +401,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     using payload_size_fn = size_t (*)();
 
     stage_started_at = monotonic_ms();
-    report_stage_started(env, 4);
     void* payload_handle = dlopen("liblog_ext.so", RTLD_NOW | RTLD_LOCAL);
     if (!payload_handle) {
         report_stage_finished(env, 4, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_LOAD_FAILED",
@@ -543,7 +533,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     JNI_CHECK_NULL(bb_array, "Failed to create ByteBuffer array", );
 
     const int64_t all_dex_started_at = monotonic_ms();
-    report_stage_started(env, 7);
     for (int i = 0; i < dex_count; ++i) {
         int dex_offset = (static_cast<unsigned char>(meta_data_ptr[meta_offset]) << 24) |
                          (static_cast<unsigned char>(meta_data_ptr[meta_offset + 1]) << 16) |
@@ -595,7 +584,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     log_timing("native-all-dex-decompress", all_dex_started_at, startup_started_at);
 
     stage_started_at = monotonic_ms();
-    report_stage_started(env, 8);
     jclass mem_loader_class = env->FindClass("dalvik/system/InMemoryDexClassLoader");
     JNI_CHECK_NULL(mem_loader_class, "InMemoryDexClassLoader class not found", );
     jmethodID loader_init = env->GetMethodID(
@@ -616,7 +604,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
 
     // 4. 实例化 Real Application 并替换
     stage_started_at = monotonic_ms();
-    report_stage_started(env, 9);
     std::string real_app_path = real_app_name;
     for (size_t i = 0; i < real_app_path.length(); ++i) {
         if (real_app_path[i] == '.') real_app_path[i] = '/';
@@ -653,7 +640,6 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
 static void native_on_create(JNIEnv *env, jobject thiz) {
     if (gRealApp) {
         const int64_t stage_started_at = monotonic_ms();
-        report_stage_started(env, 10);
         if (!bind_real_application(env, thiz, gRealApp)) return;
         jclass app_cls = env->GetObjectClass(gRealApp);
         jmethodID on_create_mid = env->GetMethodID(app_cls, "onCreate", "()V");
@@ -685,15 +671,13 @@ static void cache_startup_reporter(JNIEnv* env) {
         LOGE("Jiagu_Native: startup reporter unavailable; telemetry disabled");
         return;
     }
-    gNativeStageStarted = env->GetStaticMethodID(local, "nativeStageStarted", "(I)V");
     gNativeStageFinished = env->GetStaticMethodID(local, "nativeStageFinished",
                                                   "(IILjava/lang/String;J)V");
     gObserveFirstActivity = env->GetStaticMethodID(local, "observeFirstActivity",
                                                    "(Landroid/app/Application;)V");
-    if (!gNativeStageStarted || !gNativeStageFinished || !gObserveFirstActivity) {
+    if (!gNativeStageFinished || !gObserveFirstActivity) {
         if (env->ExceptionCheck()) env->ExceptionClear();
         LOGE("Jiagu_Native: startup reporter methods unavailable; telemetry disabled");
-        gNativeStageStarted = nullptr;
         gNativeStageFinished = nullptr;
         gObserveFirstActivity = nullptr;
         env->DeleteLocalRef(local);
@@ -702,7 +686,6 @@ static void cache_startup_reporter(JNIEnv* env) {
     gStartupReporterClass = static_cast<jclass>(env->NewGlobalRef(local));
     env->DeleteLocalRef(local);
     if (!gStartupReporterClass) {
-        gNativeStageStarted = nullptr;
         gNativeStageFinished = nullptr;
         gObserveFirstActivity = nullptr;
         if (env->ExceptionCheck()) env->ExceptionClear();

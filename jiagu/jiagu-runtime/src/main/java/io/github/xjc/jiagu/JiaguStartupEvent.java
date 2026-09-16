@@ -1,5 +1,7 @@
 package io.github.xjc.jiagu;
 
+import androidx.annotation.NonNull;
+
 /** Immutable, non-sensitive startup telemetry event. */
 public final class JiaguStartupEvent {
     public enum Stage {
@@ -61,16 +63,6 @@ public final class JiaguStartupEvent {
                         "Unknown startup status ordinal: " + ordinal);
             }
         }
-    }
-
-    /**
-     * Compatibility names emitted by Runtime versions before the stage protocol.
-     * New consumers should use {@link #getStage()} and {@link #getStatus()}.
-     */
-    @Deprecated
-    public enum Type {
-        DECRYPT_STARTED,
-        STARTUP_COMPLETED
     }
 
     /** Where this startup obtained the authorization material used for decryption. */
@@ -156,20 +148,6 @@ public final class JiaguStartupEvent {
         return resultCode;
     }
 
-    /**
-     * Legacy view for existing uploaders. New stage events return {@code null}.
-     */
-    @Deprecated
-    public Type getType() {
-        if (stage == Stage.SHELL_ATTACH && status == Status.STARTED) {
-            return Type.DECRYPT_STARTED;
-        }
-        if (stage == Stage.REAL_APPLICATION_ON_CREATE && status == Status.SUCCEEDED) {
-            return Type.STARTUP_COMPLETED;
-        }
-        return null;
-    }
-
     public String getSessionId() {
         return sessionId;
     }
@@ -251,6 +229,7 @@ public final class JiaguStartupEvent {
         return activityResumedElapsedMs;
     }
 
+    @NonNull
     @Override
     public String toString() {
         return "stageId=" + getStageId()

@@ -141,7 +141,6 @@ public final class JiaguStartupReporter {
         synchronized (LOCK) {
             STAGE_STARTED_AT[stage.ordinal()] = SystemClock.elapsedRealtime();
         }
-        emit(stage, JiaguStartupEvent.Status.STARTED, null, 0L);
     }
 
     public static void stageSucceeded(JiaguStartupEvent.Stage stage, String resultCode,
@@ -160,15 +159,6 @@ public final class JiaguStartupReporter {
                                     long stageDurationMs) {
         emit(stage, JiaguStartupEvent.Status.BLOCKED, resultCode,
                 resolveStageDuration(stage, stageDurationMs));
-    }
-
-    /** JNI bridge; status uses {@link JiaguStartupEvent.Status#ordinal()}. */
-    public static void nativeStageStarted(int stageId) {
-        try {
-            stageStarted(JiaguStartupEvent.Stage.fromId(stageId));
-        } catch (Throwable error) {
-            Log.w(TAG, "Cannot report native stage start", error);
-        }
     }
 
     /** JNI bridge; status uses {@link JiaguStartupEvent.Status#ordinal()}. */

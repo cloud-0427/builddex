@@ -20,9 +20,9 @@
 
 ## 首期 11 个阶段
 
-每个阶段使用 `STARTED`、`SUCCEEDED`、`FAILED` 三种状态；不适用的阶段可使用
-`SKIPPED`，安全策略主动终止进程使用 `BLOCKED`。`stageDurationMs` 只在结束状态中
-填写。
+`SHELL_CORE_LOAD` 使用 `STARTED` 记录一次启动尝试；其余阶段只上报终态：
+`SUCCEEDED`、`FAILED`、`SKIPPED` 或安全策略终止时的 `BLOCKED`。Reporter 会在本地记录
+每个阶段的起点以计算 `stageDurationMs`，但不会将这些内部开始点分发给 uploader。
 
 | stageId | stage | 成功边界 | 终态 `resultCode` 示例 | 预期插点 |
 | --- | --- | --- | --- | --- |
@@ -67,7 +67,7 @@ authorization cache hit/miss）应作为第 5 阶段的属性或采样诊断事�
 sessionId                 // 每次进程启动生成；所有阶段共享
 stageId                   // 固定 1..11；用于排序、漏斗及服务端兼容
 stage                     // 上表中的阶段名
-status                    // STARTED / SUCCEEDED / FAILED / SKIPPED / BLOCKED
+status                    // SHELL_CORE_LOAD 使用 STARTED；其余阶段仅使用终态状态
 resultCode                // 终态必填：成功结果或稳定失败/拦截码
 occurredAtMillis          // 墙上时间，用于服务端排序
 elapsedSinceStartMs       // 相对 SHELL_CORE_LOAD 开始的单调时钟耗时
@@ -91,7 +91,7 @@ failureClass              // 可选的脱敏异常类别，不上传 message/sta
 `NETWORK_TIMEOUT`、`NETWORK_REJECTED`、`KEYSTORE_UNAVAILABLE` 等稳定错误码。
 
 服务端幂等键应使用：`packageName + versionCode + sessionId + stageId + status`。
-同一阶段允许一个 `STARTED` 和一个终态事件；重试上传不得产生新的业务事件。
+除 `SHELL_CORE_LOAD` 外，同一阶段只产生一个终态事件；重试上传不得产生新的业务事件。
 
 ## 生命周期与时间线
 

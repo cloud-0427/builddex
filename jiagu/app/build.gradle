@@ -126,7 +126,9 @@ base {
 
 dependencies {
     // StartupEventUploader runs from the protection shell, before business-layer
-    // classes are guaranteed to be available. Keep its TLS provider direct.
+    // classes are guaranteed to be available. Keep its HTTP/TLS stack direct.
+    // JiaguTask retains okhttp3/okio in the shell alongside the uploader.
+    implementation 'com.squareup.okhttp3:okhttp:5.4.0'
     implementation 'org.conscrypt:conscrypt-android:2.5.3'
 
     // jiagu-runtime 由加固插件自动注入：local 模式使用本地 project，
