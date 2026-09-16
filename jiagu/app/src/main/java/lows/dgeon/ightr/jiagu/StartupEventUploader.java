@@ -21,6 +21,7 @@ import javax.net.ssl.X509TrustManager;
 
 import io.github.xjc.jiagu.JiaguStartupEvent;
 import io.github.xjc.jiagu.JiaguStartupLogUploader;
+import io.github.xjc.jiagu.JiaguStartupUploadException;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -84,11 +85,20 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
             // reuse its HTTPS socket for the next startup stage. The former
             // HttpsURLConnection implementation never consumed either response stream.
             try (Response response = HttpClientHolder.INSTANCE.newCall(request).execute()) {
-                Log.d(TAG, "Startup event: status=" + response.code() + " " + event);
+                int status = response.code();
+                if (status >= 200 && status < 300) {
+                    Log.d(TAG, "Startup event: status=" + status + " " + event);
+                    return;
+                }
+                boolean retryable = status == 408 || status == 425 || status == 429 || status >= 500;
+                long retryAfterMillis = retryAfterMillis(response.header("Retry-After"));
+                throw new JiaguStartupUploadException("HTTP_" + status, retryable,
+                        retryAfterMillis, null);
             }
+        } catch (JiaguStartupUploadException error) {
+            throw error;
         } catch (Exception error) {
-            // Startup telemetry is best-effort and must never affect the shell.
-            Log.w(TAG, "Startup event failed: " + event, error);
+            throw new JiaguStartupUploadException("NETWORK_FAILURE", true, 0L, error);
         }
     }
 
@@ -139,7 +149,7 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
         device.put("checkCommonUse", "1");
         device.put("language", languageOrDefault(""));
         device.put("model", valueOrDefault(Build.MODEL, ""));
-        device.put("oaid", oaidOrDefault(context, event.getSessionId()));
+        device.put("oaid", oaidOrDefault(context, event.getStartupInstanceId()));
         device.put("system", systemOrDefault(""));
 
         JSONObject data = new JSONObject();
@@ -150,17 +160,18 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
         data.put("event", event.getStage().name()); // server
         data.put("eventId", "" + event.getStage().getId()); // server
         data.put("itemName", event.getStatus().name() + (isBlank(event.getResultCode()) ? "" : "_" + event.getResultCode())); // server
-        data.put("sessionId", event.getSessionId());
+//        data.put("sessionId", event.getSessionId());
+//        data.put("startupInstanceId", event.getStartupInstanceId());
         data.put("occurredAtMillis", event.getOccurredAtMillis());
         data.put("elapsedMs", event.getElapsedSinceStartMs());
         data.put("stageDurationMs", event.getStageDurationMs());
-        data.put("isFirstLaunch", event.isFirstLaunch());
-        data.put("isMainProcess", event.isMainProcess());
-        data.put("processName", event.getProcessName());
+//        data.put("isFirstLaunch", event.isFirstLaunch());
+//        data.put("isMainProcess", event.isMainProcess());
+//        data.put("processName", event.getProcessName());
         data.put("activityName", event.getActivityName());
         data.put("activityResumedElapsedMs", event.getActivityResumedElapsedMs());
-        data.put("authorizationSource", event.getAuthorizationSource().name());
-        data.put("networkAuthorizationRequired", event.getNetworkAuthorizationRequired());
+//        data.put("authorizationSource", event.getAuthorizationSource().name());
+//        data.put("networkAuthorizationRequired", event.getNetworkAuthorizationRequired());
 
         JSONObject userEvent = new JSONObject();
         userEvent.put("eventType", TAG);
@@ -218,6 +229,17 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
 
     private static boolean isBlank(String value) {
         return value == null || value.trim().isEmpty();
+    }
+
+    private static long retryAfterMillis(String value) {
+        if (isBlank(value)) {
+            return 0L;
+        }
+        try {
+            return Math.max(0L, Long.parseLong(value.trim())) * 1000L;
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
     }
 
     /**

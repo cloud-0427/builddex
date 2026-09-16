@@ -28,6 +28,7 @@
     }
 
 static jobject gRealApp = nullptr;
+static bool gNativeAttachSucceeded = false;
 static constexpr int STARTUP_STATUS_SUCCEEDED = 1;
 static constexpr int STARTUP_STATUS_FAILED = 2;
 static constexpr int STARTUP_STATUS_BLOCKED = 4;
@@ -67,7 +68,7 @@ static void observe_first_activity(JNIEnv* env, jobject application) {
 
 // --- 动态防护模块 ---
 
-static __attribute__((always_inline)) inline void die_if_debugged() {
+static __attribute__((always_inline)) inline bool debugger_detected() {
     // PTRACE_TRACEME must not be used here. A tracee cannot detach itself, so
     // combining TRACEME with the TracerPid check below makes the app detect
     // the tracing relationship that it just created and terminate itself.
@@ -85,18 +86,19 @@ static __attribute__((always_inline)) inline void die_if_debugged() {
                 if (tracer_pid != 0) {
                     LOGE("[Jiagu][AntiDebug] blocked: native tracer detected (TracerPid=%d)",
                          tracer_pid);
-                    _exit(0);
+                    return true;
                 }
             }
         }
     }
     LOGD("[Jiagu][AntiDebug] debugger check passed");
+    return false;
 }
 
-static __attribute__((always_inline)) inline void die_if_hooked() {
+static __attribute__((always_inline)) inline bool hook_detected() {
     // 使用 raw syscall 读取 maps
     int fd = raw_syscall_open(X("/proc/self/maps"), O_RDONLY, 0);
-    if (fd < 0) return;
+    if (fd < 0) return false;
 
     char buf[4096];
     ssize_t len;
@@ -112,11 +114,12 @@ static __attribute__((always_inline)) inline void die_if_hooked() {
         if (detected) {
             raw_syscall(SYS_close, fd);
             LOGE("[Jiagu][AntiDebug] blocked: hook framework mapping detected (%s)", detected);
-            _exit(0);
+            return true;
         }
     }
     raw_syscall(SYS_close, fd);
     LOGD("[Jiagu][AntiDebug] hook check passed");
+    return false;
 }
 
 static __attribute__((always_inline)) inline bool verify_signature(JNIEnv* env, jobject context, const std::string& expected_hash) {
@@ -335,7 +338,7 @@ static bool bind_real_application(JNIEnv* env, jobject proxy_app, jobject real_a
 
 // --- 核心逻辑：Native 代理实现 ---
 
-static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
+static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
     const int64_t startup_started_at = monotonic_ms();
     if (!prepare_legacy_keystore_context(env, thiz)) return;
     int64_t stage_started_at = monotonic_ms();
@@ -376,8 +379,16 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     LOGD("[Jiagu] Protection config: antiDebug=%s, signatureCheck=%s",
          anti_debug ? "enabled" : "disabled", sig_check ? "enabled" : "disabled");
     if (anti_debug) {
-        die_if_debugged();
-        die_if_hooked();
+        if (debugger_detected()) {
+            report_stage_finished(env, 4, STARTUP_STATUS_BLOCKED, "DEBUGGER_DETECTED",
+                                  monotonic_ms() - stage_started_at);
+            _exit(0);
+        }
+        if (hook_detected()) {
+            report_stage_finished(env, 4, STARTUP_STATUS_BLOCKED, "HOOK_FRAMEWORK_DETECTED",
+                                  monotonic_ms() - stage_started_at);
+            _exit(0);
+        }
     }
 
     if (sig_check && expected_sig_j) {
@@ -502,6 +513,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (!decrypted_payload_address || payload_capacity < 8 || payload_capacity > 128 * 1024 * 1024) {
         LOGE("Jiagu_Native: Invalid authorized payload buffer: %lld",
              static_cast<long long>(payload_capacity));
+        report_stage_finished(env, 8, STARTUP_STATUS_FAILED, "PAYLOAD_BUFFER_INVALID",
+                              monotonic_ms() - stage_started_at);
         return;
     }
     const char* full_buffer = static_cast<const char*>(decrypted_payload_address);
@@ -509,6 +522,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
 
     if (std::memcmp(full_buffer, "JG3\0", 4) != 0) {
         LOGE("Jiagu_Native: Invalid payload magic");
+        report_stage_finished(env, 8, STARTUP_STATUS_FAILED, "DEX_PAYLOAD_INVALID",
+                              monotonic_ms() - stage_started_at);
         return;
     }
 
@@ -517,6 +532,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     if (dex_count <= 0 || dex_count > 128 ||
             offset + static_cast<size_t>(dex_count) * 12 > full_buffer_size) {
         LOGE("Jiagu_Native: Invalid DEX count: %d", dex_count);
+        report_stage_finished(env, 8, STARTUP_STATUS_FAILED, "DEX_ENTRY_INVALID",
+                              monotonic_ms() - stage_started_at);
         return;
     }
     const unsigned char* meta_data_ptr = reinterpret_cast<const unsigned char*>(full_buffer);
@@ -557,6 +574,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
                 static_cast<size_t>(dex_size) > body_size - static_cast<size_t>(dex_offset)) {
             LOGE("Jiagu_Native: Invalid DEX entry %d (offset=%d, size=%d, plain=%d)",
                  i, dex_offset, dex_size, dex_plain_size);
+            report_stage_finished(env, 8, STARTUP_STATUS_FAILED, "DEX_ENTRY_INVALID",
+                                  monotonic_ms() - all_dex_started_at);
             return;
         }
 
@@ -575,6 +594,8 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
         if (inflate_result != Z_OK || inflated_size != static_cast<uLongf>(dex_plain_size)) {
             LOGE("Jiagu_Native: Failed to decompress DEX entry %d (zlib=%d, actual=%lu, expected=%d)",
                  i, inflate_result, static_cast<unsigned long>(inflated_size), dex_plain_size);
+            report_stage_finished(env, 8, STARTUP_STATUS_FAILED, "DEX_DECOMPRESS_FAILED",
+                                  monotonic_ms() - all_dex_started_at);
             return;
         }
         env->SetObjectArrayElement(bb_array, i, bb);
@@ -611,18 +632,55 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
     jclass real_app_class = env->FindClass(real_app_path.c_str());
     if (real_app_class) {
         jmethodID app_init = env->GetMethodID(real_app_class, "<init>", "()V");
-        JNI_CHECK_NULL(app_init, "RealApplication.<init> not found", );
+        if (!app_init) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_CREATE_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
         jobject real_app_obj = env->NewObject(real_app_class, app_init);
-        JNI_CHECK_NULL(real_app_obj, "RealApplication instance creation failed", );
+        if (!real_app_obj || env->ExceptionCheck()) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_CREATE_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
         gRealApp = env->NewGlobalRef(real_app_obj);
+        if (!gRealApp) {
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_CREATE_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
 
-        if (!bind_real_application(env, thiz, gRealApp)) return;
+        if (!bind_real_application(env, thiz, gRealApp)) {
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_BIND_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
 
         jclass application_cls = env->FindClass("android/app/Application");
-        JNI_CHECK_NULL(application_cls, "Application class not found", );
+        if (!application_cls) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_ATTACH_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
         jmethodID attach_mid = env->GetMethodID(application_cls, "attach", "(Landroid/content/Context;)V");
-        JNI_CHECK_NULL(attach_mid, "Application.attach method not found", );
+        if (!attach_mid) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_ATTACH_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
         env->CallVoidMethod(gRealApp, attach_mid, context);
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            report_stage_finished(env, 10, STARTUP_STATUS_FAILED,
+                                  "REAL_APPLICATION_ATTACH_FAILED",
+                                  monotonic_ms() - stage_started_at);
+            return;
+        }
     } else {
         report_stage_finished(env, 10, STARTUP_STATUS_FAILED, "REAL_APPLICATION_CREATE_FAILED",
                               monotonic_ms() - stage_started_at);
@@ -635,6 +693,13 @@ static void native_attach(JNIEnv *env, jobject thiz, jobject context) {
 
     env->ReleaseStringUTFChars(real_app_name_j, real_app_name);
     env->ReleaseStringUTFChars(pkg_name, pkg_name_str);
+    gNativeAttachSucceeded = true;
+}
+
+static jint native_attach(JNIEnv *env, jobject thiz, jobject context) {
+    gNativeAttachSucceeded = false;
+    native_attach_impl(env, thiz, context);
+    return gNativeAttachSucceeded ? 0 : 1;
 }
 
 static void native_on_create(JNIEnv *env, jobject thiz) {
@@ -660,7 +725,7 @@ static void native_on_create(JNIEnv *env, jobject thiz) {
 }
 
 static const JNINativeMethod gMethods[] = {
-    {"nativeAttach", "(Landroid/content/Context;)V", (void*)native_attach},
+    {"nativeAttach", "(Landroid/content/Context;)I", (void*)native_attach},
     {"nativeOnCreate", "()V", (void*)native_on_create}
 };
 

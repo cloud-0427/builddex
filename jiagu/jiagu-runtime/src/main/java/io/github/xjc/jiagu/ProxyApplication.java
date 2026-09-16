@@ -28,7 +28,7 @@ public class ProxyApplication extends Application {
                 (SystemClock.elapsedRealtime() - startedAt));
     }
 
-    public native void nativeAttach(Context context);
+    public native int nativeAttach(Context context);
     public native void nativeOnCreate();
 
     @Override
@@ -36,7 +36,12 @@ public class ProxyApplication extends Application {
         long startedAt = SystemClock.elapsedRealtime();
         super.attachBaseContext(base);
         JiaguStartupReporter.beginDecryption(base);
-        nativeAttach(base);
+        int nativeResult = nativeAttach(base);
+        if (nativeResult != 0) {
+            JiaguStartupReporter.stageFailed(JiaguStartupEvent.Stage.SHELL_ATTACH,
+                    "NATIVE_ATTACH_FAILED", SystemClock.elapsedRealtime() - startedAt);
+            throw new IllegalStateException("Jiagu native startup failed: " + nativeResult);
+        }
         JiaguStartupReporter.stageSucceeded(JiaguStartupEvent.Stage.SHELL_ATTACH,
                 "SHELL_ATTACH_COMPLETED", SystemClock.elapsedRealtime() - startedAt);
         Log.i(TAG, "[StartupTiming] complete proxy attachBaseContext totalMs=" +

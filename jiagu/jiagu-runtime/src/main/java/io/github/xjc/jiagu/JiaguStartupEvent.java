@@ -95,6 +95,7 @@ public final class JiaguStartupEvent {
     private final Status status;
     private final String resultCode;
     private final String sessionId;
+    private final String startupInstanceId;
     private final String packageName;
     private final String versionName;
     private final long versionCode;
@@ -109,7 +110,7 @@ public final class JiaguStartupEvent {
     private final long activityResumedElapsedMs;
 
     JiaguStartupEvent(Stage stage, Status status, String resultCode,
-                      String sessionId, String packageName,
+                      String sessionId, String startupInstanceId, String packageName,
                       String versionName, long versionCode,
                       long occurredAtMillis, long elapsedSinceStartMs, long stageDurationMs,
                       AuthorizationSource authorizationSource, String processName,
@@ -119,6 +120,7 @@ public final class JiaguStartupEvent {
         this.status = status;
         this.resultCode = resultCode;
         this.sessionId = sessionId;
+        this.startupInstanceId = startupInstanceId;
         this.packageName = packageName;
         this.versionName = versionName;
         this.versionCode = versionCode;
@@ -152,6 +154,11 @@ public final class JiaguStartupEvent {
 
     public String getSessionId() {
         return sessionId;
+    }
+
+    /** Stable random identifier for this app-data installation. */
+    public String getStartupInstanceId() {
+        return startupInstanceId;
     }
 
     public String getPackageName() {
@@ -239,6 +246,7 @@ public final class JiaguStartupEvent {
                 + " status=" + status
                 + " resultCode=" + resultCode
                 + " sessionId=" + sessionId
+                + " startupInstanceId=" + startupInstanceId
                 + " packageName=" + packageName
                 + " versionName=" + versionName
                 + " versionCode=" + versionCode

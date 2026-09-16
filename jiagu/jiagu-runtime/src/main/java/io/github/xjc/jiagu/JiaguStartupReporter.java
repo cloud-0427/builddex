@@ -8,400 +8,200 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewTreeObserver;
-
 import androidx.annotation.NonNull;
-
 import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
-/** Shell-side, best-effort startup stage telemetry. */
+/** Shell-side telemetry. Delivery is bounded, asynchronous, and in-memory only. */
 public final class JiaguStartupReporter {
-    public static final String UPLOADER_META_DATA =
-            "io.github.xjc.jiagu.STARTUP_LOG_UPLOADER";
-
-    private static final String TAG = "Jiagu_Startup";
-    private static final String STATE_PREFERENCES = "jiagu_startup_state_v1";
-    private static final String FIRST_MAIN_LAUNCH_ATTEMPTED = "first_main_launch_attempted";
-    private static final int MAX_HISTORY = 32;
+    public static final String UPLOADER_META_DATA = "io.github.xjc.jiagu.STARTUP_LOG_UPLOADER";
+    private static final String TAG = "Jiagu_Startup", PREFS = "jiagu_startup_state_v1",
+            FIRST_COMPLETED = "first_main_launch_completed_v2",
+            STARTUP_INSTANCE_ID = "startup_instance_id_v1";
+    private static final int MAX_QUEUE = 64, MAX_ATTEMPTS = 2;
+    private static final long FIRST_FRAME_TIMEOUT_MS = 10_000L;
     private static final Object LOCK = new Object();
-    private static final ArrayDeque<JiaguStartupEvent> HISTORY = new ArrayDeque<>();
-    private static final ArrayDeque<PendingEvent> PENDING = new ArrayDeque<>();
-    private static final long[] STAGE_STARTED_AT =
-            new long[JiaguStartupEvent.Stage.values().length];
-    private static final ExecutorService DISPATCHER = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "Jiagu-StartupLog");
-        thread.setDaemon(true);
-        return thread;
+    private static final ArrayDeque<Pending> EARLY = new ArrayDeque<>(), QUEUE = new ArrayDeque<>();
+    private static final boolean[] TERMINAL = new boolean[JiaguStartupEvent.Stage.values().length];
+    private static final long[] STARTED = new long[JiaguStartupEvent.Stage.values().length];
+    private static final ScheduledExecutorService WORKER = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "Jiagu-StartupLog"); t.setDaemon(true); return t;
     });
-    private static final JiaguStartupLogUploader DEFAULT_UPLOADER = (context, event) ->
-            Log.d(TAG, event.toString());
-
-    private static volatile JiaguStartupLogUploader uploader = DEFAULT_UPLOADER;
-    private static volatile boolean manualUploaderSet;
-    private static volatile boolean initialized;
-    private static volatile long startupStartedAt;
-    private static volatile String sessionId;
-    private static volatile String packageName;
-    private static volatile String versionName;
-    private static volatile long versionCode;
-    private static volatile Context applicationContext;
-    private static volatile String processName;
-    private static volatile boolean mainProcess;
-    private static volatile boolean firstLaunch;
-    private static volatile JiaguStartupEvent.AuthorizationSource authorizationSource =
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static final JiaguStartupLogUploader DEFAULT = (c, e) -> Log.d(TAG, e.toString());
+    private static volatile JiaguStartupLogUploader uploader = DEFAULT;
+    private static volatile boolean initialized, manualUploader, uploadsEnabled, drainScheduled;
+    private static volatile long startupAt, versionCode, firstActivityResumedMs = -1L;
+    private static volatile String sessionId, startupInstanceId, packageName, versionName, processName, firstActivityName;
+    private static volatile boolean mainProcess, firstLaunch, observerInstalled, firstActivityResumed;
+    private static volatile Context appContext;
+    private static volatile JiaguStartupEvent.AuthorizationSource authorization =
             JiaguStartupEvent.AuthorizationSource.UNKNOWN;
-    private static volatile boolean firstActivityObserverInstalled;
-    private static volatile boolean firstActivityResumed;
-    private static volatile boolean firstFrameReported;
-    private static volatile String firstActivityName;
-    private static volatile long firstActivityResumedElapsedMs = -1L;
+    private JiaguStartupReporter() { }
 
-    private JiaguStartupReporter() {
-    }
-
-    /** Records the one-shot startup attempt marker before System.loadLibrary("jiagu-core"). */
-    public static void startupAttemptStarted() {
-        synchronized (LOCK) {
-            if (startupStartedAt == 0L) {
-                startupStartedAt = SystemClock.elapsedRealtime();
-            }
-        }
-        emit(JiaguStartupEvent.Stage.STARTUP_ATTEMPT, JiaguStartupEvent.Status.STARTED,
-                null, 0L);
-    }
-
-    public static void shellCoreLoadSucceeded(long durationMs) {
-        emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.SUCCEEDED,
-                "CORE_LIBRARY_LOADED", durationMs);
-    }
-
-    public static void shellCoreLoadFailed(Throwable error, long durationMs) {
-        emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.FAILED,
-                "CORE_LIBRARY_LOAD_FAILED", durationMs);
-        Log.e(TAG, "Cannot load jiagu-core", error);
-    }
-
-    /** Initializes metadata and loads the uploader declared in the merged manifest. */
+    public static void startupAttemptStarted() { ensureStart(); emit(JiaguStartupEvent.Stage.STARTUP_ATTEMPT, JiaguStartupEvent.Status.STARTED, null, 0); }
+    public static void shellCoreLoadSucceeded(long ms) { emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.SUCCEEDED, "CORE_LIBRARY_LOADED", ms); }
+    public static void shellCoreLoadFailed(Throwable e, long ms) { emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.FAILED, "CORE_LIBRARY_LOAD_FAILED", ms); Log.e(TAG, "Cannot load jiagu-core", e); }
     public static void initialize(Context context) {
-        List<JiaguStartupEvent> replay;
-        JiaguStartupLogUploader target;
         synchronized (LOCK) {
-            if (initialized) {
-                return;
-            }
-            Context appContext = context.getApplicationContext() == null
-                    ? context : context.getApplicationContext();
-            applicationContext = appContext;
-            packageName = appContext.getPackageName();
-            sessionId = UUID.randomUUID().toString();
-            if (startupStartedAt == 0L) {
-                startupStartedAt = SystemClock.elapsedRealtime();
-            }
-            readProcessState(appContext);
-            firstLaunch = claimFirstMainLaunch(appContext);
-            readVersion(appContext);
-            JiaguStartupLogUploader configured = loadConfiguredUploader(appContext);
-            if (configured != null && !manualUploaderSet) {
-                uploader = configured;
-            }
+            if (initialized) return;
+            appContext = context.getApplicationContext() == null ? context : context.getApplicationContext();
+            packageName = appContext.getPackageName(); sessionId = UUID.randomUUID().toString(); ensureStart();
+            processName = Application.getProcessName();
+            mainProcess = appContext.getApplicationInfo().processName.equals(processName);
+            startupInstanceId = readOrCreateStartupInstanceId(appContext);
+            firstLaunch = isFirstLaunch(appContext); readVersion(appContext);
+            JiaguStartupLogUploader configured = loadUploader(appContext);
+            if (configured != null && !manualUploader) uploader = configured;
             initialized = true;
-            while (!PENDING.isEmpty()) {
-                addToHistory(createEvent(PENDING.removeFirst()));
+            while (!EARLY.isEmpty()) {
+                JiaguStartupEvent early = event(EARLY.removeFirst());
+                if (mainProcess && firstLaunch) enqueueLocked(early, 0);
             }
-            replay = new ArrayList<>(HISTORY);
-            target = uploader;
-        }
-        for (JiaguStartupEvent event : replay) {
-            dispatch(target, event);
         }
     }
-
-    /** Compatibility entry point for the former DECRYPT_STARTED event. */
-    public static void beginDecryption(Context context) {
-        initialize(context);
-        stageStarted(JiaguStartupEvent.Stage.SHELL_ATTACH);
+    public static void beginDecryption(Context c) { initialize(c); stageStarted(JiaguStartupEvent.Stage.SHELL_ATTACH); }
+    public static void startupCompleted(Context c) { initialize(c); stageSucceeded(JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE, "REAL_APPLICATION_ON_CREATE_COMPLETED", 0); }
+    public static void stageStarted(JiaguStartupEvent.Stage s) { synchronized (LOCK) { STARTED[s.ordinal()] = SystemClock.elapsedRealtime(); } }
+    public static void stageSucceeded(JiaguStartupEvent.Stage s, String c, long d) { emit(s, JiaguStartupEvent.Status.SUCCEEDED, c, duration(s, d)); }
+    public static void stageFailed(JiaguStartupEvent.Stage s, String c, long d) { emit(s, JiaguStartupEvent.Status.FAILED, c, duration(s, d)); }
+    public static void stageBlocked(JiaguStartupEvent.Stage s, String c, long d) { emit(s, JiaguStartupEvent.Status.BLOCKED, c, duration(s, d)); }
+    public static void nativeStageFinished(int id, int status, String c, long d) {
+        try { emit(JiaguStartupEvent.Stage.fromId(id), JiaguStartupEvent.Status.fromOrdinal(status), c, d); }
+        catch (Throwable e) { Log.w(TAG, "Cannot report native stage", e); }
     }
-
-    /** Compatibility entry point for the former STARTUP_COMPLETED event. */
-    public static void startupCompleted(Context context) {
-        initialize(context);
-        stageSucceeded(JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE,
-                "REAL_APPLICATION_ON_CREATE_COMPLETED", 0L);
-    }
-
-    public static void stageStarted(JiaguStartupEvent.Stage stage) {
-        synchronized (LOCK) {
-            STAGE_STARTED_AT[stage.ordinal()] = SystemClock.elapsedRealtime();
-        }
-    }
-
-    public static void stageSucceeded(JiaguStartupEvent.Stage stage, String resultCode,
-                                      long stageDurationMs) {
-        emit(stage, JiaguStartupEvent.Status.SUCCEEDED, resultCode,
-                resolveStageDuration(stage, stageDurationMs));
-    }
-
-    public static void stageFailed(JiaguStartupEvent.Stage stage, String resultCode,
-                                   long stageDurationMs) {
-        emit(stage, JiaguStartupEvent.Status.FAILED, resultCode,
-                resolveStageDuration(stage, stageDurationMs));
-    }
-
-    public static void stageBlocked(JiaguStartupEvent.Stage stage, String resultCode,
-                                    long stageDurationMs) {
-        emit(stage, JiaguStartupEvent.Status.BLOCKED, resultCode,
-                resolveStageDuration(stage, stageDurationMs));
-    }
-
-    /** JNI bridge; status uses {@link JiaguStartupEvent.Status#ordinal()}. */
-    public static void nativeStageFinished(int stageId, int statusOrdinal,
-                                           String resultCode, long stageDurationMs) {
-        try {
-            emit(JiaguStartupEvent.Stage.fromId(stageId),
-                    JiaguStartupEvent.Status.fromOrdinal(statusOrdinal),
-                    resultCode, stageDurationMs);
-        } catch (Throwable error) {
-            Log.w(TAG, "Cannot report native stage result", error);
-        }
-    }
-
-    /** Records the successful authorization path selected by the shell. */
     static void setAuthorizationSource(JiaguStartupEvent.AuthorizationSource source) {
-        authorizationSource = source == null
-                ? JiaguStartupEvent.AuthorizationSource.UNKNOWN : source;
+        authorization = source == null ? JiaguStartupEvent.AuthorizationSource.UNKNOWN : source;
     }
-
-    /**
-     * Called after the real Application is attached. It tracks the first Activity resumed
-     * and the first frame of that Activity without touching business classes.
-     */
-    public static void observeFirstActivity(Application application) {
-        if (application == null || firstActivityObserverInstalled) {
-            return;
-        }
-        synchronized (LOCK) {
-            if (firstActivityObserverInstalled) {
-                return;
-            }
-            firstActivityObserverInstalled = true;
-        }
-        application.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
-            @Override public void onActivityCreated(@NonNull Activity activity, Bundle state) { }
-            @Override public void onActivityStarted(@NonNull Activity activity) { }
-            @Override public void onActivityPaused(@NonNull Activity activity) { }
-            @Override public void onActivityStopped(@NonNull Activity activity) { }
-            @Override public void onActivitySaveInstanceState(@NonNull Activity activity, @NonNull Bundle state) { }
-            @Override public void onActivityDestroyed(@NonNull Activity activity) { }
-
-            @Override public void onActivityResumed(@NonNull Activity activity) {
-                if (!claimFirstActivityResumed()) {
-                    return;
-                }
-                firstActivityName = activity.getClass().getName();
-                firstActivityResumedElapsedMs = elapsedSinceStart();
-                stageStarted(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME);
-                reportFirstFrame(activity);
-            }
-        });
+    public static void setUploader(JiaguStartupLogUploader replacement) {
+        synchronized (LOCK) { uploader = replacement == null ? DEFAULT : replacement; manualUploader = replacement != null; }
+        scheduleDrain(0);
     }
-
-    private static boolean claimFirstActivityResumed() {
-        synchronized (LOCK) {
-            if (firstActivityResumed) {
-                return false;
-            }
-            firstActivityResumed = true;
-            return true;
-        }
-    }
-
-    private static void reportFirstFrame(Activity activity) {
-        try {
-            View decorView = activity.getWindow().getDecorView();
-            ViewTreeObserver observer = decorView.getViewTreeObserver();
-            observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
-                @Override public boolean onPreDraw() {
-                    ViewTreeObserver current = decorView.getViewTreeObserver();
-                    if (current.isAlive()) {
-                        current.removeOnPreDrawListener(this);
-                    }
-                    synchronized (LOCK) {
-                        if (firstFrameReported) {
+    public static void observeFirstActivity(Application app) {
+        synchronized (LOCK) { if (app == null || observerInstalled) return; observerInstalled = true; }
+        app.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+            @Override public void onActivityCreated(@NonNull Activity a, Bundle s) { }
+            @Override public void onActivityStarted(@NonNull Activity a) { }
+            @Override public void onActivityPaused(@NonNull Activity a) { }
+            @Override public void onActivityStopped(@NonNull Activity a) { }
+            @Override public void onActivitySaveInstanceState(@NonNull Activity a, @NonNull Bundle s) { }
+            @Override public void onActivityDestroyed(@NonNull Activity a) { }
+            @Override public void onActivityResumed(@NonNull Activity a) {
+                synchronized (LOCK) { if (firstActivityResumed) return; firstActivityResumed = true; }
+                firstActivityName = Integer.toHexString(a.getClass().getName().hashCode());
+                firstActivityResumedMs = elapsed(); stageStarted(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME);
+                Runnable timeout = () -> stageFailed(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, "FIRST_FRAME_TIMEOUT", 0);
+                MAIN.postDelayed(timeout, FIRST_FRAME_TIMEOUT_MS);
+                try {
+                    View decor = a.getWindow().getDecorView();
+                    decor.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+                        @Override public boolean onPreDraw() {
+                            ViewTreeObserver o = decor.getViewTreeObserver(); if (o.isAlive()) o.removeOnPreDrawListener(this);
+                            MAIN.removeCallbacks(timeout);
+                            stageSucceeded(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, "FIRST_FRAME_DRAWN", 0);
                             return true;
                         }
-                        firstFrameReported = true;
-                    }
-                    stageSucceeded(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME,
-                            "FIRST_FRAME_DRAWN", 0L);
-                    return true;
+                    });
+                } catch (Throwable e) {
+                    MAIN.removeCallbacks(timeout);
+                    stageFailed(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, "FIRST_FRAME_OBSERVER_FAILED", 0);
                 }
-            });
-        } catch (Throwable error) {
-            stageFailed(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME,
-                    "FIRST_FRAME_OBSERVER_FAILED", 0L);
-            Log.w(TAG, "Cannot install first-frame observer", error);
-        }
-    }
-
-    /** Installs or replaces the uploader and replays in-memory events to a replacement. */
-    public static void setUploader(JiaguStartupLogUploader replacement) {
-        List<JiaguStartupEvent> replay;
-        synchronized (LOCK) {
-            uploader = replacement == null ? DEFAULT_UPLOADER : replacement;
-            manualUploaderSet = replacement != null;
-            replay = replacement == null ? new ArrayList<>() : new ArrayList<>(HISTORY);
-        }
-        for (JiaguStartupEvent event : replay) {
-            dispatch(replacement, event);
-        }
-    }
-
-    private static void emit(JiaguStartupEvent.Stage stage, JiaguStartupEvent.Status status,
-                             String resultCode, long stageDurationMs) {
-        PendingEvent pending = new PendingEvent(stage, status, resultCode,
-                System.currentTimeMillis(), Math.max(0L, stageDurationMs));
-        JiaguStartupEvent event;
-        JiaguStartupLogUploader target;
-        synchronized (LOCK) {
-            if (!initialized) {
-                PENDING.addLast(pending);
-                return;
-            }
-            event = createEvent(pending);
-            addToHistory(event);
-            target = uploader;
-        }
-        dispatch(target, event);
-    }
-
-    private static long resolveStageDuration(JiaguStartupEvent.Stage stage, long suppliedDurationMs) {
-        if (suppliedDurationMs > 0L) {
-            return suppliedDurationMs;
-        }
-        synchronized (LOCK) {
-            long startedAt = STAGE_STARTED_AT[stage.ordinal()];
-            return startedAt == 0L ? 0L : Math.max(0L, SystemClock.elapsedRealtime() - startedAt);
-        }
-    }
-
-    private static JiaguStartupEvent createEvent(PendingEvent pending) {
-        long elapsed = elapsedSinceStart();
-        return new JiaguStartupEvent(pending.stage, pending.status, pending.resultCode,
-                sessionId, packageName, versionName, versionCode, pending.occurredAtMillis,
-                elapsed, pending.stageDurationMs, authorizationSource, processName,
-                mainProcess, firstLaunch, firstActivityName, firstActivityResumedElapsedMs);
-    }
-
-    private static long elapsedSinceStart() {
-        return startupStartedAt == 0L ? 0L :
-                Math.max(0L, SystemClock.elapsedRealtime() - startupStartedAt);
-    }
-
-    private static void addToHistory(JiaguStartupEvent event) {
-        while (HISTORY.size() >= MAX_HISTORY) {
-            HISTORY.removeFirst();
-        }
-        HISTORY.addLast(event);
-    }
-
-    private static void dispatch(JiaguStartupLogUploader target, JiaguStartupEvent event) {
-        if (target == null || applicationContext == null) {
-            return;
-        }
-        DISPATCHER.execute(() -> {
-            try {
-                target.upload(applicationContext, event);
-            } catch (Throwable error) {
-                Log.e(TAG, "Startup log uploader failed", error);
             }
         });
     }
-
-    private static JiaguStartupLogUploader loadConfiguredUploader(Context context) {
+    private static void emit(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status status, String code, long duration) {
+        Pending p = new Pending(s, status, code, System.currentTimeMillis(), elapsed(), Math.max(0, duration));
+        synchronized (LOCK) {
+            if (s != JiaguStartupEvent.Stage.STARTUP_ATTEMPT && status != JiaguStartupEvent.Status.STARTED) {
+                if (TERMINAL[s.ordinal()]) { Log.w(TAG, "Ignoring duplicate terminal stage: " + s); return; }
+                TERMINAL[s.ordinal()] = true;
+            }
+            if (!initialized) { EARLY.addLast(p); return; }
+            if (mainProcess && firstLaunch) enqueueLocked(event(p), 0);
+            if ((s == JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE && status == JiaguStartupEvent.Status.SUCCEEDED)
+                    || s == JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME) {
+                uploadsEnabled = true; scheduleDrain(0);
+                if (s == JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE) scheduleDrain(2_000);
+            }
+            if (s == JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME
+                    && status == JiaguStartupEvent.Status.SUCCEEDED) markFirstLaunchCompleted(appContext);
+        }
+    }
+    private static void enqueueLocked(JiaguStartupEvent e, int attempts) {
+        if (QUEUE.size() >= MAX_QUEUE) {
+            Pending drop = null;
+            for (Pending q : QUEUE) if (q.event.getStatus() == JiaguStartupEvent.Status.SUCCEEDED) { drop = q; break; }
+            if (drop != null) QUEUE.remove(drop);
+            else if (e.getStatus() == JiaguStartupEvent.Status.SUCCEEDED) return;
+            else QUEUE.removeFirst();
+        }
+        QUEUE.addLast(new Pending(e, attempts));
+    }
+    private static void scheduleDrain(long delay) {
+        synchronized (LOCK) { if (!uploadsEnabled || drainScheduled || QUEUE.isEmpty()) return; drainScheduled = true; }
+        WORKER.schedule(JiaguStartupReporter::drain, delay, TimeUnit.MILLISECONDS);
+    }
+    private static void drain() {
+        Pending p; JiaguStartupLogUploader target;
+        synchronized (LOCK) { drainScheduled = false; if (!uploadsEnabled || QUEUE.isEmpty()) return; p = QUEUE.removeFirst(); target = uploader; }
+        long retry = 0;
+        try { target.upload(appContext, p.event); }
+        catch (JiaguStartupUploadException e) {
+            if (e.isRetryable() && p.attempts + 1 < MAX_ATTEMPTS) retry = Math.max(e.getRetryAfterMillis(), backoff(p.attempts));
+            else Log.w(TAG, "Dropping startup upload: " + e.getMessage());
+        } catch (Throwable e) {
+            if (p.attempts + 1 < MAX_ATTEMPTS) retry = backoff(p.attempts); else Log.w(TAG, "Dropping startup upload", e);
+        }
+        if (retry > 0) synchronized (LOCK) { enqueueLocked(p.event, p.attempts + 1); }
+        scheduleDrain(retry);
+        if (retry == 0) scheduleDrain(0);
+    }
+    private static long backoff(int n) { return n == 0 ? 1_000 : n == 1 ? 3_000 : 8_000; }
+    private static long duration(JiaguStartupEvent.Stage s, long d) { if (d > 0) return d; synchronized (LOCK) { return STARTED[s.ordinal()] == 0 ? 0 : Math.max(0, SystemClock.elapsedRealtime() - STARTED[s.ordinal()]); } }
+    private static JiaguStartupEvent event(Pending p) { return new JiaguStartupEvent(p.stage, p.status, p.code, sessionId, startupInstanceId, packageName, versionName, versionCode, p.occurred, p.elapsed, p.duration, authorization, processName, mainProcess, firstLaunch, firstActivityName, firstActivityResumedMs); }
+    private static void ensureStart() { synchronized (LOCK) { if (startupAt == 0) startupAt = SystemClock.elapsedRealtime(); } }
+    private static long elapsed() { return startupAt == 0 ? 0 : Math.max(0, SystemClock.elapsedRealtime() - startupAt); }
+    private static JiaguStartupLogUploader loadUploader(Context c) {
         try {
-            ApplicationInfo info = context.getPackageManager().getApplicationInfo(
-                    context.getPackageName(), PackageManager.GET_META_DATA);
-            Bundle metadata = info.metaData;
-            if (metadata == null) {
-                return null;
-            }
-            String className = metadata.getString(UPLOADER_META_DATA);
-            if (className == null || className.trim().isEmpty()) {
-                return null;
-            }
-            Class<?> type = Class.forName(className.trim(), true,
-                    JiaguStartupReporter.class.getClassLoader());
-            Object instance = type.getDeclaredConstructor().newInstance();
-            if (!(instance instanceof JiaguStartupLogUploader)) {
-                throw new IllegalArgumentException(className
-                        + " does not implement JiaguStartupLogUploader");
-            }
-            return (JiaguStartupLogUploader) instance;
-        } catch (Throwable error) {
-            Log.e(TAG, "Cannot initialize configured startup log uploader", error);
-            return null;
+            ApplicationInfo info = c.getPackageManager().getApplicationInfo(c.getPackageName(), PackageManager.GET_META_DATA);
+            String n = info.metaData == null ? null : info.metaData.getString(UPLOADER_META_DATA);
+            if (n == null || n.trim().isEmpty()) return null;
+            Object o = Class.forName(n.trim(), true, JiaguStartupReporter.class.getClassLoader()).getDeclaredConstructor().newInstance();
+            if (!(o instanceof JiaguStartupLogUploader)) throw new IllegalArgumentException("Invalid uploader");
+            return (JiaguStartupLogUploader) o;
+        } catch (Throwable e) { Log.e(TAG, "Cannot initialize uploader", e); return null; }
+    }
+    private static void readVersion(Context c) { try { PackageInfo i = c.getPackageManager().getPackageInfo(c.getPackageName(), 0); versionName = i.versionName; versionCode = i.getLongVersionCode(); } catch (Throwable e) { Log.w(TAG, "Cannot read package version", e); } }
+    private static boolean isFirstLaunch(Context c) {
+        return mainProcess && !c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean(FIRST_COMPLETED, false);
+    }
+    private static String readOrCreateStartupInstanceId(Context c) {
+        SharedPreferences p = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String value = p.getString(STARTUP_INSTANCE_ID, null);
+        if (value != null && !value.trim().isEmpty()) return value;
+        String generated = UUID.randomUUID().toString();
+        p.edit().putString(STARTUP_INSTANCE_ID, generated).commit();
+        return generated;
+    }
+    private static void markFirstLaunchCompleted(Context c) {
+        if (mainProcess && firstLaunch && c != null && !c.getSharedPreferences(PREFS,
+                Context.MODE_PRIVATE).edit().putBoolean(FIRST_COMPLETED, true).commit()) {
+            Log.w(TAG, "Cannot persist first-launch completion");
         }
     }
-
-    private static void readVersion(Context context) {
-        try {
-            PackageInfo info = context.getPackageManager().getPackageInfo(
-                    context.getPackageName(), 0);
-            versionName = info.versionName;
-            versionCode = info.getLongVersionCode();
-        } catch (Throwable error) {
-            versionName = null;
-            versionCode = 0L;
-            Log.w(TAG, "Cannot read package version for startup log", error);
-        }
-    }
-
-    private static void readProcessState(Context context) {
-        processName = Application.getProcessName();
-        String mainProcessName = context.getApplicationInfo().processName;
-        mainProcess = mainProcessName != null && mainProcessName.equals(processName);
-    }
-
-    private static boolean claimFirstMainLaunch(Context context) {
-        if (!mainProcess) {
-            return false;
-        }
-        SharedPreferences preferences = context.getSharedPreferences(
-                STATE_PREFERENCES, Context.MODE_PRIVATE);
-        if (preferences.getBoolean(FIRST_MAIN_LAUNCH_ATTEMPTED, false)) {
-            return false;
-        }
-        boolean committed = preferences.edit()
-                .putBoolean(FIRST_MAIN_LAUNCH_ATTEMPTED, true)
-                .commit();
-        if (!committed) {
-            Log.w(TAG, "Cannot persist first-launch startup marker");
-        }
-        return committed;
-    }
-
-    private static final class PendingEvent {
-        final JiaguStartupEvent.Stage stage;
-        final JiaguStartupEvent.Status status;
-        final String resultCode;
-        final long occurredAtMillis;
-        final long stageDurationMs;
-
-        PendingEvent(JiaguStartupEvent.Stage stage, JiaguStartupEvent.Status status,
-                     String resultCode, long occurredAtMillis, long stageDurationMs) {
-            this.stage = stage;
-            this.status = status;
-            this.resultCode = resultCode;
-            this.occurredAtMillis = occurredAtMillis;
-            this.stageDurationMs = stageDurationMs;
-        }
+    private static final class Pending {
+        final JiaguStartupEvent event; final JiaguStartupEvent.Stage stage; final JiaguStartupEvent.Status status; final String code; final long occurred, elapsed, duration; final int attempts;
+        Pending(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status t, String c, long o, long e, long d) { event=null;stage=s;status=t;code=c;occurred=o;elapsed=e;duration=d;attempts=0; }
+        Pending(JiaguStartupEvent e, int a) { event=e;stage=null;status=null;code=null;occurred=elapsed=duration=0;attempts=a; }
     }
 }
