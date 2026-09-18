@@ -156,6 +156,11 @@ public final class JiaguStartupEvent {
         return sessionId;
     }
 
+    /** Stable across retries and process restarts; distinct from the legacy stage ID. */
+    public String getTelemetryEventId() {
+        return sessionId + ":" + getStageId() + ":" + status.name();
+    }
+
     /** Stable random identifier for this app-data installation. */
     public String getStartupInstanceId() {
         return startupInstanceId;

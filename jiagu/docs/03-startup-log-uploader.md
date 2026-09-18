@@ -1,5 +1,8 @@
 # 启动阶段事件上报设计
 
+> 后续可靠性改造见 [05-startup-telemetry-reliability.md](05-startup-telemetry-reliability.md)。
+> 本文保留阶段协议和历史非持久化方案；持久化、投递时机、补传、首帧超时及统计口径的目标设计以 05 为准。
+
 本文定义加固后 APK 的启动阶段事件模型。目标是以一次进程启动为一个
 `sessionId`，从壳加载、授权解密、业务 DEX 装载，一直观测到首个 Activity 的
 首帧绘制。

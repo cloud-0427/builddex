@@ -12,7 +12,7 @@ public class ProxyApplication extends Application {
 
     private static final String TAG = "Jiagu_Proxy";
 
-    static {
+    private void loadCore() {
         long startedAt = SystemClock.elapsedRealtime();
         JiaguStartupReporter.startupAttemptStarted();
         try {
@@ -35,6 +35,8 @@ public class ProxyApplication extends Application {
     protected void attachBaseContext(Context base) {
         long startedAt = SystemClock.elapsedRealtime();
         super.attachBaseContext(base);
+        JiaguStartupReporter.initialize(base);
+        loadCore();
         JiaguStartupReporter.beginDecryption(base);
         int nativeResult = nativeAttach(base);
         if (nativeResult != 0) {

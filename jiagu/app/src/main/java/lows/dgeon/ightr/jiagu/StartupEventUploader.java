@@ -79,6 +79,7 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
             Request request = new Request.Builder()
                     .url(EVENT_ENDPOINT)
                     .header("Accept", "application/json")
+                    .header("Idempotency-Key", event.getTelemetryEventId())
                     .post(RequestBody.create(body, JSON_MEDIA_TYPE))
                     .build();
             // Response.close() is essential: it releases the body and allows OkHttp to
@@ -90,7 +91,8 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
                     Log.d(TAG, "Startup event: status=" + status + " " + event);
                     return;
                 }
-                boolean retryable = status == 408 || status == 425 || status == 429 || status >= 500;
+                boolean retryable = status == 401 || status == 403 || status == 404
+                        || status == 408 || status == 425 || status == 429 || status >= 500;
                 long retryAfterMillis = retryAfterMillis(response.header("Retry-After"));
                 throw new JiaguStartupUploadException("HTTP_" + status, retryable,
                         retryAfterMillis, null);
@@ -160,8 +162,11 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
         data.put("event", event.getStage().name()); // server
         data.put("eventId", "" + event.getStage().getId()); // server
         data.put("itemName", event.getStatus().name() + (isBlank(event.getResultCode()) ? "" : "_" + event.getResultCode())); // server
-//        data.put("sessionId", event.getSessionId());
-//        data.put("startupInstanceId", event.getStartupInstanceId());
+        data.put("sessionId", event.getSessionId());
+        data.put("startupInstanceId", event.getStartupInstanceId());
+        data.put("telemetryEventId", event.getTelemetryEventId());
+        data.put("schemaVersion", 1);
+        data.put("versionCode", event.getVersionCode());
         data.put("occurredAtMillis", event.getOccurredAtMillis());
         data.put("elapsedMs", event.getElapsedSinceStartMs());
         data.put("stageDurationMs", event.getStageDurationMs());

@@ -20,17 +20,17 @@ import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledFuture;
 
-/** Shell-side telemetry. Delivery is bounded, asynchronous, and in-memory only. */
+/** Shell-side telemetry. Events are committed before asynchronous delivery and replayed on restart. */
 public final class JiaguStartupReporter {
     public static final String UPLOADER_META_DATA = "io.github.xjc.jiagu.STARTUP_LOG_UPLOADER";
     private static final String TAG = "Jiagu_Startup", PREFS = "jiagu_startup_state_v1",
             FIRST_COMPLETED = "first_main_launch_completed_v2",
             STARTUP_INSTANCE_ID = "startup_instance_id_v1";
-    private static final int MAX_QUEUE = 64, MAX_ATTEMPTS = 2;
     private static final long FIRST_FRAME_TIMEOUT_MS = 10_000L;
     private static final Object LOCK = new Object();
-    private static final ArrayDeque<Pending> EARLY = new ArrayDeque<>(), QUEUE = new ArrayDeque<>();
+    private static final ArrayDeque<Pending> EARLY = new ArrayDeque<>();
     private static final boolean[] TERMINAL = new boolean[JiaguStartupEvent.Stage.values().length];
     private static final long[] STARTED = new long[JiaguStartupEvent.Stage.values().length];
     private static final ScheduledExecutorService WORKER = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -39,7 +39,11 @@ public final class JiaguStartupReporter {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final JiaguStartupLogUploader DEFAULT = (c, e) -> Log.d(TAG, e.toString());
     private static volatile JiaguStartupLogUploader uploader = DEFAULT;
-    private static volatile boolean initialized, manualUploader, uploadsEnabled, drainScheduled;
+    private static volatile boolean initialized, manualUploader;
+    private static StartupEventStore store;
+    private static final StartupAcknowledgement ACKNOWLEDGEMENT = new StartupAcknowledgement();
+    private static ScheduledFuture<?> drainTask;
+    private static long drainAt = Long.MAX_VALUE;
     private static volatile long startupAt, versionCode, firstActivityResumedMs = -1L;
     private static volatile String sessionId, startupInstanceId, packageName, versionName, processName, firstActivityName;
     private static volatile boolean mainProcess, firstLaunch, observerInstalled, firstActivityResumed;
@@ -59,7 +63,16 @@ public final class JiaguStartupReporter {
             processName = Application.getProcessName();
             mainProcess = appContext.getApplicationInfo().processName.equals(processName);
             startupInstanceId = readOrCreateStartupInstanceId(appContext);
-            firstLaunch = isFirstLaunch(appContext); readVersion(appContext);
+            if (mainProcess) {
+                try { store = new StartupEventStore(appContext); }
+                catch (Throwable e) { Log.e(TAG, "Cannot open startup outbox", e); }
+            }
+            firstLaunch = isFirstLaunch(appContext);
+            if (store != null) {
+                try { firstLaunch = firstLaunch && !store.completed(); }
+                catch (Throwable e) { Log.e(TAG, "Cannot read startup completion", e); }
+            }
+            readVersion(appContext);
             JiaguStartupLogUploader configured = loadUploader(appContext);
             if (configured != null && !manualUploader) uploader = configured;
             initialized = true;
@@ -68,6 +81,7 @@ public final class JiaguStartupReporter {
                 if (mainProcess && firstLaunch) enqueueLocked(early, 0);
             }
         }
+        scheduleDrain(0);
     }
     public static void beginDecryption(Context c) { initialize(c); stageStarted(JiaguStartupEvent.Stage.SHELL_ATTACH); }
     public static void startupCompleted(Context c) { initialize(c); stageSucceeded(JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE, "REAL_APPLICATION_ON_CREATE_COMPLETED", 0); }
@@ -127,45 +141,81 @@ public final class JiaguStartupReporter {
             }
             if (!initialized) { EARLY.addLast(p); return; }
             if (mainProcess && firstLaunch) enqueueLocked(event(p), 0);
-            if ((s == JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE && status == JiaguStartupEvent.Status.SUCCEEDED)
-                    || s == JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME) {
-                uploadsEnabled = true; scheduleDrain(0);
-                if (s == JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE) scheduleDrain(2_000);
-            }
-            if (s == JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME
-                    && status == JiaguStartupEvent.Status.SUCCEEDED) markFirstLaunchCompleted(appContext);
+            scheduleDrain(0);
         }
     }
     private static void enqueueLocked(JiaguStartupEvent e, int attempts) {
-        if (QUEUE.size() >= MAX_QUEUE) {
-            Pending drop = null;
-            for (Pending q : QUEUE) if (q.event.getStatus() == JiaguStartupEvent.Status.SUCCEEDED) { drop = q; break; }
-            if (drop != null) QUEUE.remove(drop);
-            else if (e.getStatus() == JiaguStartupEvent.Status.SUCCEEDED) return;
-            else QUEUE.removeFirst();
+        try {
+            if (store == null) throw new IllegalStateException("Startup outbox unavailable");
+            store.append(e);
+        } catch (Throwable error) {
+            // Never acknowledge or mark first launch completed when persistence failed.
+            Log.e(TAG, "Cannot persist startup event " + e.getTelemetryEventId(), error);
         }
-        QUEUE.addLast(new Pending(e, attempts));
+        if (uploader == DEFAULT) Log.d(TAG, e.toString());
     }
     private static void scheduleDrain(long delay) {
-        synchronized (LOCK) { if (!uploadsEnabled || drainScheduled || QUEUE.isEmpty()) return; drainScheduled = true; }
-        WORKER.schedule(JiaguStartupReporter::drain, delay, TimeUnit.MILLISECONDS);
+        synchronized (LOCK) {
+            if (!initialized || !mainProcess || store == null || uploader == DEFAULT) return;
+            long at = SystemClock.elapsedRealtime() + Math.max(0, delay);
+            if (drainTask != null && drainAt <= at) return;
+            if (drainTask != null) drainTask.cancel(false);
+            drainAt = at;
+            drainTask = WORKER.schedule(JiaguStartupReporter::drain, Math.max(0, delay), TimeUnit.MILLISECONDS);
+        }
     }
     private static void drain() {
-        Pending p; JiaguStartupLogUploader target;
-        synchronized (LOCK) { drainScheduled = false; if (!uploadsEnabled || QUEUE.isEmpty()) return; p = QUEUE.removeFirst(); target = uploader; }
-        long retry = 0;
-        try { target.upload(appContext, p.event); }
-        catch (JiaguStartupUploadException e) {
-            if (e.isRetryable() && p.attempts + 1 < MAX_ATTEMPTS) retry = Math.max(e.getRetryAfterMillis(), backoff(p.attempts));
-            else Log.w(TAG, "Dropping startup upload: " + e.getMessage());
-        } catch (Throwable e) {
-            if (p.attempts + 1 < MAX_ATTEMPTS) retry = backoff(p.attempts); else Log.w(TAG, "Dropping startup upload", e);
+        JiaguStartupLogUploader target;
+        synchronized (LOCK) {
+            drainTask = null; drainAt = Long.MAX_VALUE; target = uploader;
+            if (target == DEFAULT) return;
         }
-        if (retry > 0) synchronized (LOCK) { enqueueLocked(p.event, p.attempts + 1); }
-        scheduleDrain(retry);
-        if (retry == 0) scheduleDrain(0);
+        try {
+            // Finish a previously successful upload's local deletion before selecting
+            // another row. A disk failure must not route the same event back to HTTP.
+            ACKNOWLEDGEMENT.flush(store::acknowledge);
+            StartupEventStore.Entry row = store.next(System.currentTimeMillis());
+            if (row != null) {
+                JiaguStartupEvent event;
+                try { event = StartupEventCodec.decode(row.payload); }
+                catch (Exception invalid) {
+                    store.quarantine(row.id);
+                    Log.e(TAG, "Quarantined invalid startup event " + row.id, invalid);
+                    scheduleDrain(0); return;
+                }
+                boolean uploaded = false;
+                try {
+                    target.upload(appContext, event);
+                    uploaded = true;
+                } catch (JiaguStartupUploadException error) {
+                    if (error.isRetryable()) retry(row, error.getRetryAfterMillis());
+                    else {
+                        store.quarantine(row.id);
+                        Log.w(TAG, "Quarantined rejected startup event " + row.id, error);
+                    }
+                } catch (Throwable error) {
+                    retry(row, 0);
+                    Log.w(TAG, "Startup upload deferred " + row.id, error);
+                }
+                if (uploaded) {
+                    ACKNOWLEDGEMENT.uploaded(row.id);
+                    // No network-retry catch around local acknowledgement.
+                    ACKNOWLEDGEMENT.flush(store::acknowledge);
+                }
+            }
+            long delay = store.nextDelay(System.currentTimeMillis());
+            if (delay >= 0) scheduleDrain(delay);
+        } catch (Throwable error) {
+            Log.e(TAG, "Startup outbox dispatch failed", error);
+            scheduleDrain(60_000);
+        }
     }
-    private static long backoff(int n) { return n == 0 ? 1_000 : n == 1 ? 3_000 : 8_000; }
+    private static void retry(StartupEventStore.Entry row, long serverDelay) {
+        long backoff = Math.min(900_000L, 1_000L << Math.min(row.attempts, 20));
+        long delay = Math.max(Math.min(serverDelay, TimeUnit.DAYS.toMillis(7)),
+                backoff + (long) (Math.random() * backoff / 4));
+        store.retry(row, System.currentTimeMillis() + delay);
+    }
     private static long duration(JiaguStartupEvent.Stage s, long d) { if (d > 0) return d; synchronized (LOCK) { return STARTED[s.ordinal()] == 0 ? 0 : Math.max(0, SystemClock.elapsedRealtime() - STARTED[s.ordinal()]); } }
     private static JiaguStartupEvent event(Pending p) { return new JiaguStartupEvent(p.stage, p.status, p.code, sessionId, startupInstanceId, packageName, versionName, versionCode, p.occurred, p.elapsed, p.duration, authorization, processName, mainProcess, firstLaunch, firstActivityName, firstActivityResumedMs); }
     private static void ensureStart() { synchronized (LOCK) { if (startupAt == 0) startupAt = SystemClock.elapsedRealtime(); } }
@@ -193,15 +243,8 @@ public final class JiaguStartupReporter {
         p.edit().putString(STARTUP_INSTANCE_ID, generated).commit();
         return generated;
     }
-    private static void markFirstLaunchCompleted(Context c) {
-        if (mainProcess && firstLaunch && c != null && !c.getSharedPreferences(PREFS,
-                Context.MODE_PRIVATE).edit().putBoolean(FIRST_COMPLETED, true).commit()) {
-            Log.w(TAG, "Cannot persist first-launch completion");
-        }
-    }
     private static final class Pending {
-        final JiaguStartupEvent event; final JiaguStartupEvent.Stage stage; final JiaguStartupEvent.Status status; final String code; final long occurred, elapsed, duration; final int attempts;
-        Pending(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status t, String c, long o, long e, long d) { event=null;stage=s;status=t;code=c;occurred=o;elapsed=e;duration=d;attempts=0; }
-        Pending(JiaguStartupEvent e, int a) { event=e;stage=null;status=null;code=null;occurred=elapsed=duration=0;attempts=a; }
+        final JiaguStartupEvent.Stage stage; final JiaguStartupEvent.Status status; final String code; final long occurred, elapsed, duration;
+        Pending(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status t, String c, long o, long e, long d) { stage=s;status=t;code=c;occurred=o;elapsed=e;duration=d; }
     }
 }

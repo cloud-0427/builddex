@@ -21,6 +21,8 @@ android {
     defaultConfig {
         minSdk = 29
         targetSdk = 35
+        testInstrumentationRunner providers.gradleProperty('jiagu.runtimeTestRunner')
+                .getOrElse('androidx.test.runner.AndroidJUnitRunner')
         consumerProguardFiles 'consumer-rules.pro'
 
         externalNativeBuild {
@@ -134,4 +136,6 @@ dependencies {
     // Tink supplies a verified implementation for the runtime's minSdk 29.
     implementation 'com.google.crypto.tink:tink-android:1.23.0'
     testImplementation libs.junit
+    androidTestImplementation libs.ext.junit
+    androidTestImplementation libs.espresso.core
 }

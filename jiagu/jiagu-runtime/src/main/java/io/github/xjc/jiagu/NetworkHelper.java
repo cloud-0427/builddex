@@ -21,7 +21,6 @@ import org.json.JSONArray;
 import org.conscrypt.Conscrypt;
 
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -111,11 +110,14 @@ public final class NetworkHelper {
             Config config = Config.parse(runtimeConfigJson);
             AppIdentity app = AppIdentity.read(context);
             config.verifyApp(app);
-            KeyPair signing = getOrCreateSigningKey(config);
 
             Future<KeyPair> wrappingFuture = null;
             Future<JSONObject> bootstrapChallengeFuture = null;
-            if (!hasCredentialCacheEntry(context, config, app.actualCertificateSha256)) {
+            boolean credentialCachePresent = hasCredentialCacheEntry(
+                    context, config, app.actualCertificateSha256);
+            if (!credentialCachePresent) {
+                // Start network and RSA Keystore work as soon as the runtime config and APK
+                // identity have been verified. Both now overlap EC signing-key preparation.
                 bootstrapExecutor = Executors.newFixedThreadPool(2, runnable -> {
                     Thread thread = new Thread(runnable, "Jiagu-Bootstrap");
                     thread.setDaemon(true);
@@ -129,12 +131,14 @@ public final class NetworkHelper {
                 });
             }
 
+            KeyPair signing = getOrCreateSigningKey(config);
             KeyPair wrapping = wrappingFuture == null
                     ? getOrCreateWrappingKey(config)
                     : await(wrappingFuture);
 
             String signPublicKey = b64(signing.getPublic().getEncoded());
             String wrapPublicKey = b64(wrapping.getPublic().getEncoded());
+            String wrapPublicKeySha256 = sha256(wrapping.getPublic().getEncoded());
             String deviceId = sha256(concat(
                     signing.getPublic().getEncoded(), wrapping.getPublic().getEncoded()));
 
@@ -150,7 +154,8 @@ public final class NetworkHelper {
                             : await(bootstrapChallengeFuture);
                     BootstrapResult bootstrapped = bootstrap(context, config,
                             app.actualCertificateSha256, signing, wrapping.getPrivate(),
-                            signPublicKey, wrapPublicKey, deviceId, bootstrapChallenge);
+                            signPublicKey, wrapPublicKey, wrapPublicKeySha256,
+                            deviceId, bootstrapChallenge);
                     credential = bootstrapped.credential;
                     authorization = bootstrapped.authorization;
                     authorizationSource = JiaguStartupEvent.AuthorizationSource.NETWORK_BOOTSTRAP;
@@ -163,7 +168,7 @@ public final class NetworkHelper {
                     credential = enroll(context, config, app.actualCertificateSha256,
                             signing, signPublicKey, wrapPublicKey, deviceId);
                     authorization = authorize(context, config, signing, wrapping.getPrivate(),
-                            deviceId, credential);
+                            wrapPublicKeySha256, deviceId, credential);
                     authorizationSource = JiaguStartupEvent.AuthorizationSource
                             .NETWORK_LEGACY_ENROLL_AUTHORIZE;
                     timing("device-bootstrap-legacy-fallback", stageStartedAt, startupStartedAt);
@@ -171,11 +176,13 @@ public final class NetworkHelper {
                 saveCredential(context, config, app.actualCertificateSha256, credential);
                 saveAuthorization(context, config, authorization);
             } else {
-                authorization = loadAuthorization(context, config, deviceId, wrapping.getPrivate());
+                authorization = loadAuthorization(context, config, deviceId,
+                        wrapPublicKeySha256, wrapping.getPrivate());
                 if (authorization == null) {
                     long stageStartedAt = now();
                     authorization = authorize(
-                            context, config, signing, wrapping.getPrivate(), deviceId, credential);
+                            context, config, signing, wrapping.getPrivate(),
+                            wrapPublicKeySha256, deviceId, credential);
                     authorizationSource = JiaguStartupEvent.AuthorizationSource.NETWORK_AUTHORIZE;
                     timing("device-authorize", stageStartedAt, startupStartedAt);
                     saveAuthorization(context, config, authorization);
@@ -232,6 +239,7 @@ public final class NetworkHelper {
                                              String actualCertificateSha256,
                                              KeyPair signing, PrivateKey wrapPrivate,
                                              String signPublicKey, String wrapPublicKey,
+                                             String wrapPublicKeySha256,
                                              String deviceId, JSONObject challenge) throws Exception {
         String message = canonical("BOOTSTRAP-V1", config.companyId,
                 challenge.getString("challengeId"), challenge.getString("challenge"),
@@ -260,7 +268,7 @@ public final class NetworkHelper {
         String grant = response.getString("grant");
         String wrapped = response.getString("wrappedPayloadKey");
         JSONObject claims = verifyJws(config, grant);
-        verifyGrant(config, claims, deviceId, wrapped);
+        verifyGrant(config, claims, deviceId, wrapPublicKeySha256, wrapped);
         if (!"RSA-OAEP-SHA1".equals(response.getString("wrapAlgorithm"))) {
             throw new SecurityException("wrap algorithm mismatch");
         }
@@ -302,6 +310,7 @@ public final class NetworkHelper {
 
     private static Authorization authorize(Context context, Config config,
                                            KeyPair signing, PrivateKey wrapPrivate,
+                                           String wrapPublicKeySha256,
                                            String deviceId, String credential) throws Exception {
         JSONObject challenge = challenge(config, "AUTHORIZE");
         String message = canonical("AUTHORIZE-V2", config.companyId,
@@ -322,7 +331,7 @@ public final class NetworkHelper {
         String grant = response.getString("grant");
         String wrapped = response.getString("wrappedPayloadKey");
         JSONObject claims = verifyJws(config, grant);
-        verifyGrant(config, claims, deviceId, wrapped);
+        verifyGrant(config, claims, deviceId, wrapPublicKeySha256, wrapped);
         if (!"RSA-OAEP-SHA1".equals(response.getString("wrapAlgorithm"))) {
             throw new SecurityException("wrap algorithm mismatch");
         }
@@ -464,12 +473,11 @@ public final class NetworkHelper {
     }
 
     private static void verifyGrant(Config config, JSONObject claims, String deviceId,
-                                    String wrapped) throws Exception {
-        String localWrapHash = sha256(getOrCreateWrappingKey(config).getPublic().getEncoded());
+                                    String wrapPublicKeySha256, String wrapped) throws Exception {
         if (!"PAYLOAD_GRANT".equals(claims.getString("type")) ||
                 !config.companyId.equals(claims.getString("companyId")) ||
                 !deviceId.equals(claims.getString("deviceId")) ||
-                !localWrapHash.equals(claims.getString("deviceWrapKeySha256")) ||
+                !wrapPublicKeySha256.equals(claims.getString("deviceWrapKeySha256")) ||
                 !config.releaseId.equals(claims.getString("releaseId")) ||
                 !config.payloadId.equals(claims.getString("payloadId")) ||
                 config.payloadVersion != claims.getLong("payloadVersion") ||
@@ -520,7 +528,8 @@ public final class NetworkHelper {
     }
 
     private static Authorization loadAuthorization(Context context, Config config,
-                                                   String deviceId, PrivateKey wrapPrivate) {
+                                                   String deviceId, String wrapPublicKeySha256,
+                                                   PrivateKey wrapPrivate) {
         String key = sha256Unchecked(bytes(config.companyId + "|" + config.releaseId + "|auth"));
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String grant = prefs.getString(key, null);
@@ -533,7 +542,7 @@ public final class NetworkHelper {
             if (claims.getLong("expiresAt") < System.currentTimeMillis() / 1000L + 30L) {
                 return null;
             }
-            verifyGrant(config, claims, deviceId, wrapped);
+            verifyGrant(config, claims, deviceId, wrapPublicKeySha256, wrapped);
             byte[] payloadKey = decryptWrappedKey(wrapPrivate, wrapped);
             return new Authorization(grant, claims, wrapped, payloadKey);
         } catch (Exception e) {
