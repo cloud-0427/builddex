@@ -15,7 +15,11 @@ target_compile_options(jiagu-core PRIVATE
 target_link_options(jiagu-core PRIVATE
         -Wl,--exclude-libs,ALL
         -Wl,--gc-sections
-        -Wl,--strip-all)
+        -Wl,--strip-all
+        # Keep this explicit even though NDK r28 defaults to 16 KB alignment. It makes
+        # the artifact contract independent of future toolchain/default changes.
+        -Wl,-z,max-page-size=16384
+        -Wl,-z,common-page-size=16384)
 
 find_library(log-lib log)
 find_library(android-lib android)

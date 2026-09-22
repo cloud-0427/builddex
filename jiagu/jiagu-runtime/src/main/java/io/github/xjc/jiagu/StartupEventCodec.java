@@ -7,10 +7,10 @@ final class StartupEventCodec {
     static byte[] encode(JiaguStartupEvent e) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(bytes);
-        out.writeInt(1);
+        out.writeInt(2);
         out.writeInt(e.getStageId());
         out.writeUTF(e.getStatus().name());
-        string(out, e.getResultCode()); string(out, e.getSessionId());
+        string(out, e.getResultCode()); string(out, e.getFailureClass()); string(out, e.getSessionId());
         string(out, e.getStartupInstanceId()); string(out, e.getPackageName());
         string(out, e.getVersionName()); out.writeLong(e.getVersionCode());
         out.writeLong(e.getOccurredAtMillis()); out.writeLong(e.getElapsedSinceStartMs());
@@ -24,11 +24,12 @@ final class StartupEventCodec {
     static JiaguStartupEvent decode(byte[] bytes) throws IOException {
         try {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes));
-            if (in.readInt() != 1) throw new IOException("Unsupported startup event version");
+            int version = in.readInt();
+            if (version != 1 && version != 2) throw new IOException("Unsupported startup event version");
             JiaguStartupEvent e = new JiaguStartupEvent(
                     JiaguStartupEvent.Stage.fromId(in.readInt()),
                     JiaguStartupEvent.Status.valueOf(in.readUTF()),
-                    string(in), string(in), string(in), string(in), string(in),
+                    string(in), version == 2 ? string(in) : null, string(in), string(in), string(in), string(in),
                     in.readLong(), in.readLong(), in.readLong(), in.readLong(),
                     JiaguStartupEvent.AuthorizationSource.valueOf(in.readUTF()),
                     string(in), in.readBoolean(), in.readBoolean(), string(in), in.readLong());

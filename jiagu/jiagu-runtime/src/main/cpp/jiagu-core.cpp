@@ -36,6 +36,14 @@ static jclass gStartupReporterClass = nullptr;
 static jmethodID gNativeStageFinished = nullptr;
 static jmethodID gObserveFirstActivity = nullptr;
 
+static void clear_jni_exception(JNIEnv* env, const char* point) {
+    if (!env->ExceptionCheck()) return;
+    // Do not leave a pending exception before returning JNI_ERR. ExceptionDescribe is omitted
+    // because its output may leak device/package details into production logs.
+    env->ExceptionClear();
+    LOGE("Jiagu_Native: JNI lookup failed at %s", point);
+}
+
 static int64_t monotonic_ms() {
     timespec value{};
     clock_gettime(CLOCK_MONOTONIC, &value);
@@ -759,16 +767,21 @@ static void cache_startup_reporter(JNIEnv* env) {
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env = nullptr;
-    if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+    if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+        LOGE("Jiagu_Native: JNI_OnLoad failed to acquire JNIEnv");
+        return JNI_ERR;
+    }
     jclass clazz = env->FindClass("io/github/xjc/jiagu/ProxyApplication");
     if (!clazz) {
-        LOGE("Jiagu_Native: ProxyApplication class not found in JNI_OnLoad");
+        clear_jni_exception(env, "JNI_ONLOAD_PROXY_CLASS_NOT_FOUND");
         return JNI_ERR;
     }
     if (env->RegisterNatives(clazz, gMethods, sizeof(gMethods) / sizeof(gMethods[0])) < 0) {
-        LOGE("Jiagu_Native: Failed to register natives");
+        clear_jni_exception(env, "JNI_ONLOAD_REGISTER_NATIVES_FAILED");
+        env->DeleteLocalRef(clazz);
         return JNI_ERR;
     }
+    env->DeleteLocalRef(clazz);
     cache_startup_reporter(env);
     return JNI_VERSION_1_6;
 }

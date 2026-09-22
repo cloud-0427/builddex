@@ -159,13 +159,14 @@ public final class StartupEventUploader implements JiaguStartupLogUploader {
 //        data.put("stage", event.getStage().name());
 //        data.put("status", event.getStatus().name());
 //        data.put("resultCode", event.getResultCode());
+        data.put("failureClass", event.getFailureClass());
         data.put("event", event.getStage().name()); // server
         data.put("eventId", "" + event.getStage().getId()); // server
         data.put("itemName", event.getStatus().name() + (isBlank(event.getResultCode()) ? "" : "_" + event.getResultCode())); // server
         data.put("sessionId", event.getSessionId());
         data.put("startupInstanceId", event.getStartupInstanceId());
         data.put("telemetryEventId", event.getTelemetryEventId());
-        data.put("schemaVersion", 1);
+        data.put("schemaVersion", 2);
         data.put("versionCode", event.getVersionCode());
         data.put("occurredAtMillis", event.getOccurredAtMillis());
         data.put("elapsedMs", event.getElapsedSinceStartMs());

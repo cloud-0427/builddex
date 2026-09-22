@@ -22,7 +22,7 @@ public class JiaguStartupEventTest {
     public void firstLaunchIsStableEventMetadata() {
         JiaguStartupEvent event = new JiaguStartupEvent(
                 JiaguStartupEvent.Stage.SHELL_ATTACH, JiaguStartupEvent.Status.STARTED,
-                null, "session", "instance", "package", "1.0", 1L, 1L, 0L, 0L,
+                null, null, "session", "instance", "package", "1.0", 1L, 1L, 0L, 0L,
                 JiaguStartupEvent.AuthorizationSource.UNKNOWN,
                 "package", true, true, null, -1L);
 

@@ -94,6 +94,7 @@ public final class JiaguStartupEvent {
     private final Stage stage;
     private final Status status;
     private final String resultCode;
+    private final String failureClass;
     private final String sessionId;
     private final String startupInstanceId;
     private final String packageName;
@@ -109,7 +110,7 @@ public final class JiaguStartupEvent {
     private final String activityName;
     private final long activityResumedElapsedMs;
 
-    JiaguStartupEvent(Stage stage, Status status, String resultCode,
+    JiaguStartupEvent(Stage stage, Status status, String resultCode, String failureClass,
                       String sessionId, String startupInstanceId, String packageName,
                       String versionName, long versionCode,
                       long occurredAtMillis, long elapsedSinceStartMs, long stageDurationMs,
@@ -119,6 +120,7 @@ public final class JiaguStartupEvent {
         this.stage = stage;
         this.status = status;
         this.resultCode = resultCode;
+        this.failureClass = failureClass;
         this.sessionId = sessionId;
         this.startupInstanceId = startupInstanceId;
         this.packageName = packageName;
@@ -150,6 +152,11 @@ public final class JiaguStartupEvent {
     /** Result of a terminal stage: a success path, failure, or block reason. */
     public String getResultCode() {
         return resultCode;
+    }
+
+    /** Optional exception class name; never contains an exception message or stack trace. */
+    public String getFailureClass() {
+        return failureClass;
     }
 
     public String getSessionId() {
@@ -250,6 +257,7 @@ public final class JiaguStartupEvent {
                 + " stage=" + stage
                 + " status=" + status
                 + " resultCode=" + resultCode
+                + " failureClass=" + failureClass
                 + " sessionId=" + sessionId
                 + " startupInstanceId=" + startupInstanceId
                 + " packageName=" + packageName

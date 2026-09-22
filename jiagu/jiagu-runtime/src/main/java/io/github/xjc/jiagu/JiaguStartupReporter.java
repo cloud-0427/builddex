@@ -54,7 +54,14 @@ public final class JiaguStartupReporter {
 
     public static void startupAttemptStarted() { ensureStart(); emit(JiaguStartupEvent.Stage.STARTUP_ATTEMPT, JiaguStartupEvent.Status.STARTED, null, 0); }
     public static void shellCoreLoadSucceeded(long ms) { emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.SUCCEEDED, "CORE_LIBRARY_LOADED", ms); }
-    public static void shellCoreLoadFailed(Throwable e, long ms) { emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.FAILED, "CORE_LIBRARY_LOAD_FAILED", ms); Log.e(TAG, "Cannot load jiagu-core", e); }
+    public static void shellCoreLoadFailed(CoreLoadDiagnostics diagnostic, long ms) {
+        emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.FAILED,
+                diagnostic.resultCode, ms, diagnostic.failureClass);
+        // Do not log linker message/stack in release telemetry. The caller preserves and throws
+        // the original error; only the class and stable category leave this process.
+        Log.e(TAG, "Cannot load jiagu-core: " + diagnostic.resultCode + " class="
+                + diagnostic.failureClass);
+    }
     public static void initialize(Context context) {
         synchronized (LOCK) {
             if (initialized) return;
@@ -133,7 +140,11 @@ public final class JiaguStartupReporter {
         });
     }
     private static void emit(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status status, String code, long duration) {
-        Pending p = new Pending(s, status, code, System.currentTimeMillis(), elapsed(), Math.max(0, duration));
+        emit(s, status, code, duration, null);
+    }
+    private static void emit(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status status, String code,
+                             long duration, String failureClass) {
+        Pending p = new Pending(s, status, code, failureClass, System.currentTimeMillis(), elapsed(), Math.max(0, duration));
         synchronized (LOCK) {
             if (s != JiaguStartupEvent.Stage.STARTUP_ATTEMPT && status != JiaguStartupEvent.Status.STARTED) {
                 if (TERMINAL[s.ordinal()]) { Log.w(TAG, "Ignoring duplicate terminal stage: " + s); return; }
@@ -217,7 +228,7 @@ public final class JiaguStartupReporter {
         store.retry(row, System.currentTimeMillis() + delay);
     }
     private static long duration(JiaguStartupEvent.Stage s, long d) { if (d > 0) return d; synchronized (LOCK) { return STARTED[s.ordinal()] == 0 ? 0 : Math.max(0, SystemClock.elapsedRealtime() - STARTED[s.ordinal()]); } }
-    private static JiaguStartupEvent event(Pending p) { return new JiaguStartupEvent(p.stage, p.status, p.code, sessionId, startupInstanceId, packageName, versionName, versionCode, p.occurred, p.elapsed, p.duration, authorization, processName, mainProcess, firstLaunch, firstActivityName, firstActivityResumedMs); }
+    private static JiaguStartupEvent event(Pending p) { return new JiaguStartupEvent(p.stage, p.status, p.code, p.failureClass, sessionId, startupInstanceId, packageName, versionName, versionCode, p.occurred, p.elapsed, p.duration, authorization, processName, mainProcess, firstLaunch, firstActivityName, firstActivityResumedMs); }
     private static void ensureStart() { synchronized (LOCK) { if (startupAt == 0) startupAt = SystemClock.elapsedRealtime(); } }
     private static long elapsed() { return startupAt == 0 ? 0 : Math.max(0, SystemClock.elapsedRealtime() - startupAt); }
     private static JiaguStartupLogUploader loadUploader(Context c) {
@@ -244,7 +255,7 @@ public final class JiaguStartupReporter {
         return generated;
     }
     private static final class Pending {
-        final JiaguStartupEvent.Stage stage; final JiaguStartupEvent.Status status; final String code; final long occurred, elapsed, duration;
-        Pending(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status t, String c, long o, long e, long d) { stage=s;status=t;code=c;occurred=o;elapsed=e;duration=d; }
+        final JiaguStartupEvent.Stage stage; final JiaguStartupEvent.Status status; final String code, failureClass; final long occurred, elapsed, duration;
+        Pending(JiaguStartupEvent.Stage s, JiaguStartupEvent.Status t, String c, String f, long o, long e, long d) { stage=s;status=t;code=c;failureClass=f;occurred=o;elapsed=e;duration=d; }
     }
 }

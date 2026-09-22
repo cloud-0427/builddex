@@ -14,14 +14,15 @@ public class ProxyApplication extends Application {
 
     private void loadCore() {
         long startedAt = SystemClock.elapsedRealtime();
-        JiaguStartupReporter.startupAttemptStarted();
+        reportSafely(() -> JiaguStartupReporter.startupAttemptStarted());
         try {
             System.loadLibrary("jiagu-core");
-            JiaguStartupReporter.shellCoreLoadSucceeded(
-                    SystemClock.elapsedRealtime() - startedAt);
+            reportSafely(() -> JiaguStartupReporter.shellCoreLoadSucceeded(
+                    SystemClock.elapsedRealtime() - startedAt));
         } catch (Throwable error) {
-            JiaguStartupReporter.shellCoreLoadFailed(error,
-                    SystemClock.elapsedRealtime() - startedAt);
+            CoreLoadDiagnostics diagnostic = CoreLoadDiagnostics.from(error);
+            reportSafely(() -> JiaguStartupReporter.shellCoreLoadFailed(diagnostic,
+                    SystemClock.elapsedRealtime() - startedAt));
             throw error;
         }
         Log.i(TAG, "[StartupTiming] stage=load-jiagu-core-library durationMs=" +
@@ -57,5 +58,15 @@ public class ProxyApplication extends Application {
         nativeOnCreate();
         Log.i(TAG, "[StartupTiming] complete proxy onCreate totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
+    }
+
+    private static void reportSafely(Runnable action) {
+        try {
+            action.run();
+        } catch (Throwable reporterFailure) {
+            // Startup telemetry is not allowed to replace a loader result or prevent a
+            // successfully loaded native library from continuing startup.
+            Log.w(TAG, "Startup telemetry unavailable", reporterFailure);
+        }
     }
 }

@@ -11,7 +11,7 @@ public class StartupEventStoreTest {
         File file = new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getCacheDir(), "outbox-" + System.nanoTime() + ".db");
         JiaguStartupEvent event = new JiaguStartupEvent(
                 JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME,
-                JiaguStartupEvent.Status.SUCCEEDED, "FIRST_FRAME_DRAWN", "old-session",
+                JiaguStartupEvent.Status.SUCCEEDED, "FIRST_FRAME_DRAWN", null, "old-session",
                 "install", "pkg", "1", 1, 100, 10, 5,
                 JiaguStartupEvent.AuthorizationSource.UNKNOWN, "pkg", true, true, null, 5);
         try {
