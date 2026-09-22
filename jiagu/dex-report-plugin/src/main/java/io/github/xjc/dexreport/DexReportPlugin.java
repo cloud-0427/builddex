@@ -41,6 +41,8 @@ public final class DexReportPlugin implements Plugin<Project> {
 
         // 设置默认值
         extension.getServerUrl().convention("https://jg.nebulapro.net/");
+        extension.getProtectionMode().convention("online");
+        extension.getPayloadCompressionEnabled().convention(true);
         extension.getSignatureCheckEnabled().convention(true);
         extension.getResObfuscationEnabled().convention(true);
         extension.getCertificateSha256Digests().convention(java.util.Collections.emptySet());
@@ -60,6 +62,10 @@ public final class DexReportPlugin implements Plugin<Project> {
             androidComponents.onVariants(androidComponents.selector().all(), variant -> {
                 String variantName = variant.getName();
                 String buildTypeName = variant.getBuildType();
+                boolean localMode = "local".equalsIgnoreCase(extension.getProtectionMode().get());
+                if (!localMode && !"online".equalsIgnoreCase(extension.getProtectionMode().get())) {
+                    throw new IllegalArgumentException("dexReport.protectionMode must be 'online' or 'local'");
+                }
 
                 // 检查是否在允许运行的 BuildType 列表中。
                 // 如果列表为空，则默认对所有 BuildType 运行（保持向后兼容）。
@@ -115,6 +121,8 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getMinifyEnabled().set(variant.isMinifyEnabled());
                             task.getDebuggable().set(variant.getDebuggable());
                             task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
+                            if (localMode) task.getPayloadCompressionEnabled().set(false);
+                            else task.getPayloadCompressionEnabled().set(ext.getPayloadCompressionEnabled());
                             task.getBootClasspath().from(androidComponents.getSdkComponents().getBootClasspath());
                             task.getNativeInputs().from(project.fileTree(project.getProjectDir(), spec -> {
                                 spec.include("src/**/jniLibs/**/*.so");
@@ -145,7 +153,9 @@ public final class DexReportPlugin implements Plugin<Project> {
                                 task.getPublish().set(ext.getPublish());
                             }
 
-                            if (specific != null && specific.getAntiDebugEnabled().isPresent()) {
+                            if (localMode) {
+                                task.getAntiDebugEnabled().set(false);
+                            } else if (specific != null && specific.getAntiDebugEnabled().isPresent()) {
                                 task.getAntiDebugEnabled().set(specific.getAntiDebugEnabled());
                             } else if (ext.getAntiDebugEnabled().isPresent()) {
                                 task.getAntiDebugEnabled().set(ext.getAntiDebugEnabled());
@@ -168,7 +178,8 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getInputIndexFile().set(project.getLayout().getBuildDirectory()
                                     .file("intermediates/jiagu/" + variantName + "/input-index.json"));
                             task.getBuildInvocationId().set(buildInvocationId);
-                            task.getStartupLogUploaderClass().set(ext.getStartupLogUploaderClass());
+                            if (localMode) task.getStartupLogUploaderClass().set("");
+                            else task.getStartupLogUploaderClass().set(ext.getStartupLogUploaderClass());
                         });
 
                 // Carry the producer dependency for every consumer (including lint),
@@ -191,9 +202,17 @@ public final class DexReportPlugin implements Plugin<Project> {
                 TaskProvider<JiaguReleaseTask> releaseTaskProvider = project.getTasks().register(
                         "createJiaguRelease" + variantCap, JiaguReleaseTask.class, task -> {
                             task.setGroup("jiagu");
-                            task.getServerUrl().set(jiaguTaskProvider.flatMap(JiaguTask::getServerUrl));
-                            task.getCompanyId().set(jiaguTaskProvider.flatMap(JiaguTask::getCompanyId));
-                            task.getCompanyApiKey().set(jiaguTaskProvider.flatMap(JiaguTask::getCompanyApiKey));
+                            if (localMode) {
+                                // Gradle validates task properties before @TaskAction. These placeholders
+                                // are never read by createLocalPayload and are not embedded in the APK.
+                                task.getServerUrl().set("");
+                                task.getCompanyId().set("");
+                                task.getCompanyApiKey().set("");
+                            } else {
+                                task.getServerUrl().set(jiaguTaskProvider.flatMap(JiaguTask::getServerUrl));
+                                task.getCompanyId().set(jiaguTaskProvider.flatMap(JiaguTask::getCompanyId));
+                                task.getCompanyApiKey().set(jiaguTaskProvider.flatMap(JiaguTask::getCompanyApiKey));
+                            }
                             task.getPackageName().set(jiaguTaskProvider.flatMap(JiaguTask::getPackageName));
                             task.getVersionCode().set(jiaguTaskProvider.flatMap(JiaguTask::getVersionCode));
                             task.getCertificateSha256().set(jiaguTaskProvider.flatMap(JiaguTask::getCertificateSha256));
@@ -201,6 +220,8 @@ public final class DexReportPlugin implements Plugin<Project> {
                                     jiaguTaskProvider.flatMap(JiaguTask::getCertificateSha256Digests));
                             task.getPublish().set(jiaguTaskProvider.flatMap(JiaguTask::getPublish));
                             task.getBuildInvocationId().set(buildInvocationId);
+                            task.getLocalMode().set(localMode);
+                            task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
                             task.getPayloadFile().set(jiaguTaskProvider.flatMap(JiaguTask::getPayloadFile));
                             task.getBusinessDexSha256File().set(
                                     jiaguTaskProvider.flatMap(JiaguTask::getBusinessDexSha256File));
@@ -252,9 +273,11 @@ public final class DexReportPlugin implements Plugin<Project> {
                 TaskProvider<ManifestTransformerTask> manifestTaskProvider = project.getTasks().register(
                         "modifyManifest" + variantCap, ManifestTransformerTask.class, task -> {
                             task.getAntiDebugEnabled().set(jiaguTaskProvider.flatMap(JiaguTask::getAntiDebugEnabled));
-                            task.getSignatureCheckEnabled().set(ext.getSignatureCheckEnabled());
+                            if (localMode) task.getSignatureCheckEnabled().set(false);
+                            else task.getSignatureCheckEnabled().set(ext.getSignatureCheckEnabled());
                             task.getExpectedSignature().set(ext.getExpectedSignature());
-                            task.getStartupLogUploaderClass().set(ext.getStartupLogUploaderClass());
+                            if (localMode) task.getStartupLogUploaderClass().set("");
+                            else task.getStartupLogUploaderClass().set(ext.getStartupLogUploaderClass());
                         });
 
                 variant.getArtifacts().use(manifestTaskProvider)

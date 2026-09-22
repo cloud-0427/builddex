@@ -348,7 +348,6 @@ static bool bind_real_application(JNIEnv* env, jobject proxy_app, jobject real_a
 
 static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
     const int64_t startup_started_at = monotonic_ms();
-    if (!prepare_legacy_keystore_context(env, thiz)) return;
     int64_t stage_started_at = monotonic_ms();
     // 1. 获取配置 (URL 和 REAL_APPLICATION)
     jclass context_class = env->GetObjectClass(context);
@@ -461,7 +460,7 @@ static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
     uint32_t bundle_version = read_u32(4);
     uint32_t config_length = read_u32(8);
     uint32_t local_payload_length = read_u32(12);
-    if (bundle_version != 1 || config_length < 32 || config_length > 256 * 1024 ||
+    if ((bundle_version != 1 && bundle_version != 2) || config_length < 32 || config_length > 256 * 1024 ||
             local_payload_length < 40 || local_payload_length > 128 * 1024 * 1024 ||
             16ULL + config_length + local_payload_length != bundle_length) {
         report_stage_finished(env, 5, STARTUP_STATUS_FAILED, "RUNTIME_BUNDLE_INVALID",
@@ -472,11 +471,18 @@ static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
     }
     std::string runtime_config(reinterpret_cast<const char*>(bundle_source + 16), config_length);
     const uint8_t* local_payload_source = bundle_source + 16 + config_length;
+    // Local bundles must not touch the legacy AndroidKeyStore bridge at all.
+    bool local_mode = bundle_version == 2;
+    if (!local_mode && !prepare_legacy_keystore_context(env, thiz)) {
+        dlclose(payload_handle);
+        return;
+    }
     report_stage_finished(env, 5, STARTUP_STATUS_SUCCEEDED, "RUNTIME_BUNDLE_READY",
                           monotonic_ms() - stage_started_at);
-    // 3. Java handles Keystore, authorization and AES-GCM from mapped direct memory.
+    // 3. Online bundles use authorization; local v2 bundles use no-network AES-GCM only.
     stage_started_at = monotonic_ms();
-    jclass network_helper = env->FindClass("io/github/xjc/jiagu/NetworkHelper");
+    jclass network_helper = env->FindClass(local_mode ? "io/github/xjc/jiagu/LocalPayloadCrypto"
+                                                     : "io/github/xjc/jiagu/NetworkHelper");
     if (!network_helper) {
         LOGE("Jiagu_Native: NetworkHelper class not found");
         if (env->ExceptionCheck()) env->ExceptionClear();
@@ -484,7 +490,7 @@ static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
         return;
     }
     jmethodID get_payload_mid = env->GetStaticMethodID(
-            network_helper, "getAuthorizedPayload",
+            network_helper, local_mode ? "getLocalPayload" : "getAuthorizedPayload",
             "(Landroid/content/Context;Ljava/lang/String;Ljava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;");
     if (!get_payload_mid) {
         LOGE("Jiagu_Native: getAuthorizedPayload method not found");
@@ -515,7 +521,8 @@ static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
     // Java has finished consuming the mapped ciphertext; its plaintext buffer is independent.
     dlclose(payload_handle);
     log_timing("java-authorization-and-payload-decrypt", stage_started_at, startup_started_at);
-    JNI_CHECK_NULL(payload_buffer, "device authorization returned no payload", );
+    JNI_CHECK_NULL(payload_buffer, local_mode ? "local payload decryption returned no payload"
+                                             : "device authorization returned no payload", );
     void* decrypted_payload_address = env->GetDirectBufferAddress(payload_buffer);
     jlong payload_capacity = env->GetDirectBufferCapacity(payload_buffer);
     if (!decrypted_payload_address || payload_capacity < 8 || payload_capacity > 128 * 1024 * 1024) {
@@ -528,7 +535,8 @@ static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
     const char* full_buffer = static_cast<const char*>(decrypted_payload_address);
     size_t full_buffer_size = static_cast<size_t>(payload_capacity);
 
-    if (std::memcmp(full_buffer, "JG3\0", 4) != 0) {
+    bool uncompressed_payload = std::memcmp(full_buffer, "JG4\0", 4) == 0;
+    if (!uncompressed_payload && std::memcmp(full_buffer, "JG3\0", 4) != 0) {
         LOGE("Jiagu_Native: Invalid payload magic");
         report_stage_finished(env, 8, STARTUP_STATUS_FAILED, "DEX_PAYLOAD_INVALID",
                               monotonic_ms() - stage_started_at);
@@ -575,7 +583,7 @@ static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
                              static_cast<unsigned char>(meta_data_ptr[meta_offset + 3]);
         meta_offset += 4;
 
-        // JG3 stores zlib-compressed DEX entries after the metadata table.
+        // JG3 stores compressed entries; local JG4 stores direct DEX entries.
         if (dex_offset < 0 || dex_size <= 0 || dex_plain_size <= 0 ||
                 dex_plain_size > 256 * 1024 * 1024 ||
                 static_cast<size_t>(dex_offset) > body_size ||
@@ -595,11 +603,15 @@ static void native_attach_impl(JNIEnv *env, jobject thiz, jobject context) {
         void* direct_buffer = env->GetDirectBufferAddress(bb);
         JNI_CHECK_NULL(direct_buffer, "DirectBufferAddress access failed", );
         uLongf inflated_size = static_cast<uLongf>(dex_plain_size);
-        int inflate_result = uncompress(
-                 reinterpret_cast<Bytef*>(direct_buffer), &inflated_size,
-                 reinterpret_cast<const Bytef*>(dex_ptr),
-                 static_cast<uLong>(dex_size));
-        if (inflate_result != Z_OK || inflated_size != static_cast<uLongf>(dex_plain_size)) {
+        int inflate_result = Z_OK;
+        if (uncompressed_payload) {
+            if (dex_size != dex_plain_size) inflate_result = Z_DATA_ERROR;
+            else std::memcpy(direct_buffer, dex_ptr, static_cast<size_t>(dex_plain_size));
+        } else {
+            inflate_result = uncompress(reinterpret_cast<Bytef*>(direct_buffer), &inflated_size,
+                    reinterpret_cast<const Bytef*>(dex_ptr), static_cast<uLong>(dex_size));
+        }
+        if (inflate_result != Z_OK || (!uncompressed_payload && inflated_size != static_cast<uLongf>(dex_plain_size))) {
             LOGE("Jiagu_Native: Failed to decompress DEX entry %d (zlib=%d, actual=%lu, expected=%d)",
                  i, inflate_result, static_cast<unsigned long>(inflated_size), dex_plain_size);
             report_stage_finished(env, 8, STARTUP_STATUS_FAILED, "DEX_DECOMPRESS_FAILED",

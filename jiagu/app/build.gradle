@@ -7,7 +7,9 @@ plugins {
 // app/build.gradle
 dexReport {
     // Shell-side, minimal HTTP startup event uploader.
-    startupLogUploaderClass = "lows.dgeon.ightr.jiagu.StartupEventUploader"
+//    startupLogUploaderClass = "lows.dgeon.ightr.jiagu.StartupEventUploader"
+    // Offline baseline: no Jiagu server, authorization, or runtime network access.
+    protectionMode = "local"
 
     // 线上真实的签名sha256的 base64URL
     certificateSha256Digests = [
@@ -27,16 +29,16 @@ dexReport {
 //    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
 
     // online
-    companyId = "acme"
-    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
+//    companyId = "acme"
+//    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
 
     // 加固密钥是否发布，发布后此版本不能再修改
     publish = false
     // debug 检测，测试关闭，线上可以打开，默认是打开的
-    antiDebugEnabled = true
+    antiDebugEnabled = false
 
     // 是否混淆res， unity 目前不支持，需要增加 res 白名单，后续添加
-    resObfuscationEnabled = true
+    resObfuscationEnabled = false
 
     // 只保留 中文 和 英文
     resConfigs = ["zh", "en"]
@@ -44,7 +46,7 @@ dexReport {
     buildTypes {
         release {
             publish = true
-            antiDebugEnabled = true
+            antiDebugEnabled = false
         }
         debug {
             // 这里可以单独覆盖 debug 的行为
@@ -83,8 +85,8 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources = true
+            minifyEnabled false
+            shrinkResources = false
             
             // AGP 9.3+ 正确的禁用方式：在 installation 块中设置
             installation {

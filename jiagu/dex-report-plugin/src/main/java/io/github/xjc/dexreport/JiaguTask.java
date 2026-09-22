@@ -100,6 +100,9 @@ public abstract class JiaguTask extends DefaultTask {
     @Input
     public abstract Property<Boolean> getAntiDebugEnabled();
 
+    @Input
+    public abstract Property<Boolean> getPayloadCompressionEnabled();
+
     @Internal
     public abstract Property<String> getBuildInvocationId();
 
@@ -303,14 +306,15 @@ public abstract class JiaguTask extends DefaultTask {
                 long uncompressedPayloadBytes = 0;
                 stageStartedAt = System.nanoTime();
                 try (FileOutputStream fos = new FileOutputStream(payloadFile)) {
-                    fos.write("JG3\0".getBytes(StandardCharsets.UTF_8));
+                    boolean compressPayload = getPayloadCompressionEnabled().get();
+                    fos.write((compressPayload ? "JG3\0" : "JG4\0").getBytes(StandardCharsets.UTF_8));
                     fos.write(intToBytes(dexFiles.length));
 
                     java.util.List<byte[]> compressedEntries = new java.util.ArrayList<>();
                     long currentOffset = 0;
                     for (File dexFile : dexFiles) {
                         byte[] dexData = Files.readAllBytes(dexFile.toPath());
-                        byte[] compressedDex = compress(dexData);
+                        byte[] compressedDex = compressPayload ? compress(dexData) : dexData;
                         rawDexBytes += dexData.length;
                         compressedDexBytes += compressedDex.length;
                         compressedEntries.add(compressedDex);
@@ -324,7 +328,7 @@ public abstract class JiaguTask extends DefaultTask {
                         fos.write(entry);
                     }
                 }
-                finishStage("DEX 压缩与 JG3 封装", stageStartedAt, stageTimes);
+                finishStage(getPayloadCompressionEnabled().get() ? "DEX 压缩与 JG3 封装" : "DEX 未压缩 JG4 封装", stageStartedAt, stageTimes);
                 logCompression("DEX 数据", rawDexBytes, compressedDexBytes);
                 logCompression("JG3 Payload", uncompressedPayloadBytes, payloadFile.length());
                 getLogger().lifecycle("[Jiagu] 业务 DEX Payload 已准备: {}", payloadFile);

@@ -29,17 +29,25 @@ public abstract class VerifyServicesTask extends DefaultTask {
         Map<String, String> businessDefinitions = new LinkedHashMap<>();
         byte[] payload = Files.readAllBytes(getPayload().get().getAsFile().toPath());
         ByteBuffer header = ByteBuffer.wrap(payload);
-        if (header.getInt() != 0x4a473300) throw new IOException("Invalid JG3 payload");
+        int payloadMagic = header.getInt();
+        if (payloadMagic != 0x4a473300 && payloadMagic != 0x4a473400) {
+            throw new IOException("Invalid JG3/JG4 payload");
+        }
         int count = header.getInt();
         int body = 8 + count * 12;
+        boolean uncompressed = payloadMagic == 0x4a473400;
         for (int i = 0; i < count; i++) {
             int offset = header.getInt(), length = header.getInt(), rawLength = header.getInt();
-            try (InputStream input = new InflaterInputStream(
+            byte[] dex;
+            if (uncompressed) {
+                if (length != rawLength) throw new IOException("Invalid uncompressed payload DEX length");
+                dex = Arrays.copyOfRange(payload, body + offset, body + offset + length);
+            } else try (InputStream input = new InflaterInputStream(
                     new ByteArrayInputStream(payload, body + offset, length))) {
-                byte[] dex = input.readAllBytes();
-                if (dex.length != rawLength) throw new IOException("Invalid payload DEX length");
-                addDefinitions(businessDefinitions, classNames(dex), "payload dex #" + (i + 1));
+                dex = input.readAllBytes();
             }
+            if (dex.length != rawLength) throw new IOException("Invalid payload DEX length");
+            addDefinitions(businessDefinitions, classNames(dex), "payload dex #" + (i + 1));
         }
         List<Path> apks = new ArrayList<>();
         try (java.util.stream.Stream<Path> files = Files.walk(getApkDirectory().get().getAsFile().toPath())) {

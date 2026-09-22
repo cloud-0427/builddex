@@ -11,6 +11,12 @@ import org.gradle.api.provider.SetProperty;
  */
 public abstract class DexReportExtension {
 
+    /** `online` keeps the server-backed protocol; `local` embeds all crypto material. */
+    public abstract Property<String> getProtectionMode();
+
+    /** Compress JG payload entries. Local mode defaults to false. */
+    public abstract Property<Boolean> getPayloadCompressionEnabled();
+
     /**
      * 指定哪些构建类型 (BuildType) 需要自动运行报告任务。
      */

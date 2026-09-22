@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.security.SecureRandom;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -65,6 +66,7 @@ public abstract class JiaguReleaseTask extends DefaultTask {
     @Input public abstract ListProperty<String> getCertificateSha256Digests();
     @Input public abstract Property<Boolean> getPublish();
     @Input public abstract Property<String> getBuildInvocationId();
+    @Input public abstract Property<Boolean> getLocalMode();
 
     @InputFile @PathSensitive(PathSensitivity.NONE)
     public abstract RegularFileProperty getPayloadFile();
@@ -83,6 +85,10 @@ public abstract class JiaguReleaseTask extends DefaultTask {
 
     @TaskAction
     public void createRelease() throws IOException {
+        if (getLocalMode().get()) {
+            createLocalPayload();
+            return;
+        }
         String serverUrl = getServerUrl().get().trim();
         String companyId = getCompanyId().get().trim();
         String companyApiKey = getCompanyApiKey().get().trim();
@@ -138,6 +144,57 @@ public abstract class JiaguReleaseTask extends DefaultTask {
                 : "[Jiagu] Release {} 保持 DRAFT 状态", release.releaseId);
     }
 
+    private void createLocalPayload() throws IOException {
+        if (getMinSdkForLocal() < 23) {
+            throw new IOException("[Jiagu] local protection requires minSdk >= 23 for AES/GCM/NoPadding");
+        }
+        byte[] plaintext = Files.readAllBytes(getPayloadFile().get().getAsFile().toPath());
+        byte[] key = new byte[32];
+        byte[] keyPartA = new byte[32];
+        byte[] keyPartB = new byte[32];
+        byte[] nonce = new byte[12];
+        new SecureRandom().nextBytes(key);
+        new SecureRandom().nextBytes(keyPartA);
+        for (int i = 0; i < key.length; i++) keyPartB[i] = (byte) (key[i] ^ keyPartA[i]);
+        new SecureRandom().nextBytes(nonce);
+        File runtimeBundle = File.createTempFile("jiagu_local_runtime_bundle", ".bin");
+        try {
+            String plaintextHash = JiaguServerClient.sha256(plaintext);
+            String aad = "LOCAL-PAYLOAD-V1\0" + getPackageName().get() + "\0"
+                    + getVersionCode().get() + "\0" + plaintextHash;
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
+            cipher.updateAAD(aad.getBytes(StandardCharsets.UTF_8));
+            byte[] encrypted = cipher.doFinal(plaintext);
+            ByteBuffer localPayload = ByteBuffer.allocate(56 + encrypted.length);
+            localPayload.put(new byte[]{'J','G','L','P'}).putInt(2).putInt(44 + encrypted.length);
+            localPayload.put(keyPartB).put(nonce).put(encrypted);
+            String config = "{\"configVersion\":4,\"mode\":\"local\",\"packageName\":"
+                    + JiaguServerClient.json(getPackageName().get()) + ",\"versionCode\":" + getVersionCode().get()
+                    + ",\"payloadPlaintextSha256\":" + JiaguServerClient.json(plaintextHash)
+                    + ",\"keyPartA\":" + JiaguServerClient.json(java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(keyPartA))
+                    + ",\"aadVersion\":\"LOCAL-PAYLOAD-V1\",\"cipherAlgorithm\":\"AES-256-GCM\"}";
+            Files.write(runtimeBundle.toPath(), localRuntimeBundle(config.getBytes(StandardCharsets.UTF_8), localPayload.array()));
+            buildPayloadLibraries(runtimeBundle, getOutJniLibsDir().get().getAsFile());
+            getLogger().lifecycle("[Jiagu] local payload created without server, authorization, or network");
+            Arrays.fill(encrypted, (byte) 0);
+        } catch (Exception error) {
+            throw new IOException("Unable to create local Jiagu payload", error);
+        } finally {
+            Arrays.fill(plaintext, (byte) 0); Arrays.fill(key, (byte) 0); Arrays.fill(keyPartA, (byte) 0);
+            Arrays.fill(keyPartB, (byte) 0); Arrays.fill(nonce, (byte) 0);
+            Files.deleteIfExists(runtimeBundle.toPath());
+        }
+    }
+
+    private int getMinSdkForLocal() {
+        // JiaguTask has already configured the variant; use the Android manifest minSdk only as
+        // a defensive fallback until this task receives the explicit value below.
+        return getMinApiLevel().get();
+    }
+
+    @Input public abstract Property<Integer> getMinApiLevel();
+
     private byte[] encryptLocalPayload(byte[] plaintext, String companyId,
                                        JiaguServerClient.Release release) throws IOException {
         try {
@@ -170,6 +227,12 @@ public abstract class JiaguReleaseTask extends DefaultTask {
     private static byte[] runtimeBundle(byte[] config, byte[] localPayload) {
         return ByteBuffer.allocate(16 + config.length + localPayload.length)
                 .put(new byte[]{'J', 'G', 'R', 'C'}).putInt(1).putInt(config.length).putInt(localPayload.length)
+                .put(config).put(localPayload).array();
+    }
+
+    private static byte[] localRuntimeBundle(byte[] config, byte[] localPayload) {
+        return ByteBuffer.allocate(16 + config.length + localPayload.length)
+                .put(new byte[]{'J', 'G', 'R', 'C'}).putInt(2).putInt(config.length).putInt(localPayload.length)
                 .put(config).put(localPayload).array();
     }
 
