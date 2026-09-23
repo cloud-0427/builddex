@@ -17,7 +17,7 @@ public abstract class DexReportExtension {
     /** @return whether JG payload entries are compressed */
     public abstract Property<Boolean> getPayloadCompressionEnabled();
 
-    /** Enables R8 for the post-routing shell classes. Local mode defaults to true. */
+    /** Enables the isolated Jiagu Runtime R8 pass in local mode. Defaults to true. */
     public abstract Property<Boolean> getShellMinificationEnabled();
 
     /**

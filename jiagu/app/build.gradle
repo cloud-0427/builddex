@@ -90,7 +90,7 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled false // local mode enables R8 for the routed shell via Android Components.
+            minifyEnabled false // local mode runs isolated Runtime R8 before AGP's D8 pass.
             shrinkResources = false
             
             // AGP 9.3+ 正确的禁用方式：在 installation 块中设置

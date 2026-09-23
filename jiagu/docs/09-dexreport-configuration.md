@@ -9,7 +9,7 @@
 | 模式 | 默认值 | 行为 |
 | --- | --- | --- |
 | `online` | 是 | Jiagu 任务使用服务端 URL、企业 ID 和 API Key；服务端参与加固/发布流程。Payload 压缩默认开启。 |
-| `local` | 否 | 在本地生成 Payload，不走服务端授权/网络流程；Payload 压缩被插件强制关闭；签名检查和启动日志上传被禁用；默认启用 Shell R8。 |
+| `local` | 否 | 在本地生成 Payload，不走服务端授权/网络流程；Payload 压缩被插件强制关闭；签名检查和启动日志上传被禁用；默认仅对 Jiagu Runtime 启用 R8。 |
 
 两种模式都使用相同的 Payload 选择配置、构建类型发布开关、资源混淆开关等。某些配置虽然 DSL 中仍可设置，但在某模式下会被忽略或覆盖，详见下表。
 
@@ -79,7 +79,7 @@ dexReport {
 }
 ```
 
-本地模式下，`shellMinificationEnabled` 控制 AGP R8 是否处理路由后留在 APK Shell 中的类；它不把已路由进 Payload 的业务类送入 Shell R8。`android.buildTypes.*.minifyEnabled` 会被插件在 local 模式下按该值设置。Payload 压缩强制关闭；反调试强制关闭；Manifest 签名检查和启动日志上传也强制关闭。`publish` 仍决定本地 release 元数据是否触发发布动作；本地模式没有服务端发布可完成，因此通常设为 `false`。
+本地模式下，`shellMinificationEnabled` 仅控制 Jiagu Runtime namespace 的独立 R8。R8 输出 classfile 后与未改动的其它 Shell classfile 合并，再由 AGP D8 统一编译；第三方不进入 R8 program。对启用 Jiagu 流水线的 local Variant，插件会关闭 AGP whole-program R8，避免第三方被整体送入 R8；未被 `autoRunBuildTypes` 选中的 Variant 保留 Android DSL 自身配置。Payload 压缩强制关闭；反调试强制关闭；Manifest 签名检查和启动日志上传也强制关闭。`publish` 仍决定本地 release 元数据是否触发发布动作；本地模式没有服务端发布可完成，因此通常设为 `false`。
 
 ## 配置逐项说明
 
@@ -98,7 +98,7 @@ dexReport {
 | `startupComponentPolicy` | `"validate"` | 启动组件与 Payload 路由冲突的处理策略；在任务校验时使用。 |
 | `payloadR8Policy` | `"fail"` | Payload 对 R8 后果的兼容策略；默认遇到不兼容情况失败，避免静默生成不完整的 Payload。 |
 | `payloadCompressionEnabled` | `true` | 在线模式控制业务 Payload 压缩。local 模式插件强制设为 `false`，用户设置不生效。 |
-| `shellMinificationEnabled` | 未设；local 读取时默认为 `true` | 仅 local 模式读取，控制 AGP R8 对 Shell 类的混淆/裁剪。online 模式不由该项控制，使用 Android build type 的 AGP 配置。 |
+| `shellMinificationEnabled` | 未设；local 读取时默认为 `true` | 仅 local 模式读取，控制 Jiagu Runtime-only R8；第三方和其它 Shell class 不进入 R8。online 模式不由该项控制，使用 Android build type 的 AGP 配置。 |
 | `signatureCheckEnabled` | `true` | 在线模式写入 Manifest 的运行时签名校验开关。local 强制关闭。 |
 | `expectedSignature` | 未设 | 运行时签名校验期望值；与签名证书允许列表不是同一个配置。只有校验开启且提供该值时才写入对应元数据。 |
 | `certificateSha256Digests` | 空集合 | 允许的签名证书 SHA-256 Base64URL 摘要列表，随 release 元数据传递，用于证书轮换/多签名证书场景。它与当前 Variant 实际 signingConfig 计算出的证书摘要并存，不能将两者理解为重复项。 |
@@ -127,7 +127,7 @@ dexReport {
 ### 看起来相似但用途不同
 
 - `expectedSignature` 是运行时检查所期待的签名值；`certificateSha256Digests` 是服务端/发布元数据中的允许证书摘要列表，适用于多证书或证书轮换。不要把两者合并。
-- `payloadCompressionEnabled` 是 Payload 容器压缩；`shellMinificationEnabled` 是 local 模式下 Shell 的 R8。它们作用对象不同。
+- `payloadCompressionEnabled` 是 Payload 容器压缩；`shellMinificationEnabled` 是 local 模式下 Jiagu Runtime 的 R8。它们作用对象不同。
 - `resConfigs` 是 Jiagu 资源混淆任务的语言过滤；Android DSL 的 `resConfigs` / `localeFilters` 是 AGP 资源打包配置。两者不是重复配置，但同时开启时可能叠加过滤。
 - `resObfuscationEnabled` 是 Jiagu 资源变换；`android.buildTypes.*.shrinkResources` 是 AGP 资源裁剪。不是同一开关。
 
@@ -135,8 +135,8 @@ dexReport {
 
 - `attachToTask` 当前只有声明和默认值，没有消费者，是可清理/待实现的配置项。
 - local 中服务端凭据、`serverUrl`、在线签名校验、上传器类名不参与任务执行；Payload 压缩、反调试和签名检查分别被插件强制覆盖为关闭。
-- local 的 `shellMinificationEnabled` 会覆盖 `android.buildTypes.*.minifyEnabled`。该开关是全局属性，会作用于所有创建的 Android Variant；`autoRunBuildTypes` 只过滤 Jiagu 任务，不会缩小 Shell R8 的覆盖范围。
+- local 且 Jiagu 流水线启用的 Variant 会关闭 AGP whole-program R8，由 `shellMinificationEnabled` 单独控制 Runtime R8；未被 `autoRunBuildTypes` 选中的 Variant 保留 Android DSL 的 `minifyEnabled`。该 DSL 仍是全局值，不能按 build type 单独开关 Runtime R8。
 
 ## 配置归属提醒
 
-以下不是 `dexReport` 配置，而是 Android/Gradle 自身配置：签名配置、`minifyEnabled`（online 模式）、`shrinkResources`、Android `resConfigs`/locale filters、ProGuard 文件、`applicationId`、版本号和 NDK 配置。local 模式下插件会根据 `shellMinificationEnabled` 设置 Variant 的 `minifyEnabled`；其他 Android DSL 配置仍由 AGP 负责。
+以下不是 `dexReport` 配置，而是 Android/Gradle 自身配置：签名配置、`minifyEnabled`（online 模式及未启用 Jiagu pipeline 的 Variant）、`shrinkResources`、Android `resConfigs`/locale filters、ProGuard 文件、`applicationId`、版本号和 NDK 配置。local 且 Jiagu pipeline 生效时，插件关闭 AGP whole-program R8 并单独按 `shellMinificationEnabled` 处理 Runtime；其他 Android DSL 配置仍由 AGP 负责。

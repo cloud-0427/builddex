@@ -55,6 +55,14 @@ java {
     withJavadocJar()
 }
 
+// The isolated Runtime R8 pass must consume the same rules shipped by the Runtime AAR.
+tasks.named('processResources') {
+    from(file('../jiagu-runtime/consumer-rules.pro')) {
+        into 'META-INF/jiagu'
+        rename { 'runtime-consumer-rules.pro' }
+    }
+}
+
 // 强制 Gradle 允许在 Java 8 项目中使用更高版本的 AGP 依赖进行编译
 configurations.compileClasspath {
     attributes {

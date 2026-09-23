@@ -16,6 +16,8 @@ import org.gradle.api.flow.FlowScope;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 import java.util.UUID;
 
@@ -38,6 +40,7 @@ public final class DexReportPlugin implements Plugin<Project> {
     @Override
     public void apply(Project project) {
         DexReportExtension extension = project.getExtensions().create("dexReport", DexReportExtension.class);
+        String runtimeR8Rules = loadRuntimeR8Rules();
 
         // 设置默认值
         extension.getServerUrl().convention("https://jg.nebulapro.net/");
@@ -65,13 +68,15 @@ public final class DexReportPlugin implements Plugin<Project> {
             ApplicationExtension androidExtension =
                     project.getExtensions().getByType(ApplicationExtension.class);
 
-            // R8 runs after the scoped class transform. JiaguTask replaces that input with
-            // the shell-only JAR, so this switch minifies the shell while business classes
-            // continue to be extracted into the separately encrypted payload.
+            // Local mode performs an isolated Runtime-only R8 pass inside JiaguTask and
+            // leaves AGP's normal class pipeline in D8 mode for the Shell pass-through lane.
             androidComponents.beforeVariants(androidComponents.selector().all(), variantBuilder -> {
                 if ("local".equalsIgnoreCase(extension.getProtectionMode().get())) {
-                    boolean shellMinification = extension.getShellMinificationEnabled().getOrElse(true);
-                    variantBuilder.setMinifyEnabled(shellMinification);
+                    java.util.Set<String> autoRunTypes = extension.getAutoRunBuildTypes().get();
+                    String buildType = variantBuilder.getBuildType();
+                    boolean jiaguVariant = buildType == null || autoRunTypes.isEmpty()
+                            || autoRunTypes.contains(buildType);
+                    if (jiaguVariant) variantBuilder.setMinifyEnabled(false);
                 }
             });
 
@@ -135,8 +140,14 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getResourcePackage().set(project.getLayout().getBuildDirectory().file(resourcePackagePath));
                             task.getMergedAssets().set(variant.getArtifacts().get(SingleArtifact.ASSETS.INSTANCE));
                             task.getMinifyEnabled().set(variant.isMinifyEnabled());
-                            task.getShellOnlyMinificationEnabled().set(localMode
-                                    && variant.isMinifyEnabled());
+                            boolean runtimeR8Enabled = localMode
+                                    && ext.getShellMinificationEnabled().getOrElse(true);
+                            task.getRuntimeR8Enabled().set(runtimeR8Enabled);
+                            task.getRuntimeR8Rules().set(runtimeR8Rules);
+                            if (runtimeR8Enabled) {
+                                task.getRuntimeMappingFile().set(project.getLayout().getBuildDirectory()
+                                        .file("intermediates/jiagu/" + variantName + "/runtime-mapping.txt"));
+                            }
                             task.getLocalMode().set(localMode);
                             task.getDebuggable().set(variant.getDebuggable());
                             task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
@@ -414,6 +425,18 @@ public final class DexReportPlugin implements Plugin<Project> {
             }
         } catch (Exception ignored) {
             // Dependency may already be supplied by the consumer.
+        }
+    }
+
+    private static String loadRuntimeR8Rules() {
+        try (InputStream input = DexReportPlugin.class.getResourceAsStream(
+                "/META-INF/jiagu/runtime-consumer-rules.pro")) {
+            if (input == null) throw new IOException("Missing bundled Jiagu Runtime consumer rules");
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            input.transferTo(output);
+            return output.toString(StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            throw new org.gradle.api.GradleException("Could not load Jiagu Runtime R8 rules", error);
         }
     }
 
