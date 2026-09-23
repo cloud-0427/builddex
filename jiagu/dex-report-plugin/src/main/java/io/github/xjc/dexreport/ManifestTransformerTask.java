@@ -72,17 +72,9 @@ public abstract class ManifestTransformerTask extends DefaultTask {
             // 2. 替换为壳程序的名称
             applicationTag.setAttribute("android:name", "io.github.xjc.jiagu.ProxyApplication");
 
-            // 3. 移除 android:appComponentFactory
-            // 因为业务代码被加密了，系统在启动时无法找到 CoreComponentFactory 会导致 Crash
-            if (applicationTag.hasAttribute("android:appComponentFactory")) {
-                applicationTag.removeAttribute("android:appComponentFactory");
-                getLogger().lifecycle("[Jiagu] 已移除 android:appComponentFactory");
-            }
-
-            // 4. 强力清理：移除所有 androidx.startup 和 profileinstaller 的组件
-            // 这些组件会在启动时尝试读取 classes.dex，导致在加固环境下报警
-            cleanUpComponent(applicationTag, "provider", "androidx.startup.InitializationProvider");
-            cleanUpComponent(applicationTag, "receiver", "androidx.profileinstaller.ProfileInstallReceiver");
+            // Preserve appComponentFactory and third-party Providers. Their classes are routed to
+            // the shell by JiaguTask, so deleting their manifest declarations is no longer needed
+            // and would change normal AndroidX/SDK startup behaviour.
 
             // 5. 注入 REAL_APPLICATION 记录
             Element metaData = doc.createElement("meta-data");
@@ -133,16 +125,4 @@ public abstract class ManifestTransformerTask extends DefaultTask {
                 String.format(java.util.Locale.ROOT, "%.3f s", millis / 1000.0d));
     }
 
-    private void cleanUpComponent(Element applicationTag, String tagName, String className) {
-        NodeList nodes = applicationTag.getElementsByTagName(tagName);
-        for (int i = 0; i < nodes.getLength(); i++) {
-            Element element = (Element) nodes.item(i);
-            if (className.equals(element.getAttribute("android:name"))) {
-                applicationTag.removeChild(element);
-                getLogger().lifecycle("[Jiagu] 已从 Manifest 移除组件: " + className);
-                cleanUpComponent(applicationTag, tagName, className);
-                return;
-            }
-        }
-    }
 }

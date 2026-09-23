@@ -1,12 +1,17 @@
-# Keep the ProxyApplication class and all related shell code
--keep class io.github.xjc.jiagu.** { *; }
--keep interface io.github.xjc.jiagu.** { *; }
-
-# Keep App Startup and Core components to ensure they are available in the shell
-# These are essential because they are whitelisted in JiaguTask to stay in the main DEX
--keep class androidx.startup.** { *; }
--keep class androidx.core.** { *; }
--keep class androidx.lifecycle.** { *; }
+# Keep only the stable JNI and reflection entry points. All other runtime classes are
+# eligible for R8 shrinking, optimization, and obfuscation in the shell pipeline.
+-keep,allowoptimization class io.github.xjc.jiagu.ProxyApplication {
+    public <init>();
+    public native int nativeAttach(android.content.Context);
+    public native void nativeOnCreate();
+}
+-keep,allowoptimization class io.github.xjc.jiagu.JiaguStartupReporter {
+    public static void nativeStageFinished(int, int, java.lang.String, long);
+    public static void observeFirstActivity(android.app.Application);
+}
+-keep,allowoptimization interface io.github.xjc.jiagu.JiaguStartupLogUploader {
+    public void upload(android.content.Context, io.github.xjc.jiagu.JiaguStartupEvent);
+}
 -keep class androidx.annotation.Keep
 
 # Keep all R classes in the main DEX to avoid NoClassDefFoundError when business code

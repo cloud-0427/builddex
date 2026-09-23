@@ -18,7 +18,7 @@ Jiagu 不拥有业务代码的 R8、裁剪、优化、重命名或重打包权�
 | Shell 与 Payload 的共享 ABI | Jiagu | TraceReferences 生成 Shell keep rules | 必须保持 Payload 所引用的原描述符 |
 | Android boot classpath | Android 平台 | 仅作为 D8/R8 library | 平台原名 |
 
-业务 Variant 的 `minifyEnabled` 仍由业务方决定其**上游**常规构建行为，但不再决定 Jiagu 是否对业务再次调用 R8。Jiagu 的业务编译器始终为 D8。
+Payload 的业务编译器始终为 D8；当前插件没有把应用 Variant 的 ProGuard/R8 规则交给 Payload R8。local 模式下 `shellMinificationEnabled` 会在 `beforeVariants` 设置 AGP Variant 的最终 `minifyEnabled`，因此应用的 `android.buildTypes.*.minifyEnabled` 会被覆盖；该次 R8 仅处理 Jiagu transform 输出的 Shell classes artifact。online 模式则不覆盖 Variant 值；若 `minifyEnabled=true` 而仍有业务 class 被路由至 Payload，当前策略会拒绝构建，而不是悄悄跳过 Payload 混淆。
 
 ## 3. 构建流程
 
@@ -36,7 +36,7 @@ AGP Scoped CLASSES
                                                +--> JG3 加密/封装
 ```
 
-业务输入不再按 `RAW` 和 `R8_PROCESSED` 分流，也不存在业务侧 `R8Command.addProgramFiles(...)`、`-repackageclasses`、业务 mapping 或 consumer-rule 合并。D8 不执行 tree shaking、优化、类/成员重命名，因此跨库的原始符号引用始终一致。
+业务输入不再按 `RAW` 和 `R8_PROCESSED` 选择 Jiagu R8 策略：Jiagu 对 Payload 输入只使用 D8，不执行 tree shaking、优化或类/成员重命名，因此输入描述符保持一致。业务方的应用级 `proguardFiles` 和 SDK consumer rules 会被 AGP 消费，但作用域是最终 Shell R8，不是 Payload；规则中只针对已路由到 Payload 的类的 keep 条目不会替 Payload 执行混淆。若业务需 Payload 混淆，须在业务上游构建中处理并保存对应 mapping，或实现独立 Payload R8 流程。
 
 ## 4. Shell/Payload 边界
 
@@ -82,7 +82,7 @@ Jiagu 仍检测 `R8_PROCESSED` 元数据，但仅用于审计、上游 mapping �
 
 1. 任意业务 RAW class/JAR 只经过 D8，不进入 Jiagu R8；
 2. 任意 `R8_PROCESSED` 业务 class/JAR 只经过 D8，不发生二次 R8；
-3. 业务 ProGuard/consumer rules 不会被 Jiagu 读取或改变；
+3. Jiagu 不将业务 ProGuard/consumer rules 用作 Payload R8 输入；这些规则可能由 AGP Shell R8 消费，因此必须按 Shell 归属审计；
 4. 业务 DEX 中对外部类的描述符必须与上游输入一致；
 5. Shell R8 只能处理 shell.jar，且 Shared ABI keep rules 生效；
 6. Payload 内无跨 DEX 重复类，Shell 与 Payload 的类描述符交集为空；
@@ -91,4 +91,4 @@ Jiagu 仍检测 `R8_PROCESSED` 元数据，但仅用于审计、上游 mapping �
 
 ## 7. 迁移
 
-删除旧设计中的业务 R8 分支、RAW 专属 `payload.raw.r8` 命名域、RAW 依赖闭包重写逻辑以及 `business-mapping.txt` 输出。升级后不需要业务方添加新的 DSL 或全局 `-keep`；原有业务 ProGuard 文件继续只服务于业务方自身的常规 AGP 构建，不再由 Jiagu 消费。
+删除旧设计中的业务 R8 分支、RAW 专属 `payload.raw.r8` 命名域、RAW 依赖闭包重写逻辑以及 `business-mapping.txt` 输出。业务方不需要增加全局 `-keep` 来保护 Payload 的符号；原有业务 ProGuard 文件不作为 Jiagu Payload R8 输入，但仍会由 AGP 消费并影响 Shell R8，因此须检查规则是否仍适用于 Shell。

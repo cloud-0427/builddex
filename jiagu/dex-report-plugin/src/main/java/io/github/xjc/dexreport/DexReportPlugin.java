@@ -44,12 +44,18 @@ public final class DexReportPlugin implements Plugin<Project> {
         extension.getProtectionMode().convention("online");
         extension.getPayloadCompressionEnabled().convention(true);
         extension.getSignatureCheckEnabled().convention(true);
-        extension.getResObfuscationEnabled().convention(true);
+        extension.getResObfuscationEnabled().convention(false);
         extension.getCertificateSha256Digests().convention(java.util.Collections.emptySet());
         extension.getAutoRunBuildTypes().convention(java.util.Collections.emptySet());
         extension.getAttachToTask().convention("assemble");
         extension.getPublish().convention(false);
         extension.getStartupLogUploaderClass().convention("");
+        extension.getPayloadSelectionMode().convention("legacy");
+        extension.getPayloadIncludePackages().convention(java.util.Collections.emptySet());
+        extension.getShellKeepPackages().convention(java.util.Collections.emptySet());
+        extension.getShellKeepClasses().convention(java.util.Collections.emptySet());
+        extension.getStartupComponentPolicy().convention("validate");
+        extension.getPayloadR8Policy().convention("fail");
 
         project.getPluginManager().withPlugin("com.android.application", plugin -> {
             addJiaguRuntimeDependency(project);
@@ -58,6 +64,16 @@ public final class DexReportPlugin implements Plugin<Project> {
                     project.getExtensions().getByType(ApplicationAndroidComponentsExtension.class);
             ApplicationExtension androidExtension =
                     project.getExtensions().getByType(ApplicationExtension.class);
+
+            // R8 runs after the scoped class transform. JiaguTask replaces that input with
+            // the shell-only JAR, so this switch minifies the shell while business classes
+            // continue to be extracted into the separately encrypted payload.
+            androidComponents.beforeVariants(androidComponents.selector().all(), variantBuilder -> {
+                if ("local".equalsIgnoreCase(extension.getProtectionMode().get())) {
+                    boolean shellMinification = extension.getShellMinificationEnabled().getOrElse(true);
+                    variantBuilder.setMinifyEnabled(shellMinification);
+                }
+            });
 
             androidComponents.onVariants(androidComponents.selector().all(), variant -> {
                 String variantName = variant.getName();
@@ -119,8 +135,19 @@ public final class DexReportPlugin implements Plugin<Project> {
                             task.getResourcePackage().set(project.getLayout().getBuildDirectory().file(resourcePackagePath));
                             task.getMergedAssets().set(variant.getArtifacts().get(SingleArtifact.ASSETS.INSTANCE));
                             task.getMinifyEnabled().set(variant.isMinifyEnabled());
+                            task.getShellOnlyMinificationEnabled().set(localMode
+                                    && variant.isMinifyEnabled());
+                            task.getLocalMode().set(localMode);
                             task.getDebuggable().set(variant.getDebuggable());
                             task.getMinApiLevel().set(variant.getMinSdk().getApiLevel());
+                            task.getPayloadSelectionMode().set(ext.getPayloadSelectionMode());
+                            task.getPayloadIncludePackages().set(ext.getPayloadIncludePackages());
+                            task.getShellKeepPackages().set(ext.getShellKeepPackages());
+                            task.getShellKeepClasses().set(ext.getShellKeepClasses());
+                            task.getStartupComponentPolicy().set(ext.getStartupComponentPolicy());
+                            task.getPayloadR8Policy().set(ext.getPayloadR8Policy());
+                            task.getMergedManifest().set(
+                                    variant.getArtifacts().get(SingleArtifact.MERGED_MANIFEST.INSTANCE));
                             if (localMode) task.getPayloadCompressionEnabled().set(false);
                             else task.getPayloadCompressionEnabled().set(ext.getPayloadCompressionEnabled());
                             task.getBootClasspath().from(androidComponents.getSdkComponents().getBootClasspath());

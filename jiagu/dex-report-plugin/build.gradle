@@ -66,6 +66,15 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+// The plugin exposes Gradle task implementation classes as public JVM classes, but they are not
+// supported user-facing API. Keep validating actual Javadoc syntax while suppressing doclint's
+// exhaustive "missing comment/@return" checks for those implementation details.
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.charSet = 'UTF-8'
+    options.addBooleanOption('Xdoclint:all,-missing', true)
+}
+
 /**
  * 解决 "Cannot resolve resource filtering of MatchingCopyAction" 警告。
  * IDEA 的 JPS 构建器无法处理 processResources 任务中的 filesMatching 或 filter 闭包。

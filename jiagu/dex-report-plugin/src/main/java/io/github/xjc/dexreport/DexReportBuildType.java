@@ -10,18 +10,36 @@ import javax.inject.Inject;
 public abstract class DexReportBuildType {
     private final String name;
 
+    /**
+     * Creates a build-type-specific configuration object.
+     *
+     * @param name Gradle build type name
+     */
     @Inject
     public DexReportBuildType(String name) {
         this.name = name;
     }
 
+    /**
+     * Returns this Gradle build type's name.
+     *
+     * @return build type name
+     */
     public String getName() {
         return name;
     }
 
-    /** 是否在构建成功后自动发布。 */
+    /**
+     * Returns whether the release is published after a successful build.
+     *
+     * @return publish switch property
+     */
     public abstract Property<Boolean> getPublish();
 
-    /** 是否启用反调试。 */
+    /**
+     * Returns whether anti-debug protection is enabled.
+     *
+     * @return anti-debug switch property
+     */
     public abstract Property<Boolean> getAntiDebugEnabled();
 }

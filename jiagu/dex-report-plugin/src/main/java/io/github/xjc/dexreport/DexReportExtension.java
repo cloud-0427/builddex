@@ -11,66 +11,89 @@ import org.gradle.api.provider.SetProperty;
  */
 public abstract class DexReportExtension {
 
-    /** `online` keeps the server-backed protocol; `local` embeds all crypto material. */
+    /** @return protection mode property (`online` or `local`) */
     public abstract Property<String> getProtectionMode();
 
-    /** Compress JG payload entries. Local mode defaults to false. */
+    /** @return whether JG payload entries are compressed */
     public abstract Property<Boolean> getPayloadCompressionEnabled();
 
+    /** Enables R8 for the post-routing shell classes. Local mode defaults to true. */
+    public abstract Property<Boolean> getShellMinificationEnabled();
+
     /**
-     * 指定哪些构建类型 (BuildType) 需要自动运行报告任务。
+     * @return build types that automatically run the Jiagu task
      */
     public abstract SetProperty<String> getAutoRunBuildTypes();
 
     /**
-     * 指定报告任务需要挂载（依赖）到哪个任务前缀之后运行。
+     * @return task prefix to which Jiagu is attached
      */
     public abstract Property<String> getAttachToTask();
 
-    /** 密钥服务地址。 */
+    /** @return key-service URL property */
     public abstract Property<String> getServerUrl();
 
-    /** 服务端公司标识。 */
+    /** @return server-side company identifier property */
     public abstract Property<String> getCompanyId();
 
-    /** 公司打包 API Key。 */
+    /** @return server API key property */
     public abstract Property<String> getCompanyApiKey();
 
-    /** 是否启用签名校验。 */
+    /** @return whether signature verification is enabled */
     public abstract Property<Boolean> getSignatureCheckEnabled();
 
-    /** 预期的签名 SHA-256 哈希值。 */
+    /** @return expected signing certificate digest */
     public abstract Property<String> getExpectedSignature();
 
-    /** Fully-qualified shell-side startup log uploader implementation. */
+    /** @return fully-qualified shell-side startup log uploader implementation */
     public abstract Property<String> getStartupLogUploaderClass();
 
-    /** Additional allowed signing certificate SHA-256 Base64URL digests. */
+    /** @return Payload selection mode */
+    public abstract Property<String> getPayloadSelectionMode();
+
+    /** @return package patterns eligible for the encrypted Payload */
+    public abstract SetProperty<String> getPayloadIncludePackages();
+
+    /** @return package patterns that must remain in the APK shell */
+    public abstract SetProperty<String> getShellKeepPackages();
+
+    /** @return fully-qualified classes that must remain in the APK shell */
+    public abstract SetProperty<String> getShellKeepClasses();
+
+    /** @return startup component conflict policy */
+    public abstract Property<String> getStartupComponentPolicy();
+
+    /** @return Payload R8 compatibility policy */
+    public abstract Property<String> getPayloadR8Policy();
+
+    /** @return additional allowed signing certificate SHA-256 Base64URL digests */
     public abstract SetProperty<String> getCertificateSha256Digests();
 
-    /** 是否启用资源混淆。 */
+    /** @return whether resource obfuscation is enabled */
     public abstract Property<Boolean> getResObfuscationEnabled();
 
-    /** 资源语言过滤。 */
+    /** @return resource configuration filters */
     public abstract org.gradle.api.provider.ListProperty<String> getResConfigs();
 
     /**
-     * 全局默认：是否在构建成功后自动将版本标记为 PUBLISHED。
+     * @return global default publish switch
      */
     public abstract Property<Boolean> getPublish();
 
     /**
-     * 全局默认：是否启用反调试和 Hook 检测。
+     * @return global default anti-debug switch
      */
     public abstract Property<Boolean> getAntiDebugEnabled();
 
     /**
-     * 构建类型特定的配置容器。
+     * @return build-type-specific configuration container
      */
     public abstract NamedDomainObjectContainer<DexReportBuildType> getBuildTypes();
 
     /**
-     * DSL 配置块：buildTypes { ... }
+     * Configures build-type-specific overrides.
+     *
+     * @param action configuration action
      */
     public void buildTypes(Action<? super NamedDomainObjectContainer<DexReportBuildType>> action) {
         action.execute(getBuildTypes());

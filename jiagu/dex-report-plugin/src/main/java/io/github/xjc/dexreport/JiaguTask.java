@@ -126,6 +126,34 @@ public abstract class JiaguTask extends DefaultTask {
     public abstract Property<Boolean> getMinifyEnabled();
 
     @Input
+    public abstract Property<Boolean> getShellOnlyMinificationEnabled();
+
+    @Input
+    public abstract Property<Boolean> getLocalMode();
+
+    @Input
+    public abstract Property<String> getPayloadSelectionMode();
+
+    @Input
+    public abstract org.gradle.api.provider.SetProperty<String> getPayloadIncludePackages();
+
+    @Input
+    public abstract org.gradle.api.provider.SetProperty<String> getShellKeepPackages();
+
+    @Input
+    public abstract org.gradle.api.provider.SetProperty<String> getShellKeepClasses();
+
+    @Input
+    public abstract Property<String> getStartupComponentPolicy();
+
+    @Input
+    public abstract Property<String> getPayloadR8Policy();
+
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    public abstract RegularFileProperty getMergedManifest();
+
+    @Input
     public abstract Property<Boolean> getDebuggable();
 
     @Input
@@ -163,6 +191,28 @@ public abstract class JiaguTask extends DefaultTask {
         long taskStartedAt = System.nanoTime();
         Map<String, Long> stageTimes = new LinkedHashMap<>();
         getLogger().lifecycle("[Jiagu][计时] 加固任务开始: {}", getPath());
+
+        String payloadMode = getPayloadSelectionMode().get();
+        Set<String> payloadPackages = getPayloadIncludePackages().get();
+        Set<String> shellPackages = getShellKeepPackages().get();
+        Set<String> shellClasses = getShellKeepClasses().get();
+        String startupPolicy = getStartupComponentPolicy().get();
+        try {
+            PayloadRouting.validate(payloadMode, payloadPackages, startupPolicy, getPayloadR8Policy().get());
+            PayloadRouting.validatePackages(shellPackages, "shellKeepPackages");
+            PayloadRouting.validateClasses(shellClasses, "shellKeepClasses");
+        } catch (IllegalArgumentException error) {
+            throw new IOException("[Jiagu] Invalid Payload routing configuration: " + error.getMessage(), error);
+        }
+        Set<String> startupClasses;
+        try {
+            startupClasses = PayloadRouting.startupClasses(
+                    getMergedManifest().get().getAsFile(), getPackageName().get());
+        } catch (Exception error) {
+            throw new IOException("[Jiagu] Failed to inspect merged manifest startup components", error);
+        }
+        getLogger().lifecycle("[Jiagu][Routing] mode={}, payloadPackages={}, startupClasses={}",
+                payloadMode, payloadPackages.size(), startupClasses.size());
 
         long stageStartedAt = System.nanoTime();
         File outputJarFile = getOutputJar().get().getAsFile();
@@ -225,7 +275,8 @@ public abstract class JiaguTask extends DefaultTask {
                                     businessJos,
                                     entry.getName(), data, processedNames, services,
                                     jarFile.getAsFile().getAbsolutePath() + "!/" + entry.getName(),
-                                    businessClasses);
+                                    businessClasses, payloadMode, payloadPackages, shellPackages,
+                                    shellClasses, startupClasses, startupPolicy);
                         }
                     }
                 }
@@ -246,7 +297,8 @@ public abstract class JiaguTask extends DefaultTask {
                                 businessJos,
                                 relativePath, Files.readAllBytes(path), processedNames, services,
                                 path.toAbsolutePath().toString(),
-                                businessClasses);
+                                businessClasses, payloadMode, payloadPackages, shellPackages,
+                                shellClasses, startupClasses, startupPolicy);
                     }
                 }
             }
@@ -281,6 +333,15 @@ public abstract class JiaguTask extends DefaultTask {
                                 .collect(java.util.stream.Collectors.toList()),
                         getShellKeepRulesFile().get().getAsFile().toPath());
                 List<String> generatedShellRules = new ArrayList<>(services.keepRules());
+                if (getLocalMode().get()) {
+                    generatedShellRules.add("-keep,allowoptimization class io.github.xjc.jiagu.LocalPayloadCrypto {");
+                    generatedShellRules.add("    public static java.nio.ByteBuffer getLocalPayload(android.content.Context, java.lang.String, java.nio.ByteBuffer);");
+                    generatedShellRules.add("}");
+                } else {
+                    generatedShellRules.add("-keep,allowoptimization class io.github.xjc.jiagu.NetworkHelper {");
+                    generatedShellRules.add("    public static java.nio.ByteBuffer getAuthorizedPayload(android.content.Context, java.lang.String, java.nio.ByteBuffer);");
+                    generatedShellRules.add("}");
+                }
                 // Payload 与壳由不同 ClassLoader 加载。把可改名的壳类（包括 R8 新建的
                 // external synthetic）限制在壳专属命名域；TraceReferences 生成的 ABI
                 // keep 规则仍会让 Payload 实际引用的壳类保持原名。
@@ -486,7 +547,9 @@ public abstract class JiaguTask extends DefaultTask {
 
     private void processEntry(JarOutputStream shellJos, JarOutputStream businessJos,
                               String name, byte[] data, Map<String, SeenEntry> processedNames,
-                              ServiceDescriptors services, String origin, int[] businessClassCount)
+                              ServiceDescriptors services, String origin, int[] businessClassCount,
+                              String payloadMode, Set<String> payloadPackages, Set<String> shellPackages,
+                              Set<String> shellClasses, Set<String> startupClasses, String startupPolicy)
             throws IOException {
         // Merge all providers before duplicate-entry filtering; multiple libraries may
         // contribute implementations of the same SPI.
@@ -508,9 +571,22 @@ public abstract class JiaguTask extends DefaultTask {
             return;
         }
 
-        // 适度回调：保留 R 类在壳中。
-        // 完全移除 R 类可能导致某些系统资源（如图标、主题）在壳 Application 阶段解析失败。
-        boolean shouldKeepInShell = shouldKeepInShell(name, configuredUploaderClass());
+        PayloadRouting.Decision routing = PayloadRouting.route(name, payloadMode, payloadPackages,
+                shellPackages, shellClasses, startupClasses);
+        boolean shouldKeepInShell = routing.destination == PayloadRouting.Destination.SHELL
+                || shouldKeepInShell(name, configuredUploaderClass());
+        if (routing.startupAllowlistConflict) {
+            String message = "[Jiagu][Routing] Manifest startup class forced into Shell despite "
+                    + "payloadIncludePackages: " + name;
+            if ("fail".equals(startupPolicy)) throw new IOException(message);
+            if (!"off".equals(startupPolicy)) getLogger().warn(message);
+        }
+        if (programClass && !shouldKeepInShell && getMinifyEnabled().get()
+                && !getShellOnlyMinificationEnabled().get()) {
+            throw new IOException("[Jiagu] Variant enables minifyEnabled=true but Payload class " + name
+                    + " would bypass the business R8 configuration. Set payloadR8Policy='fail' and "
+                    + "move it to Shell, or use a future preprocessed/R8 Payload pipeline.");
+        }
 
         if (shouldKeepInShell || !programClass) {
             // 壳程序代码、白名单代码 或 非代码资源：透传到输出 JAR (壳 JAR)

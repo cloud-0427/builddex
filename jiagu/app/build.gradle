@@ -6,10 +6,18 @@ plugins {
 
 // app/build.gradle
 dexReport {
+    // Protect only application-owned code. Third-party SDKs remain in the normal APK
+    // class path, which keeps their Provider/Startup lifecycle compatible with AGP.
+    payloadSelectionMode = "allowlist"
+    payloadIncludePackages = ["lows.dgeon.ightr.jiagu.**"]
+    startupComponentPolicy = "validate"
+    payloadR8Policy = "fail"
+
     // Shell-side, minimal HTTP startup event uploader.
 //    startupLogUploaderClass = "lows.dgeon.ightr.jiagu.StartupEventUploader"
     // Offline baseline: no Jiagu server, authorization, or runtime network access.
     protectionMode = "local"
+    shellMinificationEnabled = true
 
     // 线上真实的签名sha256的 base64URL
     certificateSha256Digests = [
@@ -36,9 +44,6 @@ dexReport {
     publish = false
     // debug 检测，测试关闭，线上可以打开，默认是打开的
     antiDebugEnabled = false
-
-    // 是否混淆res， unity 目前不支持，需要增加 res 白名单，后续添加
-    resObfuscationEnabled = false
 
     // 只保留 中文 和 英文
     resConfigs = ["zh", "en"]
@@ -85,7 +90,7 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled false // local mode enables R8 for the routed shell via Android Components.
             shrinkResources = false
             
             // AGP 9.3+ 正确的禁用方式：在 installation 块中设置
