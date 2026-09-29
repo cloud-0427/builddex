@@ -92,23 +92,9 @@ android {
         release {
             minifyEnabled false // local mode runs isolated Runtime R8 before AGP's D8 pass.
             shrinkResources = false
-            
-            // AGP 9.3+ 正确的禁用方式：在 installation 块中设置
-            installation {
-                enableBaselineProfile = false
-            }
 
-            experimentalProperties["android.experimental.r8.dex-startup-optimization"] = false
-            experimentalProperties["android.experimental.art-profile-r8-rewriting"] = false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'src/main/keepRules/rules.keep'
             signingConfig = signingConfigs.debug
-        }
-        debug {
-            installation {
-                enableBaselineProfile = false
-            }
-            experimentalProperties["android.experimental.r8.dex-startup-optimization"] = false
-            experimentalProperties["android.experimental.art-profile-r8-rewriting"] = false
         }
     }
     compileOptions {
@@ -152,10 +138,4 @@ dependencies {
     testImplementation libs.junit
     androidTestImplementation libs.espresso.core
     androidTestImplementation libs.ext.junit
-}
-
-configurations {
-    configureEach {
-        exclude group: 'androidx.profileinstaller', module: 'profileinstaller'
-    }
 }
