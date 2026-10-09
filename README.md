@@ -1,8 +1,10 @@
 # BuildDex / Jiagu
 
-Android APK 加固 Gradle 插件。插件会在构建期间处理字节码、Manifest、JNI 载荷与资源，并自动引入运行时 AAR。
+Android APK 加固 Gradle 插件。当前 MVP 在构建期间分离业务 DEX、生成本地加密 assets 并接入公开 API ClassLoader，支持可选异步事件上报。配置见 [本地 MVP 配置](jiagu/docs/09-dexreport-configuration.md)。
 
-当前要求：Android Gradle Plugin 9.3.1、JDK 17、minSdk 29，以及可用的 Android NDK。
+当前要求：Android Gradle Plugin 9.3.1、JDK 17、minSdk 29。Jiagu 本地运行库不需要 NDK，业务自身 JNI 除外。
+
+当前本地 MVP 修改尚未发布到远程仓库，请先使用本地源码构建。以下远程接入方式须使用包含本次改造的正式 Tag，旧 Tag 仍对应历史实现。
 
 ## 使用 JitPack 版本
 
@@ -37,7 +39,7 @@ dependencyResolutionManagement {
 }
 ```
 
-在 App 模块中应用插件；插件会自动引入同版本的 `jiagu-runtime`：
+在 App 模块中应用插件；插件会自动引入同版本的 `jiagu-local-runtime`：
 
 ```groovy
 plugins {
@@ -46,17 +48,11 @@ plugins {
 }
 
 dexReport {
-    publicKeyPath = 'https://example.com/jiagu-keys.json'
-    publicKeyJsonKey = 'akmKeys'
-    enableMultiVersion = true
-    keyExpiryDays = 2
-
-    antiDebugEnabled = true
-    signatureCheckEnabled = true
-    expectedSignature = 'your-lowercase-sha256-signature'
-
-    resObfuscationEnabled = true
-    resConfigs = ['zh', 'en']
+    protectionMode = 'local'
+    payloadSelectionMode = 'allowlist'
+    payloadIncludePackages = ['com.example.app.business.**']
+    autoRunBuildTypes = ['debug', 'release']
+    startupTelemetryEnabled = false
 }
 ```
 
@@ -67,11 +63,11 @@ dexReport {
 ```powershell
 cd jiagu
 .\gradlew.bat -p dex-report-plugin clean publishToMavenLocal
-.\gradlew.bat :jiagu-runtime:publishToMavenLocal
+.\gradlew.bat :jiagu-local-runtime:publishToMavenLocal
 .\gradlew.bat :app:assembleDebug
 ```
 
-示例 App 通过 composite build 使用插件源码，并直接依赖 `:jiagu-runtime`。
+示例 App 通过 composite build 使用插件源码，并直接依赖 `:jiagu-local-runtime`。
 
 ### 示例 App 切换本地/JitPack
 
@@ -96,7 +92,7 @@ jiagu.version=0.1.1
 .\gradlew.bat :app:dependencies --configuration debugRuntimeClasspath "-Pjiagu.source=jitpack" --refresh-dependencies
 ```
 
-远程模式不会注册本地 composite plugin build 或 `:jiagu-runtime` project，也不会查询 Maven Local。两种模式的 App 输出也分别写入 `app/build/local` 和 `app/build/jitpack`，避免依赖与构建中间产物交叉污染。
+远程模式不会注册本地 composite plugin build 或 `:jiagu-local-runtime` project，也不会查询 Maven Local。两种模式的 App 输出也分别写入 `app/build/local` 和 `app/build/jitpack`，避免依赖与构建中间产物交叉污染。
 
 ## 发布新版本
 

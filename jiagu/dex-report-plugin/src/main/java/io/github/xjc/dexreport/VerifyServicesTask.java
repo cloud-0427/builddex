@@ -23,6 +23,8 @@ public abstract class VerifyServicesTask extends DefaultTask {
     public abstract RegularFileProperty getDescriptors();
     @InputFile @PathSensitive(PathSensitivity.NONE)
     public abstract RegularFileProperty getPayload();
+    @InputFile @org.gradle.api.tasks.Optional @PathSensitive(PathSensitivity.NONE)
+    public abstract RegularFileProperty getEncryptedAsset();
 
     @TaskAction public void verify() throws IOException {
         ServiceDescriptors expected = ServiceDescriptors.read(getDescriptors().get().getAsFile().toPath());
@@ -62,6 +64,17 @@ public abstract class VerifyServicesTask extends DefaultTask {
             }
             Map<String, String> shellDefinitions = new LinkedHashMap<>();
             try (JarFile jar = new JarFile(apk.toFile())) {
+                if (getEncryptedAsset().isPresent()) {
+                    JarEntry asset = jar.getJarEntry("assets/jiagu/local-payload.jgl");
+                    if (asset == null) throw new IOException("Local encrypted asset missing");
+                    try (InputStream in = jar.getInputStream(asset)) {
+                        if (!Arrays.equals(in.readAllBytes(), Files.readAllBytes(getEncryptedAsset().get().getAsFile().toPath())))
+                            throw new IOException("Packaged local encrypted asset differs from producer");
+                    }
+                    for (JarEntry e : Collections.list(jar.entries()))
+                        if (e.getName().endsWith("/libjiagu-core.so") || e.getName().endsWith("/liblog_ext.so"))
+                            throw new IOException("Old Jiagu native library packaged: " + e.getName());
+                }
                 Set<String> seen = new HashSet<>();
                 for (JarEntry entry : Collections.list(jar.entries())) {
                     String name = entry.getName();

@@ -6,4 +6,4 @@ before_install:
 
 install:
   # Do not publish a partial release when the runtime AAR fails to build.
-  - ./jiagu/gradlew -p jiagu :jiagu-runtime:clean :jiagu-runtime:publishToMavenLocal -x test && ./jiagu/gradlew -p jiagu/dex-report-plugin clean publishToMavenLocal -x test
+  - ./jiagu/gradlew -p jiagu :jiagu-local-runtime:clean :jiagu-local-runtime:publishToMavenLocal -x test && ./jiagu/gradlew -p jiagu/dex-report-plugin clean publishToMavenLocal -x test

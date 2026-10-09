@@ -7,13 +7,11 @@ import static org.junit.Assert.assertTrue;
 
 public class JiaguTaskShellDependenciesTest {
     @Test
-    public void keepsAuthorizationHttpStackInShell() {
-        assertTrue(JiaguTask.shouldKeepInShell("okhttp3/OkHttpClient.class"));
-        assertTrue(JiaguTask.shouldKeepInShell("okio/Buffer.class"));
-        assertTrue(JiaguTask.shouldKeepInShell("org/conscrypt/Conscrypt.class"));
-        assertTrue(JiaguTask.shouldKeepInShell("kotlin/jvm/internal/Intrinsics.class"));
-        assertTrue(JiaguTask.shouldKeepInShell("androidx/startup/Initializer.class"));
-        assertTrue(JiaguTask.shouldKeepInShell("androidx/collection/ArraySet.class"));
+    public void keepsOnlyLocalBootstrapAsFixedShell() {
+        assertTrue(JiaguTask.shouldKeepInShell("io/github/xjc/jiagu/local/LocalComponentFactory.class"));
+        assertTrue(JiaguTask.shouldKeepInShell("com/example/R$layout.class"));
+        assertFalse(JiaguTask.shouldKeepInShell("okhttp3/OkHttpClient.class"));
+        assertFalse(JiaguTask.shouldKeepInShell("org/conscrypt/Conscrypt.class"));
         assertFalse(JiaguTask.shouldKeepInShell("com/example/business/MainActivity.class"));
     }
 

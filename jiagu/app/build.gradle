@@ -6,59 +6,16 @@ plugins {
 
 // app/build.gradle
 dexReport {
-    // Protect only application-owned code. Third-party SDKs remain in the normal APK
-    // class path, which keeps their Provider/Startup lifecycle compatible with AGP.
+    protectionMode = "local"
     payloadSelectionMode = "allowlist"
     payloadIncludePackages = ["lows.dgeon.ightr.jiagu.**"]
-    startupComponentPolicy = "validate"
     payloadR8Policy = "fail"
-
-    // Shell-side, minimal HTTP startup event uploader.
-//    startupLogUploaderClass = "lows.dgeon.ightr.jiagu.StartupEventUploader"
-    // Offline baseline: no Jiagu server, authorization, or runtime network access.
-    protectionMode = "local"
     shellMinificationEnabled = true
-
-    // 线上真实的签名sha256的 base64URL
-    certificateSha256Digests = [
-            "sy_JLyeXjMJcircorCb5QKmg-xYvEtSdPjrUZLaEmWE"
-    ]
-
-    // 指定在哪些构建类型下自动运行。支持 "debug", "release" 等。
-    autoRunBuildTypes = ["debug","release"]
-
-    // 指定挂载的任务前缀。
-    // 支持 "assemble" (默认), "bundle" (生成AAB), "install" (安装) 等。
-    attachToTask = "assemble"
-
-    // test
-//    companyId = "acme"
-//    serverUrl = "http://192.168.111.115:8761"
-//    companyApiKey = "X9sRFtwGOndFhS1ykVq2EIVP-JoDk728w3tQxvIkR6o"
-
-    // online
-//    companyId = "acme"
-//    companyApiKey = "xxoPvVsSoYgl-DIrxIeuM7phh2gTihwtMMpqesuIRvQ"
-
-    // 加固密钥是否发布，发布后此版本不能再修改
-    publish = false
-    // debug 检测，测试关闭，线上可以打开，默认是打开的
-    antiDebugEnabled = false
-
-    // 只保留 中文 和 英文
-    resConfigs = ["zh", "en"]
-
-    buildTypes {
-        release {
-            publish = true
-            antiDebugEnabled = false
-        }
-        debug {
-            // 这里可以单独覆盖 debug 的行为
-            publish = false
-            antiDebugEnabled = false
-        }
-    }
+    autoRunBuildTypes = ["debug", "release"]
+    startupTelemetryEnabled = providers.gradleProperty("jiagu.telemetry").getOrElse("false").toBoolean()
+    startupLogUploaderClass = providers.gradleProperty("jiagu.uploader")
+            .getOrElse("lows.dgeon.ightr.jiagu.StartupEventUploader")
+    resObfuscationEnabled = false
 }
 
 android {
@@ -77,9 +34,8 @@ android {
 
         multiDexEnabled = false
 
-        testInstrumentationRunner providers.gradleProperty('jiagu.testBuildType').getOrElse('debug') == 'release'
-                ? 'lows.dgeon.ightr.jiagu.ServiceVerificationInstrumentation'
-                : 'androidx.test.runner.AndroidJUnitRunner'
+        testInstrumentationRunner providers.gradleProperty('jiagu.testRunner')
+                .getOrElse('lows.dgeon.ightr.jiagu.LocalMvpInstrumentation')
 
         externalNativeBuild {
             cmake {
@@ -118,11 +74,8 @@ base {
 }
 
 dependencies {
-    // StartupEventUploader runs from the protection shell, before business-layer
-    // classes are guaranteed to be available. Keep its HTTP/TLS stack direct.
-    // JiaguTask retains okhttp3/okio in the shell alongside the uploader.
-    implementation 'com.squareup.okhttp3:okhttp:5.4.0'
-    implementation 'org.conscrypt:conscrypt-android:2.5.3'
+
+
 
     // jiagu-runtime 由加固插件自动注入：local 模式使用本地 project，
     // jitpack 模式使用与插件相同版本的远程 AAR。不要在这里重复声明。

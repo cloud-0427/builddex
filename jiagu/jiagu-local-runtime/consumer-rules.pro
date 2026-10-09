@@ -1,0 +1,7 @@
+-keep class io.github.xjc.jiagu.local.LocalComponentFactory { public <init>(); }
+-keep class io.github.xjc.jiagu.local.LocalAndroidXComponentFactory { public <init>(); }
+-keep class io.github.xjc.jiagu.local.LocalEventInitializer { public <init>(); }
+-keep class io.github.xjc.jiagu.local.LocalEventUploader { *; }
+-keep class io.github.xjc.jiagu.local.LocalStartupEvent { *; }
+-keep class io.github.xjc.jiagu.local.LocalUploadException { *; }
+-keep class io.github.xjc.jiagu.local.LocalEventReporter { public static <methods>; }

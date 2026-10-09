@@ -20,6 +20,8 @@ public abstract class DexReportExtension {
     /** Enables the isolated Jiagu Runtime R8 pass in local mode. Defaults to true. */
     public abstract Property<Boolean> getShellMinificationEnabled();
 
+    public abstract Property<Boolean> getStartupTelemetryEnabled();
+
     /**
      * @return build types that automatically run the Jiagu task
      */

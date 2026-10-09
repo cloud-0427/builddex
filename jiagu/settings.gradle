@@ -73,7 +73,7 @@ rootProject.name = "Jiagu"
 include ':app'
 if (jiaguSource == 'local') {
     // 远程模式下完全不注册本地 runtime，避免 project dependency 替换远程 AAR。
-    include ':jiagu-runtime'
+    include ':jiagu-local-runtime'
 }
 
 logger.lifecycle(

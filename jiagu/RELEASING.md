@@ -1,10 +1,14 @@
+# ?? MVP ????
+
+???????? `jiagu-local-runtime`??? Release/???????? MVP ???????????????????
+
 # 发布检查清单
 
 ## 自动完成
 
 推送形如 `0.1.0` 的 Tag 后，`.github/workflows/release.yml` 会：
 
-1. 使用 JDK 17 构建并发布 `jiagu-runtime` AAR 到临时 Maven Local。
+1. 使用 JDK 17 构建并发布 `jiagu-local-runtime` AAR 到临时 Maven Local。
 2. 构建并发布 `dex-report-plugin` JAR 和 Gradle plugin marker。
 3. 请求 JitPack 构建对应 Tag，并检查构建日志。
 4. JitPack 成功后创建 GitHub Release，并自动生成 release notes。
@@ -13,7 +17,7 @@ JitPack 构建使用仓库根目录的 `jitpack.yml`，发布坐标如下：
 
 ```text
 com.github.cloud-0427.builddex:dex-report-plugin:<tag>
-com.github.cloud-0427.builddex:jiagu-runtime:<tag>
+com.github.cloud-0427.builddex:jiagu-local-runtime:<tag>
 ```
 
 插件构建时会把同一组 runtime 坐标写入插件资源，所以插件与 runtime 始终使用相同 Tag。

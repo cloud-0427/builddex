@@ -135,17 +135,8 @@ final class PayloadRouting {
         if (CLASS_PATTERN.matcher(name).matches()) target.add(name);
     }
 
-    private static boolean isFixedShell(String entryName) {
-        return entryName.startsWith("io/github/xjc/jiagu/")
-                || entryName.startsWith("com/google/crypto/tink/")
-                || entryName.startsWith("com/google/android/play/")
-                || entryName.startsWith("com/google/android/gms/")
-                || entryName.startsWith("androidx/collection/")
-                || entryName.startsWith("okhttp3/") || entryName.startsWith("okio/")
-                || entryName.startsWith("org/conscrypt/") || entryName.startsWith("kotlin/")
-                || entryName.startsWith("androidx/startup/")
-                || entryName.startsWith("org/jetbrains/annotations/")
-                || entryName.startsWith("org/jspecify/annotations/")
+    static boolean isFixedShell(String entryName) {
+        return entryName.startsWith("io/github/xjc/jiagu/local/")
                 || entryName.contains("/R$") || entryName.endsWith("/R.class");
     }
 }

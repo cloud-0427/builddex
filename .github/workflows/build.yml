@@ -34,7 +34,7 @@ jobs:
 
       - name: Verify runtime publication
         working-directory: jiagu
-        run: ./gradlew :jiagu-runtime:clean :jiagu-runtime:publishToMavenLocal -x test
+        run: ./gradlew :jiagu-local-runtime:clean :jiagu-local-runtime:publishToMavenLocal -x test
 
       - name: Verify plugin publication
         working-directory: jiagu

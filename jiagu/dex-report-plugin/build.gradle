@@ -42,9 +42,12 @@ dependencies {
     // Compile against the oldest supported Android Components API. AGP 8.12 requires
     // Gradle 8.13, while this API remains binary-compatible with the AGP 9.x line.
     compileOnly 'com.android.tools.build:gradle-api:8.12.2'
-    // Keep Jiagu's standalone R8/D8 ahead of AGP 8.12's toolchain and compatible
-    // with Kotlin 2.3 class metadata (R8 8.13.19+).
-    implementation 'com.android.tools:r8:8.13.23'
+    // Use the host AGP toolchain at runtime. Publishing an older R8 here overrides
+    // AGP's implementation and can break its internal D8 method calls.
+    compileOnly 'com.android.tools:r8:8.13.23'
+    testImplementation 'com.android.tools:r8:8.13.23'
+    implementation 'org.ow2.asm:asm-tree:9.8'
+    implementation 'org.ow2.asm:asm-analysis:9.8'
     testImplementation 'junit:junit:4.13.2'
 }
 
@@ -57,7 +60,7 @@ java {
 
 // The isolated Runtime R8 pass must consume the same rules shipped by the Runtime AAR.
 tasks.named('processResources') {
-    from(file('../jiagu-runtime/consumer-rules.pro')) {
+    from(file('../jiagu-local-runtime/consumer-rules.pro')) {
         into 'META-INF/jiagu'
         rename { 'runtime-consumer-rules.pro' }
     }
@@ -100,13 +103,18 @@ def generateJiaguProperties = tasks.register('generateJiaguProperties') {
         def file = propertiesFile.get().asFile
         file.parentFile.mkdirs()
         file.text = """runtime.group=${publicationGroup}
-runtime.artifact=jiagu-runtime
+runtime.artifact=jiagu-local-runtime
 runtime.version=${publicationVersion}
 """
     }
 }
 
 sourceSets.main.resources.srcDir(generateJiaguProperties)
+
+// Exercise the production, Context-free Android decoder against the build-time encoder.
+tasks.named('compileTestJava', JavaCompile) {
+    source(file('../jiagu-local-runtime/src/main/java/io/github/xjc/jiagu/local/LocalPayload.java'))
+}
 
 gradlePlugin {
     plugins {

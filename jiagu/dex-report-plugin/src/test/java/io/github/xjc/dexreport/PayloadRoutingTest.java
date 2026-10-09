@@ -61,7 +61,7 @@ public class PayloadRoutingTest {
     }
 
     @Test public void fixedRuntimeClassCannotEnterPayload() {
-        PayloadRouting.Decision decision = PayloadRouting.route("io/github/xjc/jiagu/ProxyApplication.class",
+        PayloadRouting.Decision decision = PayloadRouting.route("io/github/xjc/jiagu/local/LocalComponentFactory.class",
                 "allowlist", Collections.singleton("io.github.xjc.jiagu.**"), Collections.emptySet(),
                 Collections.emptySet(), Collections.emptySet());
         assertEquals(PayloadRouting.Destination.SHELL, decision.destination);
