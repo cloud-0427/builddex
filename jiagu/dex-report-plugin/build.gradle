@@ -184,6 +184,9 @@ def gpgExecutableForSigning = providers.gradleProperty('signing.gnupg.executable
 if (!findProperty('signing.gnupg.executable') && gpgExecutableForSigning) {
     ext.set('signing.gnupg.executable', gpgExecutableForSigning)
 }
+def isSonatypePublication = gradle.startParameter.taskNames.any { taskName ->
+    taskName.toLowerCase(Locale.ROOT).contains('sonatype')
+}
 signing {
     if (signingKey && signingPassword) {
         useInMemoryPgpKeys(signingKey, signingPassword)
@@ -193,10 +196,13 @@ signing {
         // user Gradle home, rather than from this tracked project.
         useGpgCmd()
     }
-    required {
-        gradle.taskGraph.allTasks.any { task ->
-            task.name.toLowerCase(Locale.ROOT).contains('sonatype')
-        }
-    }
+    required { isSonatypePublication }
     sign publishing.publications
+}
+
+// JitPack builds `publishToMavenLocal` without the private key used for Central.
+// The signing plugin still wires its sign task into local publication, so skip it
+// unless this invocation publishes to Sonatype.
+tasks.withType(org.gradle.plugins.signing.Sign).configureEach {
+    onlyIf { isSonatypePublication }
 }
