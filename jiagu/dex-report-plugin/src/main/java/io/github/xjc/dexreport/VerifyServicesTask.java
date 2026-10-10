@@ -15,10 +15,12 @@ import java.util.jar.*;
 import java.util.zip.InflaterInputStream;
 
 /** Checks the packaged descriptors against the actual shell and payload DEX definitions. */
-@DisableCachingByDefault(because = "Verification has no output and must inspect the packaged APK")
+@DisableCachingByDefault(because = "Verification has no output and must inspect the packaged APK/AAB")
 public abstract class VerifyServicesTask extends DefaultTask {
-    @InputDirectory @PathSensitive(PathSensitivity.RELATIVE)
+    @InputDirectory @org.gradle.api.tasks.Optional @PathSensitive(PathSensitivity.RELATIVE)
     public abstract DirectoryProperty getApkDirectory();
+    @InputFile @org.gradle.api.tasks.Optional @PathSensitive(PathSensitivity.NONE)
+    public abstract RegularFileProperty getBundleFile();
     @InputFile @PathSensitive(PathSensitivity.NONE)
     public abstract RegularFileProperty getDescriptors();
     @InputFile @PathSensitive(PathSensitivity.NONE)
@@ -52,20 +54,25 @@ public abstract class VerifyServicesTask extends DefaultTask {
             addDefinitions(businessDefinitions, classNames(dex), "payload dex #" + (i + 1));
         }
         List<Path> apks = new ArrayList<>();
-        try (java.util.stream.Stream<Path> files = Files.walk(getApkDirectory().get().getAsFile().toPath())) {
+        if (getBundleFile().isPresent()) apks.add(getBundleFile().get().getAsFile().toPath());
+        else try (java.util.stream.Stream<Path> files = Files.walk(getApkDirectory().get().getAsFile().toPath())) {
             files.filter(path -> path.toString().endsWith(".apk")).forEach(apks::add);
         }
-        if (apks.isEmpty()) throw new IOException("No APK found for service verification");
+        if (apks.isEmpty()) throw new IOException("No APK/AAB found for service verification");
         for (Path apk : apks) {
-            ServiceDescriptors actual = ServiceDescriptors.read(apk);
+            boolean bundle = getBundleFile().isPresent();
+            String root = bundle ? "base/root/" : "";
+            String assetPrefix = bundle ? "base/" : "";
+            String dexPrefix = bundle ? "base/dex/" : "";
+            ServiceDescriptors actual = ServiceDescriptors.read(apk, root);
             if (!expected.entries.equals(actual.entries)) {
-                throw new IOException("APK ServiceLoader descriptors differ from input: " + apk
+                throw new IOException("APK/AAB ServiceLoader descriptors differ from input: " + apk
                         + " expected=" + expected.entries + " actual=" + actual.entries);
             }
             Map<String, String> shellDefinitions = new LinkedHashMap<>();
             try (JarFile jar = new JarFile(apk.toFile())) {
                 if (getEncryptedAsset().isPresent()) {
-                    JarEntry asset = jar.getJarEntry("assets/jiagu/local-payload.jgl");
+                    JarEntry asset = jar.getJarEntry(assetPrefix + "assets/jiagu/local-payload.jgl");
                     if (asset == null) throw new IOException("Local encrypted asset missing");
                     try (InputStream in = jar.getInputStream(asset)) {
                         if (!Arrays.equals(in.readAllBytes(), Files.readAllBytes(getEncryptedAsset().get().getAsFile().toPath())))
@@ -75,19 +82,26 @@ public abstract class VerifyServicesTask extends DefaultTask {
                         if (e.getName().endsWith("/libjiagu-core.so") || e.getName().endsWith("/liblog_ext.so"))
                             throw new IOException("Old Jiagu native library packaged: " + e.getName());
                 }
+                if (bundle && (jar.getJarEntry("BundleConfig.pb") == null || jar.getJarEntry("base/manifest/AndroidManifest.xml") == null))
+                    throw new IOException("Invalid base AAB structure");
+                int dexCount = 0;
                 Set<String> seen = new HashSet<>();
                 for (JarEntry entry : Collections.list(jar.entries())) {
                     String name = entry.getName();
-                    if (name.startsWith(ServiceDescriptors.PREFIX) && !seen.add(name)) {
-                        throw new IOException("Duplicate service descriptor: " + name);
+                    if (bundle && name.endsWith("/manifest/AndroidManifest.xml") && !name.equals("base/manifest/AndroidManifest.xml"))
+                        throw new IOException("Only base-module AAB is supported: " + name);
+                    if (!seen.add(name)) {
+                        throw new IOException("Duplicate archive entry: " + name);
                     }
-                    if (name.matches("classes[0-9]*\\.dex")) {
+                    if (name.startsWith(dexPrefix) && name.substring(dexPrefix.length()).matches("classes[0-9]*\\.dex")) {
+                        dexCount++;
                         try (InputStream input = jar.getInputStream(entry)) {
                             addDefinitions(shellDefinitions, classNames(input.readAllBytes()),
                                     apk + "!/" + name);
                         }
                     }
                 }
+                if (dexCount == 0) throw new IOException("Shell DEX missing: " + apk);
             }
             SortedSet<String> collisions = duplicateClassNames(
                     businessDefinitions.keySet(), shellDefinitions.keySet());

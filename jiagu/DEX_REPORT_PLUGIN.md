@@ -1,10 +1,25 @@
 # Jiagu Gradle Plugin
 
+## 当前普通 AAB 支持范围（2026-10-10）
+
+本地模式支持普通 APK 和不含 dynamic feature 的普通 AAB，仅支持 base 模块及 ABI、语言、密度配置 splits。加密 Payload 位于 base assets，壳代码位于 base DEX。运行时从 base APK 读取密文，JNI 搜索路径包含 base 与已安装的配置 split APK。
+
+执行 `.\gradlew.bat :app:bundleRelease` 即可构建加固 AAB，产物位于 `app/build/outputs/bundle/release/`。`bundle<Variant>` 自动执行 `verifyJiaguBundle<Variant>`，检查 base 结构、密文与生产输入一致性、壳/业务类冲突及 ServiceLoader 声明；也可单独运行该校验任务。`assemble<Variant>` 保留 APK 校验。
+
+不支持 dynamic feature、按需代码安装、isolated splits、自定义 ClassLoader 和任意自定义组件工厂。签名沿用宿主 AGP signingConfig；示例使用 debug 签名，正式发布需配置上传签名。本地模式未启用下文历史在线流程的 Release 锁和 Play 证书授权。
+
+AAB 容器校验不能替代拆分安装验收。发布前使用 [官方 bundletool](https://developer.android.com/tools/bundletool) 生成并安装设备 APK 集，验证真实 Application/Activity、SPI、资源和业务 JNI；不要只测试 universal APK。当前环境没有连接设备，AAB splits 真机启动和完整 API/ABI/OEM 矩阵尚未验证。
+
+```powershell
+java -jar bundletool.jar build-apks --bundle=<app.aab> --output=<app.apks> --connected-device
+java -jar bundletool.jar install-apks --apks=<app.apks>
+```
+
 启动解密/完成事件的可选上传扩展见 [启动日志上传扩展](docs/03-startup-log-uploader.md)。
 
 这是当前换壳项目的 Gradle 插件，会处理 Android Variant 的字节码、Manifest、JNI 载荷和资源，并自动引入运行时 AAR。
 
-Release 构建一致性锁的最终设计和实施顺序见 [Release 构建一致性锁实施计划](docs/02-release-build-lock-implementation-plan.md)。核心规则：
+以下为历史在线流程的 Release 构建一致性锁设计，不是当前本地模式的已实现功能。最终设计和实施顺序见 [Release 构建一致性锁实施计划](docs/02-release-build-lock-implementation-plan.md)。核心规则：
 
 - 同一 `applicationId + versionCode` 只有一个 Release；
 - 锁定最终业务 DEX、Manifest/resources/assets 和全部 ABI Native；
@@ -83,7 +98,7 @@ plugins {
 每个 variant 的 `intermediates/jiagu/<variant>/service-descriptors.jar` 保存预期声明。
 `verifyJiaguServices<Variant>` 在 APK 打包后检查最终声明与该清单相同、无重复条目，
 并从壳 DEX 和 JG3 业务 DEX 的实际 class definitions 核对接口/实现类没有被删除或改名。
-`assemble<Variant>` 自动运行该检查；当前检查对象为 APK，不涵盖 AAB。
+`assemble<Variant>` 自动运行 APK 检查；`bundle<Variant>` 自动运行 `verifyJiaguBundle<Variant>`，检查 AAB 的 base/root 服务声明和 base/dex 壳类。
 
 壳 R8 仍可能报告这两个协程服务的 `Unexpected reference to missing service`：
 业务类型在加密 DEX 中，对壳 R8 不可见。不要直接删除 SPI 资源或全局屏蔽警告。

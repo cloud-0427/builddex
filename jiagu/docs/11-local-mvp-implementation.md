@@ -8,7 +8,7 @@
 - Manifest 保留真实 Application，使用平台或 AndroidX 公开 AppComponentFactory，在组件创建前读取 APK 内 assets、校验并通过 InMemoryDexClassLoader 返回应用 ClassLoader。由系统执行 Application attach、Provider 初始化和 onCreate，无 ProxyApplication 或内部字段注入。
 - 新 JGLA v1 容器携带严格解析的配置和 AES-256-GCM 密文。每次加密实际执行生成随机密钥/nonce，配置作为 AAD 认证；解密后校验摘要、JG4 DEX 表和边界。明文业务 DEX 只进入 DirectBuffer，不在设备写盘。
 - 构建分流采用显式 allowlist。Runtime-only R8 保留，业务与第三方不作为该 R8 program。ASM 检查 Shell→Payload 静态依赖、非 public 跨 ClassLoader 访问和上传器入口，最终 APK 校验壳/业务重复类、SPI 与密文 asset。
-- 新 LocalManifestTask、CreateLocalPayloadTask 使用 AGP artifacts 与 generated assets 接入。普通 assemble 自动校验产物；MVP 显式拒绝 bundle。插件使用宿主 AGP 的 R8/D8，发布 POM 不再带入旧 R8 覆盖宿主工具链。
+- 新 LocalManifestTask、CreateLocalPayloadTask 使用 AGP artifacts 与 generated assets 接入。普通 assemble 自动校验产物；2026-10-10 起支持普通 AAB，bundle 自动运行 base 模块产物校验。插件使用宿主 AGP 的 R8/D8，发布 POM 不再带入旧 R8 覆盖宿主工具链。
 - 可选事件默认关闭。开启时注册独立 Provider 和 public ActivityLifecycleCallbacks，事件进入 64 条内存队列，由 Jiagu-LocalEvents 单线程异步投递。失败隔离、最多三次尝试、1/5 秒延迟、稳定 eventId；不持久化、不跨进程汇聚。
 - 上传器由应用实现 LocalEventUploader，示例使用 HttpsURLConnection。上传协议与超时由适配器负责；不接入旧授权或密钥接口。
 
@@ -32,7 +32,7 @@
 ## 当前边界与待验证项
 
 1. minSdk 门槛为 29，本次设备实测覆盖 29/34/36；设计中的完整 API/ABI/OEM/低内存/更新恢复矩阵未完成。
-2. AAB、dynamic feature、isolated splits、自定义 ClassLoader/sharedUserId 和任意自定义组件工厂不在 MVP 支持范围。普通 JNI 已验证，不表示所有第三方 linker 或 split native 组合均可用。
+2. 2026-10-10 增补不含 dynamic feature 的普通 AAB 构建与容器校验，以及配置 split APK 的 JNI 搜索路径。AAB splits 真机启动尚待验证；dynamic feature、isolated splits、自定义 ClassLoader/sharedUserId 和任意自定义组件工厂仍不在支持范围。普通 JNI 已验证，不表示所有第三方 linker 或 split native 组合均可用。构建命令和验收步骤见 [普通 AAB 说明](../DEX_REPORT_PLUGIN.md)。
 3. 静态边界分析不能证明所有反射、JNI、动态类名和运行时生成代码安全。应用自身的这些调用必须使用正确 ClassLoader 并单独验证；不提供双向注入或 hidden API 回退。
 4. 事件为内存 best effort。进程退出、队列溢出、构造器异常、永久失败或重试耗尽会丢事件；解密前致命失败可能来不及上传。上传器必须自行限制单次 10 秒并由服务端按 eventId 去重。
 5. 冷启动 P50/P95、旧 local 对比和内存峰值的完整性能报告尚未完成；单次设备启动不能替代性能验收。
@@ -40,6 +40,8 @@
 7. 未上传 Maven Central/JitPack、未提交或推送代码。正式发布仍执行项目原有签名流程。
 
 ## 复现入口
+
+2026-10-10 普通 AAB 扩展验证：插件 JVM 测试通过，新增 base/root SPI 路径与 AAB 校验回归，覆盖缺少壳 DEX、密文被修改和额外 feature 模块的拒绝。示例 Release AAB 与 APK 同次构建成功，两种最终产物的自动校验均通过。未执行 splits 真机安装验证。
 
 ```powershell
 .\gradlew.bat :dex-report-plugin:test :app:assembleDebug :app:assembleRelease

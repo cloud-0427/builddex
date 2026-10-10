@@ -28,7 +28,7 @@ Android 配置必须满足 minSdk >= 29。插件自动引入同版本 `jiagu-loc
 | startupLogUploaderClass | 空 | 开启事件时必须提供 Shell 中上传器的完整类名 |
 | resObfuscationEnabled | false | MVP 不支持开启 |
 
-选中的变体关闭 AGP whole-program minify，禁止 shrinkResources。当前只支持普通 APK，拒绝 AAB、dynamic feature、自定义组件工厂、自定义 ClassLoader、isolated splits、sharedUserId、显式 backupAgent 和 cantSaveState=true；支持平台默认工厂以及已验证的 AndroidX CoreComponentFactory。
+选中的变体关闭 AGP whole-program minify，禁止 shrinkResources。当前支持普通 APK 和不含 dynamic feature 的普通 AAB（base 模块及 ABI/语言/密度配置 splits），拒绝 dynamic feature、自定义组件工厂、自定义 ClassLoader、isolated splits、sharedUserId、显式 backupAgent 和 cantSaveState=true；支持平台默认工厂以及已验证的 AndroidX CoreComponentFactory。AAB 构建使用 `bundle<Variant>`，自动运行 `verifyJiaguBundle<Variant>`。支持范围及拆分安装验收边界见 [普通 AAB 说明](../DEX_REPORT_PLUGIN.md)。
 
 `publish`、`antiDebugEnabled`、`signatureCheckEnabled`、网络凭据和旧取钥配置不参与 MVP。Payload 固定为未压缩 JG4，在构建阶段使用 AES-256-GCM 封装为 assets/jiagu/local-payload.jgl。本地密钥随 APK 分发，不提供在线授权或防重签名保证。
 

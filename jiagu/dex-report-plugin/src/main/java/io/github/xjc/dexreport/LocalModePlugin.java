@@ -97,9 +97,13 @@ final class LocalModePlugin implements Plugin<Project> {
                     t.getEncryptedAsset().set(payload.flatMap(CreateLocalPayloadTask::getAssets).map(d -> d.file("jiagu/local-payload.jgl")));
                 });
                 project.getTasks().matching(t -> t.getName().equals("assemble" + cap)).configureEach(t -> t.dependsOn(verify));
-                project.getTasks().matching(t -> t.getName().equals("bundle" + cap)).configureEach(t -> t.doFirst(task -> {
-                    throw new GradleException("AAB split loading is not validated in local MVP; use assemble" + cap);
-                }));
+                TaskProvider<VerifyServicesTask> verifyBundle = project.getTasks().register("verifyJiaguBundle" + cap, VerifyServicesTask.class, t -> {
+                    t.getBundleFile().set(variant.getArtifacts().get(SingleArtifact.BUNDLE.INSTANCE));
+                    t.getDescriptors().set(split.flatMap(JiaguTask::getServiceDescriptorsFile));
+                    t.getPayload().set(split.flatMap(JiaguTask::getPayloadFile));
+                    t.getEncryptedAsset().set(payload.flatMap(CreateLocalPayloadTask::getAssets).map(d -> d.file("jiagu/local-payload.jgl")));
+                });
+                project.getTasks().matching(t -> t.getName().equals("bundle" + cap)).configureEach(t -> t.dependsOn(verifyBundle));
             });
         });
     }

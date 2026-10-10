@@ -79,12 +79,15 @@ final class LocalLoaderRegistry {
     private static String nativePaths(ApplicationInfo info) throws IOException {
         List<String> paths = new ArrayList<>();
         if (info.nativeLibraryDir != null) paths.add(info.nativeLibraryDir);
-        // MVP only supports base APK. Select a packaged ABI matching the actual process bitness.
+        // Include configuration splits: uncompressed JNI libraries may live in the ABI split.
+        List<String> apks = new ArrayList<>();
+        apks.add(info.sourceDir);
+        if (info.splitSourceDirs != null) Collections.addAll(apks, info.splitSourceDirs);
         String[] abis = Process.is64Bit() ? Build.SUPPORTED_64_BIT_ABIS : Build.SUPPORTED_32_BIT_ABIS;
-        try (ZipFile zip = new ZipFile(info.sourceDir)) {
+        for (String apk : apks) try (ZipFile zip = new ZipFile(apk)) {
             for (String abi : abis) {
                 boolean found = Collections.list(zip.entries()).stream().anyMatch(e -> e.getName().startsWith("lib/" + abi + "/"));
-                if (found) { paths.add(info.sourceDir + "!/lib/" + abi); break; }
+                if (found) { paths.add(apk + "!/lib/" + abi); break; }
             }
         }
         return String.join(File.pathSeparator, paths);

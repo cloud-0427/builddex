@@ -39,12 +39,16 @@ final class ServiceDescriptors {
     }
 
     static ServiceDescriptors read(Path path) throws IOException {
+        return read(path, "");
+    }
+
+    static ServiceDescriptors read(Path path, String root) throws IOException {
         ServiceDescriptors result = new ServiceDescriptors();
         try (JarFile jar = new JarFile(path.toFile())) {
             for (JarEntry entry : Collections.list(jar.entries())) {
-                if (!entry.isDirectory() && entry.getName().startsWith(PREFIX)) {
+                if (!entry.isDirectory() && entry.getName().startsWith(root + PREFIX)) {
                     try (java.io.InputStream input = jar.getInputStream(entry)) {
-                        result.add(entry.getName(), input.readAllBytes());
+                        result.add(entry.getName().substring(root.length()), input.readAllBytes());
                     }
                 }
             }
