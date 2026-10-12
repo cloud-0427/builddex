@@ -42,12 +42,12 @@ final class StartupEventStore implements AutoCloseable {
             row.put("created", System.currentTimeMillis());
             row.put("priority", e.getStatus() == JiaguStartupEvent.Status.FAILED
                     || e.getStatus() == JiaguStartupEvent.Status.BLOCKED
-                    || e.getStageId() == 12 ? 1 : 0);
+                    || e.getStage() == JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME ? 1 : 0);
             // execSQL propagates disk/constraint failures instead of returning -1 and
             // accidentally committing the first-launch marker without its event.
             db.execSQL("INSERT OR IGNORE INTO outbox(id,payload,created,priority) VALUES(?,?,?,?)",
                     new Object[]{e.getTelemetryEventId(), bytes, row.getAsLong("created"), row.getAsInteger("priority")});
-            if (e.getStageId() == 12 && e.getStatus() == JiaguStartupEvent.Status.SUCCEEDED) {
+            if (e.getStage() == JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME && e.getStatus() == JiaguStartupEvent.Status.SUCCEEDED) {
                 db.execSQL("INSERT OR REPLACE INTO state(key,value) VALUES('completed','1')");
             }
             db.setTransactionSuccessful();

@@ -14,8 +14,10 @@ public final class LocalEventReporter {
     private static final String SESSION = UUID.randomUUID().toString();
     private static final long START = SystemClock.elapsedRealtime();
     private static final ArrayDeque<Pending> QUEUE = new ArrayDeque<>();
-    private static final Set<String> TERMINALS = new HashSet<>();
-    private static final Set<String> STARTED = new HashSet<>();
+    private static final Set<LocalStartupStage> TERMINALS = EnumSet.noneOf(LocalStartupStage.class);
+    private static final Set<LocalStartupStage> STARTED = EnumSet.noneOf(LocalStartupStage.class);
+    private static final Set<String> CUSTOM_TERMINALS = new HashSet<>();
+    private static final Set<String> CUSTOM_STARTED = new HashSet<>();
     private static String pkg = "", process = "";
     private static long version;
     private static boolean initialized, resumed;
@@ -28,29 +30,46 @@ public final class LocalEventReporter {
     static void metadata(String name, long code) {
         synchronized (LOCK) { pkg = name; version = code; }
     }
+    /** Compatibility adapter; built-in startup stages use the typed overload. */
     public static void emit(String stage, String status, String code, long duration) {
         try {
-            if (!stage.matches("[A-Z_]{1,64}") || !status.matches("STARTED|SUCCEEDED|FAILED|SKIPPED") ||
-                    !code.matches("[A-Z_0-9]{0,96}")) return;
+            if (stage == null || status == null || code == null || !stage.matches("[A-Z_]{1,64}")
+                    || !code.matches("[A-Z_0-9]{0,96}")) return;
+            LocalStartupStatus.fromWireName(status);
             synchronized (LOCK) {
-                if ("STARTED".equals(status)) {
-                    if (STARTED.size() >= 64 || !STARTED.add(stage)) return;
-                } else {
-                    if (TERMINALS.contains(stage) || TERMINALS.size() >= 64) return;
-                    TERMINALS.add(stage);
-                }
-                if (QUEUE.size() == 64) {
-                    Pending victim = null;
-                    for (Pending p : QUEUE) if (!"FAILED".equals(p.event.status)) { victim = p; break; }
-                    if (victim == null) { dropped++; return; }
-                    QUEUE.remove(victim); dropped++;
-                }
-                LocalStartupEvent event = new LocalStartupEvent(SESSION, UUID.randomUUID().toString(), stage, status, code,
-                        System.currentTimeMillis(), SystemClock.elapsedRealtime() - START, Math.max(0, duration), "", 0, "");
-                QUEUE.addLast(new Pending(event));
-                if (worker != null) worker.execute(LocalEventReporter::drain);
+                capture(new LocalStartupEvent(SESSION, UUID.randomUUID().toString(), stage, status, code,
+                        System.currentTimeMillis(), SystemClock.elapsedRealtime() - START, Math.max(0, duration), "", 0, ""));
             }
         } catch (Throwable error) { Log.w(TAG, "EVENT_CAPTURE_FAILED"); }
+    }
+    public static void emit(LocalStartupStage stage, LocalStartupStatus status, LocalStartupResultCode code, long duration) {
+        try {
+            if (stage == null || status == null || code == null) return;
+            synchronized (LOCK) {
+                capture(new LocalStartupEvent(SESSION, UUID.randomUUID().toString(), stage, status, code,
+                        System.currentTimeMillis(), SystemClock.elapsedRealtime() - START, Math.max(0, duration), "", 0, ""));
+            }
+        } catch (Throwable error) { Log.w(TAG, "EVENT_CAPTURE_FAILED"); }
+    }
+    private static void capture(LocalStartupEvent event) {
+        synchronized (LOCK) {
+            LocalStartupStage stage = event.getStage();
+            if (event.getStatus() == LocalStartupStatus.STARTED) {
+                if (STARTED.size() + CUSTOM_STARTED.size() >= 64) return;
+                if (stage == null ? !CUSTOM_STARTED.add(event.stage) : !STARTED.add(stage)) return;
+            } else {
+                if (TERMINALS.size() + CUSTOM_TERMINALS.size() >= 64) return;
+                if (stage == null ? !CUSTOM_TERMINALS.add(event.stage) : !TERMINALS.add(stage)) return;
+            }
+            if (QUEUE.size() == 64) {
+                Pending victim = null;
+                for (Pending p : QUEUE) if (p.event.getStatus() != LocalStartupStatus.FAILED) { victim = p; break; }
+                if (victim == null) { dropped++; return; }
+                QUEUE.remove(victim); dropped++;
+            }
+            QUEUE.addLast(new Pending(event));
+            if (worker != null) worker.execute(LocalEventReporter::drain);
+        }
     }
 
     static void initialize(Context value, String uploaderName) {
@@ -66,7 +85,7 @@ public final class LocalEventReporter {
                 ((Application) context).registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
                     public void onActivityResumed(Activity a) {
                         synchronized (LOCK) { if (resumed) return; resumed = true; }
-                        emit("FIRST_ACTIVITY_RESUMED", "SUCCEEDED", "ACTIVITY_RESUMED", 0);
+                        emit(LocalStartupStage.FIRST_ACTIVITY_RESUMED, LocalStartupStatus.SUCCEEDED, LocalStartupResultCode.ACTIVITY_RESUMED, 0);
                     }
                     public void onActivityCreated(Activity a, Bundle b) {}
                     public void onActivityStarted(Activity a) {}
@@ -83,7 +102,7 @@ public final class LocalEventReporter {
                     try {
                         uploader = (LocalEventUploader) Class.forName(uploaderName, true, context.getClassLoader())
                                 .getDeclaredConstructor().newInstance();
-                        emit("EVENT_REPORTER_READY", "SUCCEEDED", "REPORTER_READY", 0);
+                        emit(LocalStartupStage.EVENT_REPORTER_READY, LocalStartupStatus.SUCCEEDED, LocalStartupResultCode.REPORTER_READY, 0);
                         drain();
                     } catch (Throwable error) { Log.w(TAG, "EVENT_UPLOADER_INITIALIZATION_FAILED"); }
                 });

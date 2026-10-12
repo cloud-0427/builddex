@@ -14,10 +14,10 @@ public final class LocalAndroidXComponentFactory extends CoreComponentFactory {
         long started = android.os.SystemClock.elapsedRealtime();
         try {
             Application app = super.instantiateApplication(cl, name);
-            LocalEvents.emit("REAL_APPLICATION_CREATE", "SUCCEEDED", "APPLICATION_CREATED", android.os.SystemClock.elapsedRealtime() - started);
+            LocalEvents.emit(LocalStartupStage.REAL_APPLICATION_CREATE, LocalStartupStatus.SUCCEEDED, LocalStartupResultCode.APPLICATION_CREATED, android.os.SystemClock.elapsedRealtime() - started);
             return app;
         } catch (InstantiationException | IllegalAccessException | ClassNotFoundException | RuntimeException | Error error) {
-            LocalEvents.emit("REAL_APPLICATION_CREATE", "FAILED", "LOCAL_APPLICATION_CREATE_FAILED", android.os.SystemClock.elapsedRealtime() - started);
+            LocalEvents.emit(LocalStartupStage.REAL_APPLICATION_CREATE, LocalStartupStatus.FAILED, LocalStartupResultCode.LOCAL_APPLICATION_CREATE_FAILED, android.os.SystemClock.elapsedRealtime() - started);
             throw error;
         }
     }

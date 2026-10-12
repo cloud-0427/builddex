@@ -89,4 +89,17 @@ public class LocalPayloadContractTest {
         assertEquals("LOCAL_PAYLOAD_AUTH_FAILED", failure.getMessage());
         assertTrue(failure.getCause() instanceof javax.crypto.AEADBadTagException);
     }
+
+    @Test public void stringFailureClassifierPreservesKnownErrorsAndStageFallbacks() {
+        assertEquals("LOCAL_PAYLOAD_MISSING", LocalPayload.failureCode(
+                new java.io.IOException("LOCAL_PAYLOAD_MISSING"), "LOCAL_PAYLOAD_READ"));
+        assertEquals("LOCAL_PAYLOAD_CONFIG_INVALID", LocalPayload.failureCode(
+                new NumberFormatException("invalid"), "LOCAL_PAYLOAD_READ"));
+        assertEquals("LOCAL_PAYLOAD_DECRYPT_FAILED", LocalPayload.failureCode(
+                new Exception("arbitrary message"), "PAYLOAD_DECRYPT"));
+        assertEquals("LOCAL_CLASSLOADER_CREATE_FAILED", LocalPayload.failureCode(
+                new Exception(), "CUSTOM_STAGE"));
+        assertEquals("LOCAL_ALLOCATION_FAILED", LocalPayload.failureCode(
+                new OutOfMemoryError(), "BUSINESS_DEX_PARSE"));
+    }
 }

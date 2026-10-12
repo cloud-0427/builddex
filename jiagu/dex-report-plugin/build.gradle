@@ -113,7 +113,9 @@ sourceSets.main.resources.srcDir(generateJiaguProperties)
 
 // Exercise the production, Context-free Android decoder against the build-time encoder.
 tasks.named('compileTestJava', JavaCompile) {
-    source(file('../jiagu-local-runtime/src/main/java/io/github/xjc/jiagu/local/LocalPayload.java'))
+    source(fileTree('../jiagu-local-runtime/src/main/java') {
+        include '**/LocalPayload.java', '**/LocalStartupStage.java', '**/LocalStartupStatus.java', '**/LocalStartupResultCode.java'
+    })
 }
 
 gradlePlugin {

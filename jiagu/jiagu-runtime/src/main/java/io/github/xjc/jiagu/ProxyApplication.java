@@ -25,7 +25,7 @@ public class ProxyApplication extends Application {
                     SystemClock.elapsedRealtime() - startedAt));
             throw error;
         }
-        Log.i(TAG, "[StartupTiming] stage=load-jiagu-core-library durationMs=" +
+        Log.i(TAG, "[StartupTiming] stage=" + StartupTimingStep.SHELL_CORE_LOAD.getLogName() + " durationMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
     }
 
@@ -42,11 +42,11 @@ public class ProxyApplication extends Application {
         int nativeResult = nativeAttach(base);
         if (nativeResult != 0) {
             JiaguStartupReporter.stageFailed(JiaguStartupEvent.Stage.SHELL_ATTACH,
-                    "NATIVE_ATTACH_FAILED", SystemClock.elapsedRealtime() - startedAt);
+                    StartupResultCode.NATIVE_ATTACH_FAILED, SystemClock.elapsedRealtime() - startedAt);
             throw new IllegalStateException("Jiagu native startup failed: " + nativeResult);
         }
         JiaguStartupReporter.stageSucceeded(JiaguStartupEvent.Stage.SHELL_ATTACH,
-                "SHELL_ATTACH_COMPLETED", SystemClock.elapsedRealtime() - startedAt);
+                StartupResultCode.SHELL_ATTACH_COMPLETED, SystemClock.elapsedRealtime() - startedAt);
         Log.i(TAG, "[StartupTiming] complete proxy attachBaseContext totalMs=" +
                 (SystemClock.elapsedRealtime() - startedAt));
     }

@@ -29,21 +29,8 @@ public final class JiaguStartupEvent {
         }
 
         static Stage fromId(int id) {
-            switch (id) {
-                case 1: return STARTUP_ATTEMPT;
-                case 2: return SHELL_CORE_LOAD;
-                case 3: return SHELL_ATTACH;
-                case 4: return RUNTIME_PROTECTION_CHECK;
-                case 5: return RUNTIME_BUNDLE_LOAD;
-                case 6: return DEVICE_AUTHORIZATION;
-                case 7: return PAYLOAD_DECRYPT;
-                case 8: return BUSINESS_DEX_DECOMPRESS;
-                case 9: return BUSINESS_CLASSLOADER_INJECT;
-                case 10: return REAL_APPLICATION_ATTACH;
-                case 11: return REAL_APPLICATION_ON_CREATE;
-                case 12: return FIRST_ACTIVITY_FIRST_FRAME;
-                default: throw new IllegalArgumentException("Unknown startup stage id: " + id);
-            }
+            for (Stage stage : values()) if (stage.id == id) return stage;
+            throw new IllegalArgumentException("Unknown startup stage id: " + id);
         }
     }
 

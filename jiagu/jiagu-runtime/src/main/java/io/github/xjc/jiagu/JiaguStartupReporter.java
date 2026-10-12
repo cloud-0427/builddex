@@ -53,7 +53,7 @@ public final class JiaguStartupReporter {
     private JiaguStartupReporter() { }
 
     public static void startupAttemptStarted() { ensureStart(); emit(JiaguStartupEvent.Stage.STARTUP_ATTEMPT, JiaguStartupEvent.Status.STARTED, null, 0); }
-    public static void shellCoreLoadSucceeded(long ms) { emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.SUCCEEDED, "CORE_LIBRARY_LOADED", ms); }
+    public static void shellCoreLoadSucceeded(long ms) { emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.SUCCEEDED, StartupResultCode.CORE_LIBRARY_LOADED.getWireName(), ms); }
     public static void shellCoreLoadFailed(CoreLoadDiagnostics diagnostic, long ms) {
         emit(JiaguStartupEvent.Stage.SHELL_CORE_LOAD, JiaguStartupEvent.Status.FAILED,
                 diagnostic.resultCode, ms, diagnostic.failureClass);
@@ -91,10 +91,13 @@ public final class JiaguStartupReporter {
         scheduleDrain(0);
     }
     public static void beginDecryption(Context c) { initialize(c); stageStarted(JiaguStartupEvent.Stage.SHELL_ATTACH); }
-    public static void startupCompleted(Context c) { initialize(c); stageSucceeded(JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE, "REAL_APPLICATION_ON_CREATE_COMPLETED", 0); }
+    public static void startupCompleted(Context c) { initialize(c); stageSucceeded(JiaguStartupEvent.Stage.REAL_APPLICATION_ON_CREATE, StartupResultCode.REAL_APPLICATION_ON_CREATE_COMPLETED, 0); }
     public static void stageStarted(JiaguStartupEvent.Stage s) { synchronized (LOCK) { STARTED[s.ordinal()] = SystemClock.elapsedRealtime(); } }
+    public static void stageSucceeded(JiaguStartupEvent.Stage s, StartupResultCode c, long d) { stageSucceeded(s, c.getWireName(), d); }
     public static void stageSucceeded(JiaguStartupEvent.Stage s, String c, long d) { emit(s, JiaguStartupEvent.Status.SUCCEEDED, c, duration(s, d)); }
+    public static void stageFailed(JiaguStartupEvent.Stage s, StartupResultCode c, long d) { stageFailed(s, c.getWireName(), d); }
     public static void stageFailed(JiaguStartupEvent.Stage s, String c, long d) { emit(s, JiaguStartupEvent.Status.FAILED, c, duration(s, d)); }
+    public static void stageBlocked(JiaguStartupEvent.Stage s, StartupResultCode c, long d) { stageBlocked(s, c.getWireName(), d); }
     public static void stageBlocked(JiaguStartupEvent.Stage s, String c, long d) { emit(s, JiaguStartupEvent.Status.BLOCKED, c, duration(s, d)); }
     public static void nativeStageFinished(int id, int status, String c, long d) {
         try { emit(JiaguStartupEvent.Stage.fromId(id), JiaguStartupEvent.Status.fromOrdinal(status), c, d); }
@@ -120,7 +123,7 @@ public final class JiaguStartupReporter {
                 synchronized (LOCK) { if (firstActivityResumed) return; firstActivityResumed = true; }
                 firstActivityName = Integer.toHexString(a.getClass().getName().hashCode());
                 firstActivityResumedMs = elapsed(); stageStarted(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME);
-                Runnable timeout = () -> stageFailed(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, "FIRST_FRAME_TIMEOUT", 0);
+                Runnable timeout = () -> stageFailed(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, StartupResultCode.FIRST_FRAME_TIMEOUT, 0);
                 MAIN.postDelayed(timeout, FIRST_FRAME_TIMEOUT_MS);
                 try {
                     View decor = a.getWindow().getDecorView();
@@ -128,13 +131,13 @@ public final class JiaguStartupReporter {
                         @Override public boolean onPreDraw() {
                             ViewTreeObserver o = decor.getViewTreeObserver(); if (o.isAlive()) o.removeOnPreDrawListener(this);
                             MAIN.removeCallbacks(timeout);
-                            stageSucceeded(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, "FIRST_FRAME_DRAWN", 0);
+                            stageSucceeded(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, StartupResultCode.FIRST_FRAME_DRAWN, 0);
                             return true;
                         }
                     });
                 } catch (Throwable e) {
                     MAIN.removeCallbacks(timeout);
-                    stageFailed(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, "FIRST_FRAME_OBSERVER_FAILED", 0);
+                    stageFailed(JiaguStartupEvent.Stage.FIRST_ACTIVITY_FIRST_FRAME, StartupResultCode.FIRST_FRAME_OBSERVER_FAILED, 0);
                 }
             }
         });

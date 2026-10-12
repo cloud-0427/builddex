@@ -83,8 +83,8 @@ public final class NetworkHelper {
         return TimeUnit.NANOSECONDS.toMillis(now() - startedAt);
     }
 
-    private static void timing(String stage, long startedAt, long startupStartedAt) {
-        Log.i(TAG, "[StartupTiming] stage=" + stage + " durationMs=" + elapsedMs(startedAt) +
+    private static void timing(StartupTimingStep stage, long startedAt, long startupStartedAt) {
+        Log.i(TAG, "[StartupTiming] stage=" + stage.getLogName() + " durationMs=" + elapsedMs(startedAt) +
                 " totalMs=" + elapsedMs(startupStartedAt));
     }
 
@@ -159,7 +159,7 @@ public final class NetworkHelper {
                     credential = bootstrapped.credential;
                     authorization = bootstrapped.authorization;
                     authorizationSource = JiaguStartupEvent.AuthorizationSource.NETWORK_BOOTSTRAP;
-                    timing("device-bootstrap", stageStartedAt, startupStartedAt);
+                    timing(StartupTimingStep.DEVICE_BOOTSTRAP, stageStartedAt, startupStartedAt);
                 } catch (ServerRejectedException rejected) {
                     if (!rejected.bootstrapUnsupported()) {
                         throw rejected;
@@ -171,7 +171,7 @@ public final class NetworkHelper {
                             wrapPublicKeySha256, deviceId, credential);
                     authorizationSource = JiaguStartupEvent.AuthorizationSource
                             .NETWORK_LEGACY_ENROLL_AUTHORIZE;
-                    timing("device-bootstrap-legacy-fallback", stageStartedAt, startupStartedAt);
+                    timing(StartupTimingStep.DEVICE_BOOTSTRAP_LEGACY_FALLBACK, stageStartedAt, startupStartedAt);
                 }
                 saveCredential(context, config, app.actualCertificateSha256, credential);
                 saveAuthorization(context, config, authorization);
@@ -184,7 +184,7 @@ public final class NetworkHelper {
                             context, config, signing, wrapping.getPrivate(),
                             wrapPublicKeySha256, deviceId, credential);
                     authorizationSource = JiaguStartupEvent.AuthorizationSource.NETWORK_AUTHORIZE;
-                    timing("device-authorize", stageStartedAt, startupStartedAt);
+                    timing(StartupTimingStep.DEVICE_AUTHORIZE, stageStartedAt, startupStartedAt);
                     saveAuthorization(context, config, authorization);
                 } else {
                     authorizationSource = JiaguStartupEvent.AuthorizationSource
@@ -194,15 +194,15 @@ public final class NetworkHelper {
 
             JiaguStartupReporter.setAuthorizationSource(authorizationSource);
             JiaguStartupReporter.stageSucceeded(JiaguStartupEvent.Stage.DEVICE_AUTHORIZATION,
-                    authorizationSource.name(), elapsedMs(authorizationStartedAt));
+                    StartupResultCode.fromWireName(authorizationSource.name()), elapsedMs(authorizationStartedAt));
             long stageStartedAt = now();
             payloadDecryptStartedAt = stageStartedAt;
             payloadDecryptStarted = true;
             JiaguStartupReporter.stageStarted(JiaguStartupEvent.Stage.PAYLOAD_DECRYPT);
             ByteBuffer result = decryptLocalPayload(config, authorization.payloadKey, localPayload);
-            timing("local-payload-aes-gcm-decrypt-and-verify", stageStartedAt, startupStartedAt);
+            timing(StartupTimingStep.PAYLOAD_DECRYPT_AND_VERIFY, stageStartedAt, startupStartedAt);
             JiaguStartupReporter.stageSucceeded(JiaguStartupEvent.Stage.PAYLOAD_DECRYPT,
-                    "PAYLOAD_DECRYPTED", elapsedMs(stageStartedAt));
+                    StartupResultCode.PAYLOAD_DECRYPTED, elapsedMs(stageStartedAt));
             Log.i(TAG, "[StartupTiming] complete authorized payload preparation totalMs=" +
                     elapsedMs(startupStartedAt));
             return result;
@@ -210,7 +210,7 @@ public final class NetworkHelper {
             JiaguStartupReporter.stageFailed(
                     payloadDecryptStarted ? JiaguStartupEvent.Stage.PAYLOAD_DECRYPT
                             : JiaguStartupEvent.Stage.DEVICE_AUTHORIZATION,
-                    payloadDecryptStarted ? "PAYLOAD_DECRYPT_FAILED" : authorizationFailureCode(error),
+                    payloadDecryptStarted ? StartupResultCode.PAYLOAD_DECRYPT_FAILED : authorizationFailureCode(error),
                     elapsedMs(payloadDecryptStarted ? payloadDecryptStartedAt : authorizationStartedAt));
             Log.e(TAG, "Device authorization failed after " + elapsedMs(startupStartedAt) + " ms", error);
             return null;
@@ -222,17 +222,17 @@ public final class NetworkHelper {
         }
     }
 
-    private static String authorizationFailureCode(Throwable error) {
+    private static StartupResultCode authorizationFailureCode(Throwable error) {
         if (error instanceof java.net.SocketTimeoutException) {
-            return "NETWORK_TIMEOUT";
+            return StartupResultCode.NETWORK_TIMEOUT;
         }
         if (error instanceof ServerRejectedException) {
-            return "NETWORK_REJECTED";
+            return StartupResultCode.NETWORK_REJECTED;
         }
         if (error instanceof GeneralSecurityException) {
-            return "KEYSTORE_UNAVAILABLE";
+            return StartupResultCode.KEYSTORE_UNAVAILABLE;
         }
-        return "DEVICE_AUTHORIZATION_FAILED";
+        return StartupResultCode.DEVICE_AUTHORIZATION_FAILED;
     }
 
     private static BootstrapResult bootstrap(Context context, Config config,

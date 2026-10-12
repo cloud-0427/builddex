@@ -11,10 +11,10 @@ public final class LocalProbeUploader implements LocalEventUploader {
     public LocalProbeUploader() { Log.i("LocalProbe", "WORKER=" + Thread.currentThread().getName()); }
     @Override public void upload(Context c, LocalStartupEvent e) throws Exception {
         Log.i("LocalProbe", "EVENT=" + e.stage + " ID=" + e.eventId + " THREAD=" + Thread.currentThread().getName());
-        if ("PAYLOAD_DECRYPT".equals(e.stage) && retried.add(e.eventId)) {
+        if (e.getStage() == LocalStartupStage.PAYLOAD_DECRYPT && retried.add(e.eventId)) {
             Log.i("LocalProbe", "INJECT_RETRY=" + e.eventId);
             throw new LocalUploadException("TEST_TIMEOUT", true, null);
         }
-        if ("LOCAL_PAYLOAD_READ".equals(e.stage)) throw new LocalUploadException("TEST_REJECTED", false, null);
+        if (e.getStage() == LocalStartupStage.LOCAL_PAYLOAD_READ) throw new LocalUploadException("TEST_REJECTED", false, null);
     }
 }
