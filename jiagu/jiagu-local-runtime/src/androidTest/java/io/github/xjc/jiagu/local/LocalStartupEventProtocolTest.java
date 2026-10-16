@@ -5,6 +5,20 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public final class LocalStartupEventProtocolTest {
+    @Test public void diagnosticEnumsPreserveExistingJsonAndReplay() throws Exception {
+        for (LocalStartupDiagnosticCode code : LocalStartupDiagnosticCode.values()) {
+            LocalStartupEvent event = new LocalStartupEvent("session", "id", LocalStartupInternalEvent.STARTUP_DIAGNOSTIC.getWireName(),
+                    LocalStartupStatus.SUCCEEDED.getWireName(), code.getWireName(), 1234, 15, 0, "example.app", 24, "example.app");
+            event.recordType = LocalStartupRecordType.DIAGNOSTIC.getWireName();
+            String payload = event.toJson().toString();
+            assertEquals("0", event.toJson().getString("eventId"));
+            assertEquals("STARTUP_DIAGNOSTIC", event.toJson().getString("event"));
+            assertEquals("SUCCEEDED_" + code.getWireName(), event.toJson().getString("itemName"));
+            assertSame(code, event.getDiagnosticCode());
+            assertSame(LocalStartupRecordType.DIAGNOSTIC, LocalStartupEvent.decode(payload).getRecordType());
+            assertEquals(payload, LocalStartupEvent.decode(payload).toJson().toString());
+        }
+    }
     @Test public void eventIsStageNameAndEventIdIsStableStageNumber() throws Exception {
         for (LocalStartupStage stage : LocalStartupStage.values()) {
             LocalStartupEvent event = new LocalStartupEvent("session", "unique-id", stage,

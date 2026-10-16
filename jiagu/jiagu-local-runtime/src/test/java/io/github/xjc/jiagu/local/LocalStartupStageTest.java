@@ -21,4 +21,29 @@ public final class LocalStartupStageTest {
         assertEquals(stages.length, LocalStartupStage.values().length);
         assertThrows(IllegalArgumentException.class, () -> LocalStartupStage.fromId(0));
     }
+    @Test public void declarationsFollowDisplayOrderWithoutRenumberingProtocol() {
+        int[] ids = {1, 1001, 7, 1002, 1003, 1004, 1005, 1006};
+        LocalStartupStage[] stages = LocalStartupStage.values();
+        int previous = 0;
+        for (int i = 0; i < stages.length; i++) {
+            assertEquals(ids[i], stages[i].getId());
+            assertTrue(stages[i].getDisplayOrder() > previous);
+            assertFalse(stages[i].getDisplayName().isEmpty());
+            assertEquals(stages[i] == LocalStartupStage.EVENT_REPORTER_READY, stages[i].isAsynchronous());
+            previous = stages[i].getDisplayOrder();
+        }
+    }
+    @Test public void diagnosticsAndCheckpointsKeepStableWireNames() {
+        for (LocalStartupDiagnosticCode code : LocalStartupDiagnosticCode.values()) {
+            assertEquals(code.name(), code.getWireName());
+            assertSame(code, LocalStartupDiagnosticCode.fromWireName(code.getWireName()));
+        }
+        for (LocalStartupCheckpoint step : LocalStartupCheckpoint.values())
+            assertSame(step, LocalStartupCheckpoint.fromWireName(step.getWireName()));
+        for (LocalStartupRecordType type : LocalStartupRecordType.values())
+            assertSame(type, LocalStartupRecordType.fromWireName(type.getWireName()));
+        for (LocalStartupInternalEvent event : LocalStartupInternalEvent.values())
+            assertSame(event, LocalStartupInternalEvent.fromWireName(event.getWireName()));
+        assertThrows(IllegalArgumentException.class, () -> LocalStartupDiagnosticCode.fromWireName("FUTURE_CUSTOM"));
+    }
 }

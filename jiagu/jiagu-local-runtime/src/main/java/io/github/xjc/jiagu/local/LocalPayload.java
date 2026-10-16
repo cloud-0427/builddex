@@ -12,11 +12,13 @@ import javax.crypto.spec.*;
 
 /** Context-free, bounded decoder. No native library, files, network or Keystore. */
 public final class LocalPayload {
+    private static final byte[] ZERO_BLOCK = new byte[4096];
     public static final int MAX_PLAIN = 128 * 1024 * 1024;
     public static final int MAX_ASSET = MAX_PLAIN + 65536 + 32;
     private LocalPayload() {}
     public interface Observer {
         void terminal(LocalStartupStage stage, LocalStartupStatus status, LocalStartupResultCode code, long durationMs);
+        default void checkpoint(LocalStartupStage stage) { }
     }
 
     public static final class Decoded {
@@ -59,6 +61,7 @@ public final class LocalPayload {
             part = bytes(c, "keyPartB", 32); nonce = bytes(c, "nonce", 12);
             observe(observer, stage, LocalStartupStatus.SUCCEEDED, LocalStartupResultCode.PAYLOAD_READ, started);
             stage = LocalStartupStage.PAYLOAD_DECRYPT; started = System.nanoTime();
+            checkpoint(observer, stage);
             for (int i = 0; i < 32; i++) key[i] ^= part[i];
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
@@ -74,6 +77,7 @@ public final class LocalPayload {
             if (!MessageDigest.isEqual(hash.digest(), bytes(c, "plaintextSha256", 32))) throw invalid(LocalStartupResultCode.LOCAL_PAYLOAD_HASH_MISMATCH);
             observe(observer, stage, LocalStartupStatus.SUCCEEDED, LocalStartupResultCode.PAYLOAD_VERIFIED, started);
             stage = LocalStartupStage.BUSINESS_DEX_PARSE; started = System.nanoTime();
+            checkpoint(observer, stage);
             ByteBuffer[] dex = dexBuffers(plain);
             observe(observer, stage, LocalStartupStatus.SUCCEEDED, LocalStartupResultCode.DEX_VALIDATED, started);
             success = true;
@@ -85,7 +89,13 @@ public final class LocalPayload {
             if (key != null) Arrays.fill(key, (byte) 0);
             if (part != null) Arrays.fill(part, (byte) 0);
             if (nonce != null) Arrays.fill(nonce, (byte) 0);
-            if (!success && plain != null) { plain.clear(); while (plain.hasRemaining()) plain.put((byte) 0); }
+            if (!success && plain != null) {
+                // Fixed small buffer, no second plaintext-sized allocation; preserve original error.
+                try {
+                    plain.clear();
+                    while (plain.hasRemaining()) plain.put(ZERO_BLOCK, 0, Math.min(plain.remaining(), ZERO_BLOCK.length));
+                } catch (Throwable ignored) { /* Best effort cleanup must not replace the decode failure. */ }
+            }
         }
     }
 
@@ -94,6 +104,9 @@ public final class LocalPayload {
             if (observer != null) observer.terminal(stage, status, code,
                     Math.max(0, (System.nanoTime() - started) / 1_000_000));
         } catch (Throwable ignored) { /* Telemetry cannot alter decode outcomes. */ }
+    }
+    private static void checkpoint(Observer observer, LocalStartupStage stage) {
+        try { if (observer != null) observer.checkpoint(stage); } catch (Throwable ignored) { }
     }
 
     public static LocalStartupResultCode failureCode(Throwable error, LocalStartupStage stage) {

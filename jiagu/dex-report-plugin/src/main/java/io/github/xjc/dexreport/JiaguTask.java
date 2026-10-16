@@ -619,6 +619,23 @@ public abstract class JiaguTask extends DefaultTask {
             return;
         }
 
+        String originalDigest = programClass ? LocalBuildHash.sha256(data) : "";
+        if (name.equals("io/github/xjc/jiagu/local/LocalBuildInfo.class")) {
+            try {
+                javax.xml.parsers.DocumentBuilderFactory factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+                factory.setNamespaceAware(true);
+                factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+                org.w3c.dom.Element manifest = factory.newDocumentBuilder().parse(getMergedManifest().get().getAsFile()).getDocumentElement();
+                String version = manifest.getAttributeNS("http://schemas.android.com/apk/res/android", "versionCode");
+                data = LocalTelemetryBytecode.generate(configuredUploaderClass() != null,
+                        manifest.getAttribute("package"), version.isEmpty() ? 0 : Long.parseLong(version),
+                        manifest.getAttributeNS("http://schemas.android.com/apk/res/android", "versionName"),
+                        LocalBuildHash.sha256((LocalBuildHash.sha256(Files.readAllBytes(getMergedManifest().get().getAsFile().toPath()))
+                                + LocalBuildHash.sha256(Files.readAllBytes(getInputIndexFile().get().getAsFile().toPath())))
+                                .getBytes(StandardCharsets.UTF_8)));
+            } catch (Exception error) { throw new IOException("Cannot generate early telemetry configuration", error); }
+        }
+
         PayloadRouting.Decision routing = PayloadRouting.route(name, payloadMode, payloadPackages,
                 shellPackages, shellClasses, startupClasses);
         boolean runtimeClass = programClass && isJiaguRuntimeClassEntry(name);
@@ -658,7 +675,7 @@ public abstract class JiaguTask extends DefaultTask {
             businessClassCount[0]++;
         }
         processedNames.put(name, new SeenEntry(origin,
-                programClass ? LocalBuildHash.sha256(data) : ""));
+                originalDigest));
     }
 
     private static boolean isProgramClassEntry(String name) {

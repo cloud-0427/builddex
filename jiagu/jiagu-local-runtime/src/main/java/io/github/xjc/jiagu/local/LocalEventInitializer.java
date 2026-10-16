@@ -12,7 +12,11 @@ public final class LocalEventInitializer extends ContentProvider {
             android.os.Bundle meta = c.getPackageManager().getApplicationInfo(c.getPackageName(), PackageManager.GET_META_DATA).metaData;
             String name = meta == null ? "" : meta.getString("io.github.xjc.jiagu.local.UPLOADER", "");
             if (!name.isEmpty()) LocalEventReporter.initialize(c, name);
-        } catch (Throwable failure) { android.util.Log.w("JiaguLocalEvents", "EVENT_PROVIDER_FAILED"); }
+            else LocalEventReporter.initializationFailed(LocalStartupDiagnosticCode.MISSING_UPLOADER_CONFIG);
+        } catch (Throwable failure) {
+            try { LocalEventReporter.initializationFailed(LocalStartupDiagnosticCode.EVENT_PROVIDER_FAILED); } catch (Throwable ignored) { }
+            android.util.Log.w("JiaguLocalEvents", "EVENT_PROVIDER_FAILED");
+        }
         return true;
     }
     @Override public Cursor query(Uri u, String[] p, String s, String[] a, String o) { return null; }

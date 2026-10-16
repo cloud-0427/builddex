@@ -19,7 +19,8 @@ android {
     defaultConfig {
         minSdk = 29
         consumerProguardFiles 'consumer-rules.pro'
-        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        testInstrumentationRunner providers.gradleProperty('jiagu.localTestRunner')
+                .getOrElse('androidx.test.runner.AndroidJUnitRunner')
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11

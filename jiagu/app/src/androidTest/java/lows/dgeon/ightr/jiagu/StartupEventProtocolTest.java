@@ -33,9 +33,10 @@ final class StartupEventProtocolTest {
             require(ids[i].equals(data.getString("eventId")) && data.get("eventId") instanceof String, "stage eventId");
             require(stages[i].equals(data.getString("event")), "event name");
             require("unique-id".equals(data.getString("telemetryEventId")), "unique event ID");
+            require("session".equals(request.getJSONObject("device").getString("oaid")), "oaid uses original session ID");
             require("FAILED_TEST_CODE".equals(data.getString("itemName")), "itemName");
             require(data.getLong("elapsedMs") == 15 && data.getLong("occurredAtMillis") == 1234 && data.getLong("stageDurationMs") == 5, "timings");
-            require(data.getInt("schemaVersion") == 3 && "local".equals(data.getString("mode")), "local schema");
+            require(data.getInt("schemaVersion") == 4 && "local".equals(data.getString("mode")), "local schema");
             require(!data.has("stage") && !data.has("elapsedSinceStartMs") && !data.has("startupInstanceId"), "no renamed/fictional fields");
             require(request.toString().equals(((JSONObject) body.invoke(null, context, event)).toString()), "retry body stability");
         }
@@ -43,6 +44,10 @@ final class StartupEventProtocolTest {
                 1234L, 15L, 0L, context.getPackageName(), 24L, "process");
         JSONObject data = ((JSONObject) body.invoke(null, context, started)).getJSONObject("userEvent").getJSONObject("data");
         require("STARTED".equals(data.getString("itemName")), "empty result code");
+        Object otherSession = constructor.newInstance("another-session", "another-event", "STARTUP_ATTEMPT", "STARTED", "",
+                1234L, 15L, 0L, context.getPackageName(), 24L, "process");
+        JSONObject otherRequest = (JSONObject) body.invoke(null, context, otherSession);
+        require("another-session".equals(otherRequest.getJSONObject("device").getString("oaid")), "different sessions use different oaid values");
     }
     private static void require(boolean condition, String message) {
         if (!condition) throw new AssertionError("Legacy event protocol: " + message);

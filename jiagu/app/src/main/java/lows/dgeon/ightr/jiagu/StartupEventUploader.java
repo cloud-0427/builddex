@@ -1,8 +1,6 @@
 package lows.dgeon.ightr.jiagu;
 
 import android.content.Context;
-import android.os.Build;
-import android.provider.Settings;
 import org.json.JSONObject;
 import java.util.Locale;
 import io.github.xjc.jiagu.local.*;
@@ -41,7 +39,8 @@ public final class StartupEventUploader implements LocalEventUploader {
             int status = connection.getResponseCode();
             if (status < 200 || status >= 300) {
                 throw new LocalUploadException("HTTP_" + status,
-                        status == 408 || status == 429 || status >= 500, null);
+                        status == 408 || status == 425 || status == 429 || status >= 500,
+                        status == 401 || status == 403 || status == 404, retryAfter(connection), null);
             }
             // Receiving a 2xx is the example's acknowledgement contract. No response secrets are read.
         } catch (LocalUploadException failure) {
@@ -55,33 +54,30 @@ public final class StartupEventUploader implements LocalEventUploader {
     }
 
     static JSONObject createBody(Context context, LocalStartupEvent event) throws Exception {
+        JSONObject frozen = event.toJson(), environment = frozen.optJSONObject("environment");
+        if (environment == null) environment = new JSONObject();
         JSONObject channel = new JSONObject();
         channel.put("id", DEFAULT_CHANNEL_ID);
         channel.put("name", DEFAULT_CHANNEL_NAME);
 
         JSONObject gameUser = new JSONObject();
         gameUser.put("adPlan", "0");
-        gameUser.put("region", value(Locale.getDefault().getCountry()).toLowerCase(Locale.ROOT));
+        gameUser.put("region", environment.optString("region"));
 
-        String versionName = value(context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName);
-        CharSequence label = context.getApplicationInfo().loadLabel(context.getPackageManager());
         JSONObject product = new JSONObject();
         product.put("appId", DEFAULT_APP_ID);
         product.put("bundle", DEFAULT_BUNDLE.trim().isEmpty() ? event.packageName : DEFAULT_BUNDLE);
-        product.put("gameName", label == null ? "" : label.toString());
-        product.put("ver", versionName);
+        product.put("gameName", event.packageName);
+        product.put("ver", frozen.optString("versionName"));
 
-        String oaid = "";
-        try { oaid = value(Settings.Secure.getString(context.getContentResolver(), "oaid")); }
-        catch (Exception ignored) { /* No installation ID exists in the local memory-only MVP. */ }
         JSONObject device = new JSONObject();
-        device.put("brand", value(Build.BRAND));
+        device.put("brand", environment.optString("brand"));
         device.put("checkCommonUse", "1");
-        device.put("language", value(Locale.getDefault().toLanguageTag()));
-        device.put("model", value(Build.MODEL));
-        device.put("oaid", oaid);
-        device.put("system", value(Build.VERSION.RELEASE).isEmpty() ? "" :
-                "android:" + Build.VERSION.RELEASE + ",api:" + Build.VERSION.SDK_INT);
+        device.put("language", environment.optString("language"));
+        device.put("model", environment.optString("model"));
+        // Legacy receiver field carries the original startup session, including replay.
+        device.put("oaid", event.sessionId);
+        device.put("system", environment.optString("system"));
 
         JSONObject userEvent = new JSONObject();
         userEvent.put("eventType", "JG_Event");
@@ -99,4 +95,16 @@ public final class StartupEventUploader implements LocalEventUploader {
     }
 
     private static String value(String text) { return text == null || text.trim().isEmpty() ? "" : text; }
+    private static long retryAfter(HttpsURLConnection connection) {
+        String header = connection.getHeaderField("Retry-After");
+        if (header == null) return 0;
+        try { return Math.min(7L * 86400000, Math.multiplyExact(Long.parseLong(header.trim()), 1000)); }
+        catch (Exception invalid) {
+            try {
+                java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US);
+                format.setLenient(false);
+                return Math.max(0, Math.min(7L * 86400000, format.parse(header).getTime() - System.currentTimeMillis()));
+            } catch (Exception ignored) { return 0; }
+        }
+    }
 }

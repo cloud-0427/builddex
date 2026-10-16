@@ -1,5 +1,7 @@
 # 本地公开 API 加载 MVP 实现与验证
 
+2026-10-16 更新：本文内存队列/三次重试是历史 MVP 状态。当前已实现早期 journal 与 SQLite 补传，实际回归范围见 [P0 实施记录](16-local-startup-p0-implementation-and-regression.md)。
+
 日期：2026-10-08。对应 [详细设计](10-local-public-api-loading-design.md) 与 [接入配置](09-dexreport-configuration.md)。当前交付本地 APK 路径；下文区分已经验证和仍待覆盖的范围。
 
 ## 已实现

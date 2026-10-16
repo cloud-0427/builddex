@@ -29,6 +29,10 @@ final class LocalModePlugin implements Plugin<Project> {
         ext.getSignatureCheckEnabled().convention(false);
         project.getPluginManager().withPlugin("com.android.application", ignored -> {
             ApplicationAndroidComponentsExtension components = project.getExtensions().getByType(ApplicationAndroidComponentsExtension.class);
+            // Ciphertext is not compressible. Avoid ZIP decompression and its buffers on cold start.
+            components.finalizeDsl((Action<com.android.build.api.dsl.ApplicationExtension>) dsl -> {
+                dsl.getAndroidResources().getNoCompress().add("jgl");
+            });
             // AAR contains no online code; add it only to protected variants below.
             components.beforeVariants(components.selector().all(), builder -> {
                 if (!"local".equals(ext.getProtectionMode().get())) throw new GradleException("MVP supports protectionMode=local only");

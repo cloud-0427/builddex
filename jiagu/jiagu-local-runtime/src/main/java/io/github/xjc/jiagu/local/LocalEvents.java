@@ -2,6 +2,9 @@ package io.github.xjc.jiagu.local;
 
 /** Isolates even reporter class-initialization errors from bootstrap. */
 final class LocalEvents {
+    static void checkpoint(LocalStartupStage stage, LocalStartupCheckpoint step) {
+        try { LocalEventReporter.checkpoint(stage, step); } catch (Throwable ignored) { }
+    }
     static void emit(LocalStartupStage stage, LocalStartupStatus status, LocalStartupResultCode code, long duration) {
         try { LocalEventReporter.emit(stage, status, code, duration); } catch (Throwable ignored) { }
     }

@@ -1,5 +1,9 @@
 # 本地事件接入既有 user_event 服务
 
+2026-10-16 更新：下文记录 schemaVersion=3 的历史接入格式。当前客户端使用 schemaVersion=4、持久化补传和冻结元数据；差异、接收端约束及实测范围见 [P0 实施记录](16-local-startup-p0-implementation-and-regression.md)。
+
+当前上报约定：`device.oaid = event.sessionId`，包括历史补传；下文旧版 OAID 读取和示例空字符串不再适用。
+
 日期：2026-10-09。对照 Git HEAD 中旧 StartupEventUploader.createBody 的实际 JSON，而不是将本地事件平铺发送给既有服务。接口地址、JG_Event、渠道/产品默认配置和请求外层结构沿用旧实现。
 
 ## 请求结构

@@ -11,6 +11,7 @@ public class LocalComponentFactory extends AppComponentFactory {
             throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         long started = android.os.SystemClock.elapsedRealtime();
         try {
+            LocalEvents.checkpoint(LocalStartupStage.REAL_APPLICATION_CREATE, LocalStartupCheckpoint.ENTER);
             Application app = super.instantiateApplication(cl, name);
             LocalEvents.emit(LocalStartupStage.REAL_APPLICATION_CREATE, LocalStartupStatus.SUCCEEDED, LocalStartupResultCode.APPLICATION_CREATED, android.os.SystemClock.elapsedRealtime() - started);
             return app;
