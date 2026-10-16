@@ -29,8 +29,8 @@ android {
         applicationId "lows.dgeon.ightr.jiagu"
         minSdk = 29
         targetSdk = 36
-        versionCode 24
-        versionName "1.0.24"
+        versionCode 25
+        versionName "1.0.25"
 
         multiDexEnabled = false
 
